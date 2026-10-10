@@ -3,6 +3,19 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [4.3.0] - Unreleased
+
+### Added
+- **Drum kits** (#3) — a **Kit** setting with six sounds: two real multi-sampled acoustic kits with velocity
+  layers, round-robins and hi-hat chokes — **Crocell** (rock, CC BY 4.0, the new default) and
+  **Virtuosity** (jazz, CC0), played by `assets/kits.js` — and four WebAudioFont GM kits (JCLive,
+  FluidR3 GM, Sound Blaster Live!, Chaos). `tools/build_sample_kit.py` rebuilds the sampled kits from their
+  source libraries.
+
+### Changed
+- The drum sounds are bundled in `assets/sounds/` (about 12 MB) instead of loading WebAudioFont from
+  surikov.github.io, so the synth works offline and loads nothing from third-party sites.
+
 ## [4.2.0] - Unreleased
 
 ### Added

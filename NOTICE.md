@@ -1,8 +1,8 @@
 # Licensing notice for the drums plugin
 
 Most of this plugin is original code under the **MIT** license (see `README.md`). That includes
-`screen.js`, `assets/session.js`, `assets/highway3d.js` (the 3D view), `plugin.json`, the other assets and the tests other than
-`tests/engine.test.js`.
+`screen.js`, `assets/session.js`, `assets/highway3d.js` (the 3D view), `assets/kits.js`, `tools/`, `plugin.json`, the other assets and the tests other than
+`tests/engine.test.js`. The bundled drum sounds have their own licences (below).
 
 Two files are ports of [YARG.Core](https://github.com/YARC-Official/YARG.Core) and are licensed under the
 **GNU Lesser General Public License v3.0** (full text in [`LICENSE.LGPL-3.0`](LICENSE.LGPL-3.0); the LGPL
@@ -23,3 +23,15 @@ both are compatible with feedBack's AGPL-3.0.
 
 The header of `assets/engine.js` lists every behaviour that deviates from YARG ("Deviations from YARG").
 The scoring look and feel imitates rhythm-game drum tracks but uses no artwork, fonts or logos from them.
+
+## Bundled drum sounds (`assets/sounds/`)
+
+| Files | License |
+|-------|---------|
+| `assets/sounds/WebAudioFontPlayer.js` | **GPL-3.0** (text in [`LICENSE.GPL-3.0`](LICENSE.GPL-3.0)). WebAudioFont player, unmodified, by Sergey Surikov (https://github.com/surikov/webaudiofont). A separate script the synth loads at runtime, only for the General MIDI kits; the rest of the plugin only calls its public `WebAudioFontPlayer` API. Its source is the file itself. |
+| `assets/sounds/128*_0_JCLive_sf2_file.js`, `128*_0_FluidR3_GM_sf2_file.js`, `128*_0_SBLive_sf2.js`, `128*_0_Chaos_sf2_file.js` | **MIT**. General MIDI drum samples (JCLive, FluidR3 GM, SB Live! and Chaos sets) from https://github.com/surikov/webaudiofontdata, unmodified. |
+| `assets/sounds/kits/crocell/*` | **CC BY 4.0** (https://creativecommons.org/licenses/by/4.0/). Derived from **CrocellKit 1.1** for DrumGizmo, stereo mix (`CrocellKit_Stereo_MIX.rar`, https://drumgizmo.org/wiki/doku.php?id=kits:crocellkit). Kit of the Danish band Crocell; kit setup by Andreas (Crocell, crocell.dk), mic setup by Jacob Olsen (JBOSound, jbosound.com), sampled, edited and prepared by Lars Muldjord / the DrumGizmo team (drumgizmo.org). **Changes:** a subset of hits (4 velocity layers x 2 per piece) picked, trimmed, faded, level-balanced and re-encoded to Ogg Vorbis by `tools/build_sample_kit.py`; some pieces are reused for other GM notes. |
+| `assets/sounds/kits/virtuosity/*` | **CC0 1.0** (public domain dedication, https://creativecommons.org/publicdomain/zero/1.0/). Derived from **Virtuosity Drums** by Versilian Studios and Karoryfer Samples, played by Austin McMahon (https://github.com/sfzinstruments/virtuosity_drums). Mixed from its overhead, kick and snare mics like the library's "basic kit", trimmed and re-encoded by `tools/build_sample_kit.py`; the mid tom is the high tom tuned down 4 semitones. Credit given as a courtesy. |
+
+When you use the plugin's drum sounds in a recording, CC BY 4.0 asks that the CrocellKit credit above goes
+with it.

@@ -15,7 +15,7 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 - **Auto-activate** — switches on automatically for Drums/Percussion arrangements
 - **MIDI drum pad input** — connect any MIDI drum pad, electronic kit, or controller via Web MIDI API
 - **Custom MIDI mapping** — "Learn" mode to assign any MIDI note to any lane, for non-standard drum pads
-- **Built-in drum sounds** — WebAudioFont-powered GM drum kit playback on MIDI hit
+- **Built-in drum sounds** — six kits, all bundled (works offline): two real multi-sampled acoustic kits with velocity layers, **Crocell** (rock, default) and **Virtuosity** (jazz), and four WebAudioFont GM kits (JCLive, FluidR3 GM, Sound Blaster Live!, Chaos). See [Drum kits](#drum-kits).
 - **Rock Band-style 3D drum track** (default with WebGL2) — four pad lanes and a kick bar, rectangle pad gems, domed cymbals, star power and fill highlighting, and a score HUD. See [3D view](#3d-view).
 - **Keyboard drumming** — play without a kit: B kick, F snare, J/K/L toms, U/I/O cymbals, Enter = star power.
 - **Rock Band-style scoring** — score, multiplier, streak, stars and star power from a port of the YARG drums engine (`assets/engine.js`). See [Scoring](#scoring).
@@ -143,6 +143,24 @@ as guitar notes — plays **Expert only, without star power**; everything else w
 - **Timing** (`drums_timing_v1`): Relaxed ±130 ms, Forgiving ±100 ms, Normal ±70 ms (YARG's default),
   Precision (YARG's dynamic window that tightens on fast notes).
 
+## Drum kits
+
+**Kit** in the settings panel (`drums_kit_v1`) picks the sound for pad hits and the auto notes; only the
+chosen kit is loaded.
+
+- **Crocell (rock)**, the default — a real sampled kit (CrocellKit, CC BY 4.0) with 4 velocity layers x 2
+  round-robins per piece, so soft and hard hits sound different and repeated hits don't sound identical; a
+  closed / pedal hi-hat cuts a ringing open hi-hat.
+- **Virtuosity (jazz)** — the same kind of kit (Virtuosity Drums, CC0).
+- **JCLive**, **FluidR3 GM**, **Sound Blaster Live!**, **Chaos** — WebAudioFont General MIDI kits, one
+  sample per note.
+
+Everything ships in `assets/sounds/` (about 12 MB, Ogg Vorbis for the sampled kits) and loads from core's
+plugin assets route, so nothing comes from a CDN and the kits work offline. The sampled kits are fetched and
+decoded when picked and play through plain `AudioBufferSourceNode`s for low latency. A missing kit folder
+falls back to JCLive. Sources, licences and the build script: `assets/sounds/README.md`, `NOTICE.md`,
+`tools/build_sample_kit.py`.
+
 ## Requirements
 
 - **Chrome or Edge** for MIDI drum pad input (Firefox does not support Web MIDI)
@@ -185,11 +203,13 @@ Click "Reset Map" to return to standard GM mapping.
 ## Development
 
 Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node tests/engine.test.js`,
-`node tests/session.test.js`, `node tests/highway3d.test.js`, `node tests/screen.test.js`.
+`node tests/session.test.js`, `node tests/highway3d.test.js`, `node tests/kits.test.js`,
+`node tests/screen.test.js`. `tools/build_sample_kit.py` rebuilds the sampled kits (needs numpy, scipy,
+soundfile and ffmpeg).
 
 ## License
 
-MIT, except `assets/engine.js` and `tests/engine.test.js`: they are ports of
+MIT, except the bundled sounds (see [Drum kits](#drum-kits) and NOTICE.md) and `assets/engine.js` / `tests/engine.test.js`: they are ports of
 [YARG.Core](https://github.com/YARC-Official/YARG.Core) and stay under the **LGPL-3.0**
 (`LICENSE.LGPL-3.0`, with the GPL-3.0 it builds on in `LICENSE.GPL-3.0`). The engine is a separate,
 replaceable file that the MIT code only calls through its public API. Details in [NOTICE.md](NOTICE.md).

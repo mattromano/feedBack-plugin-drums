@@ -1,6 +1,6 @@
 // Drum Highway visualization plugin — lane-based scrolling drum
 // renderer (Rock Band-style) with MIDI drum pad input, WebAudioFont
-// drum kit sounds, and Rock Band-style scoring.
+// and sampled drum kit sounds, and Rock Band-style scoring.
 //
 // Scoring: assets/engine.js (an LGPL-3.0 port of YARG.Core's drums
 // engine, see NOTICE.md) driven through assets/session.js (difficulty
@@ -101,6 +101,8 @@ const STORE_KEYS = {
     view:           'drums_view_v1',
     // Keyboard drumming (B F J K L U I O, Enter = star power), both views.
     keyboard:       'drums_kbd',
+    // Drum synth sound set (DRUM_KITS).
+    kit:            'drums_kit_v1',
 };
 
 // Valid preset ids — kept here so _saveCfg can validate before persisting
@@ -127,6 +129,24 @@ const TIMING_PRESETS = {
         maxWindow: 0.13, minWindow: 0.05, isDynamic: true, dynamicScale: 1, dynamicSlope: 0.60615, dynamicGamma: 2 } } },
 };
 const TIMING_IDS = ['relaxed', 'forgiving', 'normal', 'precision'];
+
+// Drum synth sound sets, all bundled in assets/sounds/ (works offline,
+// nothing loads from third-party sites; licences in NOTICE.md). type
+// 'samples': a real multi-sampled kit with velocity layers and
+// round-robins in assets/sounds/kits/<dir>/ (kit.json + Ogg Vorbis, built
+// by tools/build_sample_kit.py, played by assets/kits.js). The others are
+// WebAudioFont General MIDI kits (one sample per note). Only the chosen
+// kit is loaded.
+const DRUM_KITS = {
+    crocell:    { name: 'Crocell (rock)', type: 'samples', dir: 'crocell', note: 'real sampled rock kit, velocity layers (default)' },
+    virtuosity: { name: 'Virtuosity (jazz)', type: 'samples', dir: 'virtuosity', note: 'real sampled jazz kit, velocity layers' },
+    jclive: { name: 'JCLive', sf: 'JCLive_sf2_file', note: 'tight, dry GM rock kit' },
+    fluid:  { name: 'FluidR3 GM', sf: 'FluidR3_GM_sf2_file', note: 'full acoustic GM kit with room' },
+    sblive: { name: 'Sound Blaster Live!', sf: 'SBLive_sf2', note: 'punchy, bright GM kit' },
+    chaos:  { name: 'Chaos', sf: 'Chaos_sf2_file', note: 'lighter, softer GM kit' },
+};
+const KIT_IDS = ['crocell', 'virtuosity', 'jclive', 'fluid', 'sblive', 'chaos'];
+const DEFAULT_KIT = 'crocell';
 
 // Safe localStorage reader — getItem can throw SecurityError in
 // sandboxed iframes, under Safari on file://, or when storage is
@@ -214,6 +234,10 @@ const _cfg = {
         return _VALID_VIEWS.has(raw) ? raw : 'auto';
     })(),
     keyboard:       _readStore(STORE_KEYS.keyboard) !== 'false',
+    kit:            (function () {
+        const raw = _readStore(STORE_KEYS.kit);
+        return Object.prototype.hasOwnProperty.call(DRUM_KITS, raw) ? raw : DEFAULT_KIT;
+    })(),
     autoKick:       (function () {
         const raw = _readStore(STORE_KEYS.autoKick);
         return _VALID_AUTO_LEVELS.has(raw) ? raw : 'off';
@@ -260,6 +284,9 @@ function _saveCfg(key, val) {
     }
     if (key === 'timing' && !Object.prototype.hasOwnProperty.call(TIMING_PRESETS, val)) {
         val = 'normal';
+    }
+    if (key === 'kit' && !Object.prototype.hasOwnProperty.call(DRUM_KITS, val)) {
+        val = DEFAULT_KIT;
     }
     if (key === 'autoVolume' || key === 'synthVolume') {
         const n = Number(val);
@@ -363,6 +390,11 @@ function _timingOptions(current) {
     const names = {};
     for (const id of TIMING_IDS) names[id] = TIMING_PRESETS[id].name;
     return _optList(TIMING_IDS, names, current);
+}
+function _kitOptions(current) {
+    const names = {};
+    for (const id of KIT_IDS) names[id] = DRUM_KITS[id].name;
+    return _optList(KIT_IDS, names, current);
 }
 
 const _SEL_CSS = 'background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:11px;color:#ccc;outline:none;';
@@ -627,7 +659,7 @@ function _loadScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.2.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.3.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -706,65 +738,154 @@ function _resolveView(view, canWebGL2) {
 // WebAudioFont drum kit synthesizer (module-level — one audio context per tab)
 // ═══════════════════════════════════════════════════════════════════════
 
-const WAF_BASE = 'https://surikov.github.io/webaudiofontdata/sound/';
-const WAF_PLAYER_URL = 'https://surikov.github.io/webaudiofont/npm/dist/WebAudioFontPlayer.js';
-const WAF_SF = 'JCLive_sf2_file';
+// Bundled in assets/sounds/ (served by core's plugin assets route), so the
+// synth works offline. Same files as surikov.github.io/webaudiofont(data);
+// see assets/sounds/README.md.
+const SOUNDS_BASE = PLUGIN_ASSETS + 'sounds/';
+const WAF_PLAYER_URL = SOUNDS_BASE + 'WebAudioFontPlayer.js';
+function _kitSf(kitId) {
+    const k = DRUM_KITS[kitId];
+    return (k && k.sf) || DRUM_KITS.jclive.sf;
+}
+function _kitIsSampled(kitId) { const k = DRUM_KITS[kitId]; return !!(k && k.type === 'samples'); }
+function _kitBaseUrl(dir) { return SOUNDS_BASE + 'kits/' + dir + '/'; }
 
-// MIDI notes that the WebAudioFont synth preloads samples for. Includes
+// MIDI notes that the synth preloads samples for. Includes
 // all notes that appear in any LANE_PRESETS midiNotes array so that
 // hits on cross-stick (37), china/splash cymbals (52/55), ride bell (53),
 // and alternate tom3 (58) produce audio rather than scoring silently.
 const DRUM_MIDI_NOTES = [35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59];
 
-function _drumWafVar(note)  { return '_drum_' + note + '_0_' + WAF_SF; }
-function _drumWafUrl(note)  { return WAF_BASE + '128' + note + '_0_' + WAF_SF + '.js'; }
+function _drumWafVar(note, sf)  { return '_drum_' + note + '_0_' + sf; }
+function _drumWafUrl(note, sf)  { return SOUNDS_BASE + '128' + note + '_0_' + sf + '.js'; }
+
+// ── Sampled kits (assets/kits.js) ──
+let _kitsLibPromise = null;
+function _loadKitsLib() {
+    if (window.DrumsKits) return Promise.resolve(window.DrumsKits);
+    if (_kitsLibPromise) return _kitsLibPromise;
+    _kitsLibPromise = _loadScript(PLUGIN_ASSETS + 'kits.js?v=' + ASSET_VERSION).then(() => {
+        if (!window.DrumsKits) throw new Error('kits.js did not register');
+        return window.DrumsKits;
+    }).catch((e) => { _kitsLibPromise = null; throw e; });
+    return _kitsLibPromise;
+}
+
+const _sampleKits = {};       // kitId -> { kit: {manifest, buffers} | null, promise }
+let _sampleKit = null;        // the loaded sampled kit in use (null = WebAudioFont kit)
+let _kitPlayer = null;        // DrumsKits.createPlayer(_audioCtx)
+
+// Fetch + decode one sampled kit (once; later calls share the promise).
+function _loadSampleKit(kitId) {
+    if (_sampleKits[kitId]) return _sampleKits[kitId].promise;
+    const entry = { kit: null, promise: null };
+    entry.promise = _loadKitsLib().then((K) => {
+        const dir = (DRUM_KITS[kitId] && DRUM_KITS[kitId].dir) || '';
+        if (!K.KIT_DIR_RE.test(dir)) throw new Error('bad kit folder');
+        if (!_kitPlayer) _kitPlayer = K.createPlayer(_audioCtx);
+        return K.loadKit(_audioCtx, _kitBaseUrl(dir), '?v=' + ASSET_VERSION);
+    }).then((kit) => {
+        entry.kit = kit;
+        return kit;
+    }).catch((e) => { delete _sampleKits[kitId]; throw e; });
+    _sampleKits[kitId] = entry;
+    return entry.promise;
+}
+
+// Decoded kits take ~100 MB each: keep only the one in use (voices still
+// playing keep their own buffers until they end).
+function _dropSampleKitsExcept(kitId) {
+    for (const id of Object.keys(_sampleKits)) {
+        if (id !== kitId && _sampleKits[id].kit) delete _sampleKits[id];
+    }
+}
 
 async function _synthInit() {
-    if (_synthPlayer) return;
+    if (_audioCtx) return;
     try {
-        if (!_playerScriptLoaded) {
-            await _loadScript(WAF_PLAYER_URL);
-            _playerScriptLoaded = true;
-        }
-        if (typeof WebAudioFontPlayer === 'undefined') return;
-
-        _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        _audioCtx = new AC({ latencyHint: 'interactive' });
         _synthGain = _audioCtx.createGain();
         _synthGain.gain.value = _cfg.synthVolume;
         _synthGain.connect(_audioCtx.destination);
         _autoGain = _audioCtx.createGain();
         _autoGain.gain.value = _cfg.autoVolume;
         _autoGain.connect(_audioCtx.destination);
-        _synthPlayer = new WebAudioFontPlayer();
-
         await _synthLoadDrumKit();
     } catch (e) {
         console.warn('[Drums] Synth init failed:', e);
     }
 }
 
-async function _synthLoadDrumKit() {
-    if (!_synthPlayer || !_audioCtx) return;
-    _synthLoading = true;
+// The WebAudioFont player, loaded only when a GM kit is used.
+async function _ensureWafPlayer() {
+    if (_synthPlayer) return true;
+    if (!_playerScriptLoaded) {
+        await _loadScript(WAF_PLAYER_URL);
+        _playerScriptLoaded = true;
+    }
+    if (typeof WebAudioFontPlayer === 'undefined') return false;
+    _synthPlayer = new WebAudioFontPlayer();
+    return true;
+}
 
-    const promises = DRUM_MIDI_NOTES.map(async (note) => {
-        const varName = _drumWafVar(note);
+let _kitLoadSeq = 0;
+async function _synthLoadDrumKit() {
+    if (!_audioCtx) return;
+    _synthLoading = true;
+    const seq = ++_kitLoadSeq;
+    const kitId = _cfg.kit;
+    try {
+        if (_kitIsSampled(kitId)) {
+            try {
+                const kit = await _loadSampleKit(kitId);
+                if (seq === _kitLoadSeq) {
+                    _sampleKit = kit;
+                    _dropSampleKitsExcept(kitId);
+                }
+                return;
+            } catch (e) {
+                // Missing / broken kit folder: fall back to the GM kit so pads still sound.
+                console.warn('[Drums] Sampled kit ' + kitId + ' failed, using JCLive:', e);
+                if (seq !== _kitLoadSeq) return;
+            }
+        }
+        if (!(await _ensureWafPlayer())) return;
+        await _loadWafKit(_kitSf(kitId), seq);
+        if (seq === _kitLoadSeq) {
+            _sampleKit = null;
+            _dropSampleKitsExcept(null);
+        }
+    } catch (e) {
+        console.warn('[Drums] Kit load failed:', e);
+    } finally {
+        if (seq === _kitLoadSeq) _synthLoading = false;
+    }
+}
+
+async function _loadWafKit(sf, seq) {
+    const loaded = {};
+    await Promise.all(DRUM_MIDI_NOTES.map(async (note) => {
+        const varName = _drumWafVar(note, sf);
         try {
             if (!window[varName]) {
-                await _loadScript(_drumWafUrl(note));
+                await _loadScript(_drumWafUrl(note, sf));
             }
             const preset = window[varName];
             if (preset) {
-                _synthPlayer.adjustPreset(_audioCtx, preset);
-                _drumPresets[note] = preset;
+                if (!preset.__drumsAdjusted) {
+                    _synthPlayer.adjustPreset(_audioCtx, preset);
+                    preset.__drumsAdjusted = true;
+                }
+                loaded[note] = preset;
             }
         } catch (e) {
             console.warn('[Drums] Failed to load drum note ' + note + ':', e);
         }
-    });
-
-    await Promise.all(promises);
-    _synthLoading = false;
+    }));
+    // A newer kit pick supersedes this load: keep its sounds.
+    if (seq === _kitLoadSeq) Object.assign(_drumPresets, loaded);
 }
 
 function _synthEnsureCtx() {
@@ -776,16 +897,20 @@ function _synthEnsureCtx() {
 // One drum sound at `when` (AudioContext time; 0 = now). dest: the output
 // bus (default: the pad bus _synthGain; _autoGain for auto-played notes).
 function _synthPlayNote(midiNote, velocity, when, dest) {
-    if (!_synthPlayer || !_audioCtx || !_synthGain) return;
-    const preset = _drumPresets[midiNote];
-    if (!preset) return;
+    if (!_audioCtx || !_synthGain) return;
     dest = dest || _synthGain;
+    if (_sampleKit && _kitPlayer) {
+        _kitPlayer.play(_sampleKit, midiNote, velocity, when, dest);
+        return;
+    }
+    const preset = _drumPresets[midiNote];
+    if (!preset || !_synthPlayer) return;
     _synthPlayer.queueWaveTable(_audioCtx, dest, preset, when || 0, midiNote, when ? 0.6 : 0.5,
         (velocity / 127) * (dest === _synthGain ? _cfg.synthVolume : 1));
 }
 
 function _synthDrumHit(midiNote, velocity) {
-    if (!_synthPlayer || !_audioCtx || !_synthGain) return;
+    if (!_audioCtx || !_synthGain) return;
     _synthEnsureCtx();
     _synthPlayNote(midiNote, velocity, 0);
 }
@@ -796,6 +921,13 @@ function _synthSetVolume(vol) {
     try {
         document.querySelectorAll('.drums-vol-slider').forEach((el) => { el.value = String(Math.round(_cfg.synthVolume * 100)); });
     } catch (_) { /* no DOM */ }
+}
+
+// Switch the synth's sound set. Loads only the picked kit (lazily, once).
+async function _synthSetKit(kitId) {
+    _saveCfg('kit', kitId);
+    try { document.querySelectorAll('.drums-kit-select').forEach((sel) => { sel.value = _cfg.kit; }); } catch (_) { /* no DOM */ }
+    if (_audioCtx) await _synthLoadDrumKit();
 }
 
 function _setAutoVolume(vol) {
@@ -2410,6 +2542,11 @@ function createFactory(forceView) {
                     <input type="range" class="drums-autovol-slider" min="0" max="100"
                         value="${Math.round(_cfg.autoVolume * 100)}" style="width:70px;accent-color:#ef4444;height:14px;">
                 </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Drum sounds played when you hit a pad (and for the auto notes). Only the chosen kit is loaded.">
+                    Kit
+                    <select class="drums-kit-select" aria-label="Drum kit sound" style="${_SEL_CSS}width:130px;">${_kitOptions(_cfg.kit)}</select>
+                </label>
             </div>
             <details style="margin-top:2px;">
                 <summary style="font-size:10px;color:#666;cursor:pointer;">MIDI Mapping</summary>
@@ -2504,6 +2641,7 @@ function createFactory(forceView) {
         panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
         panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
         panel.querySelector('.drums-autovol-slider').oninput = function () { _setAutoVolume(parseInt(this.value, 10) / 100); };
+        panel.querySelector('.drums-kit-select').onchange = function () { _synthSetKit(this.value); };
 
         _wireLearnButtons(panel);
     }
@@ -3374,6 +3512,7 @@ if (typeof module !== 'undefined' && module.exports) {
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
         _resolveView, _VALID_VIEWS,
+        DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
