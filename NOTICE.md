@@ -1,7 +1,7 @@
 # Licensing notice for the drums plugin
 
 Most of this plugin is original code under the **MIT** license (see `README.md`). That includes
-`screen.js`, `assets/session.js`, `plugin.json`, the other assets and the tests other than
+`screen.js`, `assets/session.js`, `assets/highway3d.js` (the 3D view), `plugin.json`, the other assets and the tests other than
 `tests/engine.test.js`.
 
 Two files are ports of [YARG.Core](https://github.com/YARC-Official/YARG.Core) and are licensed under the
@@ -14,7 +14,7 @@ builds on the GNU GPL v3.0, whose text is in [`LICENSE.GPL-3.0`](LICENSE.GPL-3.0
 | `tests/engine.test.js` | LGPL-3.0. Tests for `engine.js`, partly ported from `YARG.Core.UnitTests/Engine/DrumEngineTester.cs` and `DrumsStatsTests.cs`. |
 
 `assets/engine.js` is a standalone, unminified script with no dependencies, shipped as its own file and
-loaded at runtime. `screen.js` and `assets/session.js` only use it through its public API
+loaded at runtime. `screen.js`, `assets/session.js` and `assets/highway3d.js` only use it through its public API
 (`window.DrumsEngine` / `require('./engine.js')`), so they remain separate MIT works that use the Library
 as described in LGPL-3.0 section 4 ("Combined Works"). You may replace `assets/engine.js` with a modified
 version. A modified `assets/engine.js` that you distribute is conveyed under LGPL-3.0 or, as LGPL-3.0

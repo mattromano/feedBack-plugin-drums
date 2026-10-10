@@ -7,6 +7,12 @@
 // levels, star power, assists, bonuses). Both load lazily as plain
 // scripts on first use; this file only uses their public APIs.
 //
+// Views: each renderer instance is either the 2D lane view below or the
+// Rock Band-style 3D drum track (assets/highway3d.js on core's vendored
+// three.js), picked from the View setting when the instance is created
+// (Auto = 3D with WebGL2). Both share the MIDI routing, keyboard input,
+// synth, scoring session, difficulty UI and settings panel in this file.
+//
 // Wave C (slopsmith#36): per-instance refactor. Earlier Wave B
 // landed setRenderer support with an explicit single-instance
 // module-state assumption. Wave C lifts that: rendering, scoring,
@@ -95,6 +101,10 @@ const STORE_KEYS = {
     // MIDI note of the pad that activates star power on charts without
     // drum fills (-1 = none; the Enter key always works).
     spPad:          'drums_sp_pad_v1',
+    // View: 'auto' (3D when WebGL2 is available, else 2D) | '3d' | '2d'.
+    view:           'drums_view_v1',
+    // Keyboard drumming (B F J K L U I O), both views.
+    keyboard:       'drums_kbd',
 };
 
 // Pads offered for star power activation: notes the engine does not score
@@ -111,6 +121,7 @@ const SP_PAD_CHOICES = [
 // (drums_lane_preset_v1 is user-controlled, like every other storage key
 // in this plugin).
 const _VALID_LANE_PRESETS = new Set(['phase_shift_8', 'rb4']);
+const _VALID_VIEWS = new Set(['auto', '3d', '2d']);
 // Same ids as DrumsSession.DIFFICULTIES (session.js loads lazily).
 const DIFFICULTY_IDS = ['easy', 'medium', 'hard', 'expert', 'expert_plus'];
 const DIFFICULTY_NAMES = { easy: 'Easy', medium: 'Medium', hard: 'Hard', expert: 'Expert', expert_plus: 'Expert+' };
@@ -213,6 +224,11 @@ const _cfg = {
         return _VALID_DIFFICULTIES.has(raw) ? raw : 'expert';
     })(),
     proCymbals:     _readStore(STORE_KEYS.proCymbals) !== 'false',
+    view:           (function () {
+        const raw = _readStore(STORE_KEYS.view);
+        return _VALID_VIEWS.has(raw) ? raw : 'auto';
+    })(),
+    keyboard:       _readStore(STORE_KEYS.keyboard) !== 'false',
     autoKick:       (function () {
         const raw = _readStore(STORE_KEYS.autoKick);
         return _VALID_AUTO_LEVELS.has(raw) ? raw : 'off';
@@ -247,6 +263,9 @@ function _saveCfg(key, val) {
     }
     if (key === 'lanePreset' && !_VALID_LANE_PRESETS.has(val)) {
         val = 'phase_shift_8';
+    }
+    if (key === 'view' && !_VALID_VIEWS.has(val)) {
+        val = 'auto';
     }
     if (key === 'difficulty' && !_VALID_DIFFICULTIES.has(val)) {
         val = 'expert';
@@ -681,7 +700,8 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.1.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.2.0';   // cache-buster for the lazily loaded files
+const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
 let _scoringPromise = null;
@@ -704,6 +724,64 @@ function _loadScoring() {
         throw e;
     });
     return _scoringPromise;
+}
+
+// highway3d.js (keyboard helpers + the 3D view; needs session.js). One
+// shared promise: the 2D view loads it for the keyboard helpers and the 3D
+// view for the scene, and _loadScript resolves early for a <script> tag
+// that is already in the page, so two loaders must not race on it.
+let _viewScriptPromise = null;
+function _loadViewScript() {
+    if (window.DrumsHighway3D) return Promise.resolve(window.DrumsHighway3D);
+    if (_viewScriptPromise) return _viewScriptPromise;
+    _viewScriptPromise = _loadScoring()
+        .then(() => (window.DrumsHighway3D ? null : _loadScript(PLUGIN_ASSETS + 'highway3d.js?v=' + ASSET_VERSION)))
+        .then(() => {
+            if (!window.DrumsHighway3D) throw new Error('highway3d.js did not register');
+            return window.DrumsHighway3D;
+        })
+        .catch((e) => {
+            // Drop a highway3d.js element that loaded without registering,
+            // so the retry loads it again (a failed load removes its own).
+            if (!window.DrumsHighway3D) _dropScript(PLUGIN_ASSETS + 'highway3d.js?v=' + ASSET_VERSION);
+            _viewScriptPromise = null;
+            throw e;
+        });
+    return _viewScriptPromise;
+}
+
+// The 3D view: three.js (core's vendored ES module, the copy the bundled 3D
+// guitar highway imports), the scoring modules and highway3d.js.
+let _libsPromise = null;
+function _load3DLibs() {
+    if (_libsPromise) return _libsPromise;
+    _libsPromise = Promise.all([import(THREE_URL), _loadScoring(), _loadViewScript()])
+        .then(([THREE, sc, V]) => ({ THREE, E: sc.E, H: sc.H, V }))
+        .catch((e) => {
+            _libsPromise = null;   // allow a retry on the next init
+            throw e;
+        });
+    return _libsPromise;
+}
+
+let _webgl2Probe = null;
+function _canWebGL2() {
+    if (_webgl2Probe !== null) return _webgl2Probe;
+    try {
+        const c = document.createElement('canvas');
+        const gl = c.getContext('webgl2');
+        _webgl2Probe = !!gl;
+        const ext = gl && gl.getExtension && gl.getExtension('WEBGL_lose_context');
+        if (ext && ext.loseContext) ext.loseContext();
+    } catch (_) { _webgl2Probe = false; }
+    return _webgl2Probe;
+}
+
+// Which view a new renderer instance uses: the setting, with '3d' and
+// 'auto' falling back to 2D when WebGL2 is unavailable.
+function _resolveView(view, canWebGL2) {
+    if (view === '2d') return '2d';
+    return canWebGL2 ? '3d' : '2d';
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1465,8 +1543,16 @@ function _timeToY(dt, nowLineY, topY) {
 // Factory — slopsmith#36 setRenderer contract (multi-instance)
 // ═══════════════════════════════════════════════════════════════════════
 
-function createFactory() {
+function createFactory(forceView) {
     const _instanceId = ++_nextInstanceId;
+
+    // '2d' = the lane renderer, '3d' = the WebGL drum track from
+    // highway3d.js. Fixed for this instance's lifetime because highway.js
+    // reads contextType before init(); a View change installs a fresh
+    // instance instead.
+    const _view = (forceView === '2d' || forceView === '3d')
+        ? (forceView === '3d' && !_canWebGL2() ? '2d' : forceView)
+        : _resolveView(_cfg.view, _canWebGL2());
 
     // Lifecycle
     let _isReady = false;
@@ -1550,6 +1636,15 @@ function createFactory() {
     let _onDiffKey = null, _onMenuOutside = null;
     let _onVisibility = null, _onCanvasReplaced = null, _onSongEnded = null;
     let _hwVisible = true;
+    let _onKeyDown = null;
+    let _V = null;                  // DrumsHighway3D (keyboard helpers + 3D view factory) once loaded
+
+    // ── 3D view state (only used when _view === '3d') ──
+    let _view3d = null;             // _V.createView(...)
+    let _hudCanvas = null;          // 2D overlay (HUD + core draw hooks)
+    let _initToken = 0;             // supersedes in-flight async inits
+    let _renderScale = 1;
+    let _lastHwW = 0, _lastHwH = 0;
     let _auto = { kick: false, cymbals: false };   // auto lanes for the difficulty in use
     // Auto notes (kick / cymbals) are played so a muted drum stem doesn't
     // leave holes: see _autoSchedule (module level, shared by all views).
@@ -1572,6 +1667,127 @@ function createFactory() {
         const t = _frameClock ? _frameClock.at(at) : NaN;
         if (Number.isFinite(t)) return t;
         return Number.isFinite(_frameT) ? _frameT : (+_latestTime || 0);
+    }
+
+    function _positionHud() {
+        if (!_hudCanvas || !_highwayCanvas) return;
+        _hudCanvas.style.left = _highwayCanvas.offsetLeft + 'px';
+        _hudCanvas.style.top = _highwayCanvas.offsetTop + 'px';
+    }
+
+    function _resize3D() {
+        if (!_view3d || !_highwayCanvas) return;
+        const rect = _highwayCanvas.getBoundingClientRect();
+        const w = rect.width || _highwayCanvas.clientWidth;
+        const h = rect.height || _highwayCanvas.clientHeight;
+        if (!w || !h) return;
+        const base = Math.min(window.devicePixelRatio || 1, _ssActive() ? 1.25 : 2);
+        _view3d.resize(w, h, base * (_renderScale || 1));
+        _positionHud();
+        _lastHwW = _highwayCanvas.width;
+        _lastHwH = _highwayCanvas.height;
+    }
+
+    // Keyboard drumming (both views; capture phase, so drum keys don't
+    // reach other shortcuts while this view is focused and Keys is on).
+    // Space is deliberately not a drum key: it stays play/pause.
+    function _wireKeyboard() {
+        if (_onKeyDown) return;
+        _loadViewScript().then((V) => { if (!_instanceDestroyed) _V = V; })
+            .catch((e) => console.warn('[Drums] keyboard input unavailable:', e));
+        _onKeyDown = (e) => {
+            if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_cfg.keyboard) return;
+            if (!_V || !_h || !_session) return;
+            if (_h.isTypingTarget(e.target) || _h.isTypingTarget(document.activeElement)) return;
+            const m = _V.keyToPad(e);
+            // Enter: the star power key (_wireStarPowerKey), which only takes
+            // it when star power can be activated by hand.
+            if (!m || m.action === 'activate') return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (e.repeat) return;
+            _synthInit();
+            _synthDrumHit(_V.synthMidiForPad(m.pad, m.cymbal), 100);
+            const r = _session.hit(_inputTime(), m.pad, { cymbal: m.cymbal });
+            if (_view !== '3d' && r && r.type === 'overhit') {
+                const lane = _padLane2D(m.pad, m.cymbal);
+                if (lane >= 0) _wrongFlashes.push({ lane, wall: performance.now() });
+            }
+        };
+        window.addEventListener('keydown', _onKeyDown, true);
+    }
+
+    // The 2D lane a keyboard pad lands in (for the wrong-hit flash).
+    function _padLane2D(pad, cymbal) {
+        const midi = _V ? _V.synthMidiForPad(pad, cymbal) : null;
+        return midi == null ? -1 : _midiToLaneIdx(midi);
+    }
+
+    // 3D init: claim the webgl2 context and mount the HUD overlay
+    // (synchronously), then load the modules and build the scene. Returns
+    // the readyPromise, or null on failure.
+    function _begin3D(canvas) {
+        let gl = null;
+        try { gl = canvas.getContext('webgl2', { antialias: true, alpha: false }); } catch (_) { gl = null; }
+        if (!gl) return null;
+        _hudCanvas = document.createElement('canvas');
+        _hudCanvas.className = 'drums3d-hud';
+        _hudCanvas.dataset.drumsInstance = String(_instanceId);
+        _hudCanvas.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;z-index:2;';
+        if (canvas.parentNode) canvas.parentNode.insertBefore(_hudCanvas, canvas.nextSibling);
+        _hwVisible = canvas.offsetParent !== null;
+        _hudCanvas.style.display = _hwVisible ? '' : 'none';
+
+        const token = ++_initToken;
+        return _load3DLibs().then((libs) => {
+            if (token !== _initToken || _instanceDestroyed) throw new Error('superseded');
+            _V = libs.V;
+            _view3d = libs.V.createView(libs.THREE, canvas, { hudCanvas: _hudCanvas, context: gl });
+            _resize3D();
+            if (!_lastHwW) {
+                // Panel not laid out yet (splitscreen sizes after init).
+                (function retry() {
+                    if (token !== _initToken || _instanceDestroyed || !_view3d) return;
+                    _resize3D();
+                    if (!_lastHwW) requestAnimationFrame(retry);
+                })();
+            }
+        });
+    }
+
+    function _teardown3D() {
+        _initToken++;
+        if (_view3d) { try { _view3d.dispose(); } catch (e) { console.warn('[Drums] 3D dispose failed:', e); } }
+        _view3d = null;
+        if (_hudCanvas) { _hudCanvas.remove(); _hudCanvas = null; }
+        _lastHwW = _lastHwH = 0;
+    }
+
+    // t: this frame's highway time (_frameClock: smoothed between audio
+    // samples, so gems move evenly). message: draw it instead of the chart
+    // (not a drum part).
+    function _draw3D(bundle, isReady, t, message) {
+        if (!_view3d) return;   // modules still loading
+        const nextScale = bundle.renderScale || 1;
+        if (nextScale !== _renderScale) { _renderScale = nextScale; _resize3D(); }
+        else if (_highwayCanvas && (_highwayCanvas.width !== _lastHwW || _highwayCanvas.height !== _lastHwH)) _resize3D();
+        const wall = _now();
+        if (message || !isReady || !_session) {
+            _view3d.render({ time: t, session: null, wallNow: wall, message: message || 'Loading drums...' });
+            _placeBadge(null);
+            _placeTimingBtn(null);
+            return;
+        }
+        const hint = _h.starPowerHint(_session.meta, _session.getState(), _spPadName());
+        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge,
+            inputOffsetMs: _cfg.inputOffsetMs });
+        _placeBadge(_view3d.difficultyRect);
+        _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
+        const hctx = _view3d.hudContext;
+        if (hctx && window.highway && typeof window.highway.fireDrawHooks === 'function') {
+            const sz = _view3d.size;
+            try { window.highway.fireDrawHooks(hctx, sz.w, sz.h); } catch (_) { /* hooks are best-effort */ }
+        }
     }
 
     // Load engine.js + session.js and build this instance's scoring session.
@@ -1599,6 +1815,7 @@ function createFactory() {
         _onVisibility = (e) => {
             if (!e || !e.detail || e.detail.canvas !== _highwayCanvas) return;
             _hwVisible = e.detail.visible !== false;
+            if (_hudCanvas) _hudCanvas.style.display = _hwVisible ? '' : 'none';
             if (!_hwVisible) { _placeBadge(null); _placeTimingBtn(null); _toggleDiffMenu(false); }
         };
         _onCanvasReplaced = (e) => {
@@ -1767,13 +1984,14 @@ function createFactory() {
             b.blur();   // keep Space = play/pause rather than "click the badge again"
             _toggleDiffMenu();
         };
-        _highwayCanvas.parentNode.insertBefore(b, _highwayCanvas.nextSibling);
+        const after = _hudCanvas || _highwayCanvas;
+        after.parentNode.insertBefore(b, after.nextSibling);
         _badgeBtn = b;
         _diffUiKey = '';
         _refreshDifficultyUI();
     }
 
-    // rect: the badge in canvas css px (from the HUD draw), or null to hide.
+    // rect: the badge in canvas css px (from the 2D draw / 3D HUD), or null to hide.
     function _placeBadge(rect) {
         if (!_badgeBtn) return;
         if (!rect || !_hwVisible || !_highwayCanvas) {
@@ -2134,10 +2352,12 @@ function createFactory() {
                 return;
             }
             // The engine scores: a Learn/custom mapping entry wins, else GM.
+            // (The 3D view always uses the 4-lane pro layout; the 2D lane
+            // presets only change how notes are drawn.)
             const m = _h.midiToPad(midiNote, _cfg.customMapping, _E.padFromMidi);
             if (m) {
                 const r = _session.hit(_inputTime(ts), m.pad, { cymbal: m.cymbal, velocity: _engineVelocity(velocity) });
-                if (r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
+                if (_view !== '3d' && r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
             }
             return;
         }
@@ -2418,6 +2638,23 @@ function createFactory() {
             </div>
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
                 <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="3D drum track (needs WebGL2) or the 2D lane view. Auto picks 3D when WebGL2 is available.">
+                    View
+                    <select class="drums-view-select" aria-label="Drum view" style="${_SEL_CSS}width:82px;">
+                        <option value="auto"${_cfg.view === 'auto' ? ' selected' : ''}>Auto</option>
+                        <option value="3d"${_cfg.view === '3d' ? ' selected' : ''}>3D</option>
+                        <option value="2d"${_cfg.view === '2d' ? ' selected' : ''}>2D</option>
+                    </select>
+                </label>
+                <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;"
+                    title="Play with the keyboard: B kick, F red, J/K/L yellow/blue/green, Shift or U/I/O for cymbals, Enter = star power.">
+                    <input type="checkbox" class="drums-chk-keys" ${_cfg.keyboard ? 'checked' : ''}
+                        style="accent-color:#3b82f6;"> Keys
+                </label>
+                <span class="drums-view-note" style="font-size:10px;color:#666;">${_view === '3d' ? '3D view active' : '2D view active'}</span>
+            </div>
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
                     title="Drum difficulty, saved in this browser. Expert+ adds the double-kick notes. Easy/Medium/Hard need a chart that has them; otherwise the song plays Expert. While playing: click the difficulty badge, or press D (harder) / Shift+D (easier).">
                     Difficulty
                     <select class="drums-difficulty-select" aria-label="Drum difficulty" style="${_SEL_CSS}width:128px;">
@@ -2525,6 +2762,25 @@ function createFactory() {
             _midiUpdateAllDeviceLists();
         };
 
+        panel.querySelector('.drums-view-select').onchange = function () {
+            _saveCfg('view', this.value);
+            document.querySelectorAll('.drums-view-select').forEach(sel => { sel.value = _cfg.view; });
+            // Main player: swap in a renderer for the new view right away
+            // (contextType is fixed per instance). Splitscreen panels pick
+            // it up the next time their renderer is created.
+            const want = _resolveView(_cfg.view, _canWebGL2());
+            const hw = window.highway;
+            if (want !== _view && !_ssActive() && _highwayCanvas && _highwayCanvas.id === 'highway'
+                && hw && typeof hw.setRenderer === 'function') {
+                setTimeout(() => {
+                    if (_instances.has(instance)) hw.setRenderer(createFactory());
+                }, 0);
+            }
+        };
+        panel.querySelector('.drums-chk-keys').onchange = function () {
+            _saveCfg('keyboard', this.checked);
+            document.querySelectorAll('.drums-chk-keys').forEach(el => { el.checked = _cfg.keyboard; });
+        };
         panel.querySelector('.drums-chk-pro').onchange = function () {
             _setProCymbals(this.checked);
         };
@@ -2561,6 +2817,7 @@ function createFactory() {
     // to re-apply this — see the renderer contract below.
 
     function _applyCanvasDims() {
+        if (_view === '3d') { _resize3D(); return; }
         if (!_drumCanvas || !_drumCtx) return;
         const rect = _drumCanvas.getBoundingClientRect();
         const w = rect.width;
@@ -3175,8 +3432,10 @@ function createFactory() {
         }
         _drumCanvas = null;
         _drumCtx = null;
+        if (_onKeyDown) { window.removeEventListener('keydown', _onKeyDown, true); _onKeyDown = null; }
         _removeDifficultyUI();
         _unwireBus();
+        _teardown3D();
         _highwayCanvas = null;
         _hwVisible = true;
         _session = null;
@@ -3206,6 +3465,10 @@ function createFactory() {
     // ── Factory return: setRenderer contract ──
 
     const instance = {
+        // highway.js reads this before init() and swaps the <canvas>
+        // element when it differs from the current context type.
+        contextType: _view === '3d' ? 'webgl2' : '2d',
+        view: _view,
         init(canvas /* , bundle */) {
             // Defensive teardown if a prior init wasn't paired with
             // destroy. Remove listeners, restore canvas, release
@@ -3217,7 +3480,7 @@ function createFactory() {
             // orphaned in the set, making _instances.size checks
             // inaccurate and preventing _midiPauseHandler from
             // ever running.
-            if (_drumCanvas || _isReady) {
+            if (_drumCanvas || _hudCanvas || _isReady) {
                 window.removeEventListener('resize', _onWinResize);
                 if (_focusSubscribed) {
                     const ss = window.slopsmithSplitscreen;
@@ -3248,14 +3511,33 @@ function createFactory() {
             // overlay, no display:none on the highway canvas, no
             // visibility-override workaround.
             _highwayCanvas = canvas;
-            _drumCanvas = canvas;
-            _drumCtx = canvas ? canvas.getContext('2d') : null;
-            if (!_drumCanvas || !_drumCtx) {
-                console.warn('[Drums] init: 2D context unavailable on highway canvas; aborting');
-                _drumCanvas = null;
-                _drumCtx = null;
-                _highwayCanvas = null;
-                return;
+            if (_view === '3d') {
+                // Async-ready contract (feedBack#36 readyPromise): highway.js
+                // reverts to its default renderer if this rejects.
+                const ready = canvas ? _begin3D(canvas) : null;
+                if (!ready) {
+                    console.warn('[Drums] init: webgl2 context unavailable on highway canvas; aborting 3D view');
+                    _teardown3D();
+                    _highwayCanvas = null;
+                    this.readyPromise = Promise.reject(new Error('webgl2 unavailable'));
+                    this.readyPromise.catch(() => {});
+                    return;
+                }
+                this.readyPromise = ready;
+                ready.catch((e) => {
+                    if (e && e.message === 'superseded') return;
+                    console.error('[Drums] 3D view failed to start:', e);
+                });
+            } else {
+                _drumCanvas = canvas;
+                _drumCtx = canvas ? canvas.getContext('2d') : null;
+                if (!_drumCanvas || !_drumCtx) {
+                    console.warn('[Drums] init: 2D context unavailable on highway canvas; aborting');
+                    _drumCanvas = null;
+                    _drumCtx = null;
+                    _highwayCanvas = null;
+                    return;
+                }
             }
 
             _injectSettingsGear();
@@ -3265,6 +3547,7 @@ function createFactory() {
             _ensureBadge();
             _wireDifficultyKey();
             _wireStarPowerKey();
+            _wireKeyboard();
 
             const ss = window.slopsmithSplitscreen;
             // Subscribe only when splitscreen is FULLY supported and
@@ -3368,7 +3651,8 @@ function createFactory() {
                 _autoRelease(_instanceId);
                 _placeBadge(null);
                 _placeTimingBtn(null);
-                _draw([], [], t, bundle.beats, _noDrumsMessage(bundle.songInfo));
+                if (_view === '3d') _draw3D(bundle, isReady, t, _noDrumsMessage(bundle.songInfo));
+                else _draw([], [], t, bundle.beats, _noDrumsMessage(bundle.songInfo));
                 return;
             }
             if (isReady) {
@@ -3385,9 +3669,15 @@ function createFactory() {
             if (isReady) {
                 _scheduleAutoSounds(drumNotes, drumChords);
                 _syncSession(bundle, drumNotes, drumChords, t);
-                _drainSessionEvents();
+                // The 3D view reads the session's events itself (flashes, sparks).
+                if (_view !== '3d') _drainSessionEvents();
             } else {
                 _autoRelease(_instanceId);
+            }
+
+            if (_view === '3d') {
+                _draw3D(bundle, isReady, t);
+                return;
             }
 
             // Loading / reconnect window — chart isn't confirmed
@@ -3572,9 +3862,22 @@ createFactory.matchesArrangement = function (songInfo) {
     return false;
 };
 
+// The picker and Auto mode find one factory per plugin id
+// (window.feedBackViz_<id>), so `drums` is the single entry for both
+// views: each call builds a 3D or 2D renderer from the View setting
+// (Auto = 3D when WebGL2 is available). No static `contextType` here on
+// purpose: Auto skips factories that statically declare 'webgl2' on
+// machines without WebGL2, and this one degrades to 2D by itself.
 window.slopsmithViz_drums = createFactory;
 // slopsmith→feedBack rename: host viz picker looks up `window.feedBackViz_<id>`.
 window.feedBackViz_drums = window.slopsmithViz_drums;
+// Explicit per-view factories for hosts / tools that want one view
+// regardless of the setting (not listed in the picker).
+window.feedBackViz_drums3d = function () { return createFactory('3d'); };
+window.feedBackViz_drums3d.contextType = 'webgl2';
+window.feedBackViz_drums3d.matchesArrangement = createFactory.matchesArrangement;
+window.feedBackViz_drums2d = function () { return createFactory('2d'); };
+window.feedBackViz_drums2d.matchesArrangement = createFactory.matchesArrangement;
 
 // Node-only export hook for tests; browsers keep the window.*Viz_drums wiring.
 if (typeof module !== 'undefined' && module.exports) {
@@ -3584,6 +3887,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _midiResolveSaved, DRUM_LANES, PIECE_DEFAULT_MIDI, KICK2X_MIDI,
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
+        _resolveView, _VALID_VIEWS,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,

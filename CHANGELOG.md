@@ -5,9 +5,20 @@ All notable changes to the Drum Highway plugin. The format follows
 
 ## [Unreleased]
 
-Version 4.1.0 in `plugin.json`.
+Version 4.2.0 in `plugin.json` (4.1.0: scoring, 4.2.0: the 3D drum highway).
 
 ### Added
+- **Rock Band-style 3D drum track** (`assets/highway3d.js`, on core's vendored three.js): pad lanes and a
+  kick bar, bevelled rectangle pad gems and domed cymbal gems, rectangular strikeline targets, hit flashes
+  and sparks, star power and fill highlighting, drum-solo tint, and a HUD with streak, multiplier, star
+  power, score, stars, accuracy and the difficulty badge. Scored by the same session as the 2D view.
+- **View** setting — Auto (3D with WebGL2) / 3D / 2D; the main player swaps renderers on change.
+  `feedBackViz_drums3d` / `feedBackViz_drums2d` for hosts that want one view.
+- **Keyboard drumming** in both views (**Keys**, on by default): B kick, F red, J/K/L toms,
+  Shift+J/K/L or U/I/O cymbals. Enter activates star power on charts without fills (in both views, with or
+  without Keys; it is left alone when star power can't be activated).
+- The 3D HUD carries the early/late **timing meter** and its **Apply** button, the star power hint and the
+  "This song has no drums" message; gems move on the smoothed highway clock the scoring uses.
 - **Rock Band-style scoring** from a JavaScript port of YARG.Core's drums engine (`assets/engine.js`,
   LGPL-3.0, see `NOTICE.md`): ±70 ms hit window, multiplier up to x4 (x8 in star power), pro-drums
   cymbal/tom lanes, accent/ghost dynamics bonus, stars, and star power with fill activation. Driven
