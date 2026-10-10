@@ -7,6 +7,11 @@
 // levels, star power, assists, bonuses). Both load lazily as plain
 // scripts on first use; this file only uses their public APIs.
 //
+// Settings page: plugin.json's nav entry adds Plugins → Drums; core mounts
+// screen.html as #plugin-drums and this file wires it ("Drums settings
+// screen" below). The end-of-song card keeps the best score per song and
+// difficulty.
+//
 // Views: each renderer instance is either the 2D lane view below or the
 // Rock Band-style 3D drum track (assets/highway3d.js on core's vendored
 // three.js), picked from the View setting when the instance is created
@@ -659,7 +664,7 @@ function _loadScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.3.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.4.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -930,6 +935,23 @@ async function _synthSetKit(kitId) {
     if (_audioCtx) await _synthLoadDrumKit();
 }
 
+// Short groove on the current kit (settings "Play test" button).
+async function _synthPlayTest() {
+    await _synthInit();
+    if (!_audioCtx) return;
+    _synthEnsureCtx();
+    for (let i = 0; i < 100 && _synthLoading; i++) await new Promise((r) => setTimeout(r, 100));
+    // [eighth, GM note, velocity] at 110 BPM, then a tom fill into a crash.
+    const pat = [
+        [0, 36, 110], [0, 42, 90], [1, 42, 70], [2, 38, 110], [2, 42, 90], [3, 42, 70],
+        [4, 36, 110], [4, 42, 90], [5, 36, 90], [5, 42, 70], [6, 38, 115], [6, 42, 90], [7, 46, 80],
+        [8, 50, 100], [8.5, 48, 100], [9, 45, 105], [9.5, 43, 110], [10, 36, 120], [10, 49, 115],
+    ];
+    const step = 60 / 110 / 2;
+    const t0 = _audioCtx.currentTime + 0.08;
+    for (const [b, note, vel] of pat) _synthPlayNote(note, vel, t0 + b * step);
+}
+
 function _setAutoVolume(vol) {
     _saveCfg('autoVolume', vol);
     if (_autoGain) _autoGain.gain.value = _cfg.autoVolume;
@@ -1030,6 +1052,8 @@ async function _midiInit() {
             _midiUpdateAllDeviceLists();
         } catch (e) {
             console.warn('[Drums] MIDI access denied:', e);
+            _midiDiag.error = 'MIDI access was denied (' + ((e && (e.message || e.name)) || 'unknown') + ')';
+            _refreshMidiStatus();
         } finally {
             // On success future calls short-circuit on `_midiReady`; on
             // rejection, releasing the slot lets a later init() retry.
@@ -1174,6 +1198,10 @@ async function _midiConnect(key) {
         }
     } catch (e) {
         console.warn('[Drums] MIDI open failed:', e);
+        _midiDiag.error = (e && e.name === 'InvalidAccessError')
+            ? 'the kit is in use by another program (close it, then pick the kit again)'
+            : ((e && (e.message || e.name)) || 'unknown error');
+        _refreshMidiStatus();
         // Only clear if we're still the current connect — a stale older open's
         // rejection (rapid switch / autoconnect racing a manual pick) must not
         // wipe a newer connect's already-installed _midiInput/_midiHandle (which
@@ -1240,18 +1268,45 @@ function _midiResumeHandler() {
     if (_midiHandle && _midiListener) { try { _midiHandle.addListener(_midiListener); } catch (_) { /* best-effort */ } }
 }
 
+// MIDI status for the settings page / panel: device, hits received, why a
+// hit was dropped, last error. Refreshed at most every 150 ms.
+const _midiDiag = { hits: 0, last: '', error: '' };
+function _midiStatusText() {
+    if (!_mi()) return 'MIDI is not available here (the core midi-input domain is missing, or the browser has no Web MIDI).';
+    if (_midiDiag.error) return 'MIDI problem: ' + _midiDiag.error;
+    if (!_midiInput) return 'No MIDI input selected.';
+    return 'Listening to ' + (_midiInput.name || 'MIDI input') + ' · ' + _midiDiag.hits + ' hits received'
+        + (_midiDiag.last ? ' · last: ' + _midiDiag.last : '');
+}
+let _midiStatusTimer = null;
+function _refreshMidiStatus() {
+    if (_midiStatusTimer || typeof document === 'undefined') return;
+    _midiStatusTimer = setTimeout(() => {
+        _midiStatusTimer = null;
+        try { document.querySelectorAll('.drums-midi-status').forEach((el) => { el.textContent = _midiStatusText(); }); } catch (_) { /* no DOM */ }
+    }, 150);
+}
+
 function _midiOnMessage(e) {
+    const [status, note, velocity] = e.data;
+    const ch = status & 0x0F;
+    const cmd = status & 0xF0;
+    if (cmd === 0x90 && velocity > 0) {
+        // Counted before routing so the status line shows whether the kit
+        // reaches the plugin at all, and why a hit was dropped.
+        _midiDiag.hits++;
+        _midiDiag.last = 'note ' + note + ' vel ' + velocity + ' ch ' + (ch + 1)
+            + (!_activeInstance ? ' (no drum view focused)'
+                : (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) ? ' (ignored: channel filter is ' + (_cfg.midiChannel + 1) + ')' : '');
+        _refreshMidiStatus();
+    }
     // Only the focused instance receives MIDI. Module-level
     // _activeInstance is the routing slot; it points at null when
     // no instance is focused (splitscreen toggled off mid-session
     // between teardowns, or no instance initialised yet).
     if (!_activeInstance) return;
-
-    const [status, note, velocity] = e.data;
-    const ch = status & 0x0F;
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
-    const cmd = status & 0xF0;
     if (cmd === 0x90 && velocity > 0) {
         _activeInstance._handleDrumHit(note, velocity);
     }
@@ -1260,6 +1315,7 @@ function _midiOnMessage(e) {
 
 function _midiUpdateAllDeviceLists() {
     const inputs = _midiSources();
+    _refreshMidiStatus();
 
     // Every instance's settings panel (if open) has a
     // `.drums-midi-select` node. Iterate all of them so a
@@ -1342,6 +1398,24 @@ function _wireLearnButtons(scope) {
 // actually exist in the document — instances whose settings panel
 // was never opened simply don't have a `.drums-map-table` node yet,
 // and they pick up the current state when the panel opens later.
+// Learn mode: when a lane is waiting for a pad, assign this MIDI note to it
+// and return true (the hit is consumed). _cfg.learnLane is module-scope so
+// the assignment + UI refresh apply uniformly across every open panel and
+// the settings page.
+function _learnConsume(midiNote) {
+    if (_cfg.learnLane === null || !DRUM_LANES[_cfg.learnLane]) return false;
+    // Use the full customMapping (not the filtered active-only view) so
+    // that inactive preset lane assignments (e.g. tom2 in rb4 mode) are
+    // preserved — only the new assignment is added/overwritten.
+    const map = Object.assign({}, _cfg.customMapping || _getActiveDrumMap());
+    map[midiNote] = DRUM_LANES[_cfg.learnLane].id;
+    _saveCfg('customMapping', map);
+    _cfg.learnLane = null;
+    _updateLearnUI();
+    _refreshAllMappingTables();
+    return true;
+}
+
 function _refreshAllMappingTables() {
     const tables = document.querySelectorAll('.drums-map-table');
     if (!tables.length) return;
@@ -1553,6 +1627,7 @@ function createFactory(forceView) {
     let _onVisibility = null, _onCanvasReplaced = null;
     let _hwVisible = true;
     let _onKeyDown = null;
+    let _onSongEnded = null;          // end-of-song card
     let _V = null;                  // DrumsHighway3D (keyboard helpers + 3D view factory) once loaded
 
     // ── 3D view state (only used when _view === '3d') ──
@@ -2163,24 +2238,7 @@ function createFactory(forceView) {
         if (midiNote < 0 || midiNote > 127) return;
 
         // Learn mode: assign this MIDI note to the pending lane.
-        // _cfg.learnLane is module-scope so the assignment + UI
-        // refresh apply uniformly across every open settings panel.
-        if (_cfg.learnLane !== null) {
-            // Use the full customMapping (not the filtered active-only view) so
-            // that inactive preset lane assignments (e.g. tom2 in rb4 mode) are
-            // preserved — only the new assignment is added/overwritten.
-            const map = Object.assign({}, _cfg.customMapping || _getActiveDrumMap());
-            map[midiNote] = DRUM_LANES[_cfg.learnLane].id;
-            _saveCfg('customMapping', map);
-            _cfg.learnLane = null;
-            _updateLearnUI();
-            // Rebuild the "assigned" column on EVERY open settings
-            // panel — customMapping is module-shared, so a Learn
-            // assignment from the focused panel must also update
-            // any other splitscreen panel's open settings table.
-            _refreshAllMappingTables();
-            return;
-        }
+        if (_learnConsume(midiNote)) return;
 
         _heldPads.set(midiNote, { velocity, wall: performance.now() });
         _synthDrumHit(midiNote, velocity);
@@ -2440,6 +2498,7 @@ function createFactory(forceView) {
         // collide on getElementById lookups. Handlers bind via
         // panel.querySelector scoped to this specific panel.
         panel.innerHTML = `
+            <div class="drums-midi-status" style="font-size:10px;color:#8ab;margin-bottom:4px;">${_midiStatusText()}</div>
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
                 <div style="display:flex;align-items:center;gap:4px;">
                     <span style="font-size:10px;color:#666;">MIDI</span>
@@ -3310,6 +3369,8 @@ function createFactory(forceView) {
             _resetForNewChart();
 
             _instances.add(instance);
+            _onSongEnded = () => { if (_session) _drumsEndCard(_session, _badge); };
+            if (_bus()) { try { _bus().on('song:ended', _onSongEnded); } catch (_) { _onSongEnded = null; } }
 
             // Kick off MIDI + synth. One-time init — subsequent
             // instances no-op out because the module singletons are
@@ -3439,6 +3500,10 @@ function createFactory(forceView) {
                 }
                 _focusSubscribed = false;
             }
+            if (_onSongEnded) {
+                try { _bus().off('song:ended', _onSongEnded); } catch (_) { /* ignore */ }
+                _onSongEnded = null;
+            }
             _instances.delete(instance);
             if (_activeInstance === instance) _activeInstance = null;
             _isFocused = false;
@@ -3503,6 +3568,371 @@ window.feedBackViz_drums3d.matchesArrangement = createFactory.matchesArrangement
 window.feedBackViz_drums2d = function () { return createFactory('2d'); };
 window.feedBackViz_drums2d.matchesArrangement = createFactory.matchesArrangement;
 
+// ── End-of-song card ─────────────────────────────────────────────────
+// Final score (engine score + session bonuses), stars, accuracy, streak,
+// and where the points came from: notes x multiplier, star power, accents /
+// ghosts, spot-on timing, rolls and drum solos. The best score per song
+// and difficulty is kept in localStorage (`drums_best_v1:<song>|<level>`).
+const BEST_PREFIX = 'drums_best_v1:';
+function _bestKey(song, difficultyText) {
+    const cs = song || {};
+    return BEST_PREFIX + (cs.filename || cs.title || '') + '|' + (difficultyText || 'EXPERT');
+}
+// Read the previous best and record `total` when it beats it. Pure apart
+// from storage. -> {prev: number|null, isBest}
+function _recordBest(key, total) {
+    let prev = null;
+    try {
+        const raw = localStorage.getItem(key);
+        const n = raw == null ? NaN : Number(raw);
+        prev = Number.isFinite(n) ? n : null;
+    } catch (_) { /* storage blocked */ }
+    const isBest = prev == null || total > prev;
+    if (isBest) { try { localStorage.setItem(key, String(total)); } catch (_) { /* storage blocked */ } }
+    return { prev, isBest };
+}
+
+let _endCardAt = 0;
+function _drumsEndCard(session, badge) {
+    const st = session && session.getState ? session.getState() : null;
+    // Only after the player actually played (watching a chart scores nothing).
+    if (!st || !(st.notesHit > 0)) return;
+    if (performance.now() - _endCardAt < 2000) return;   // splitscreen: one card
+    _endCardAt = performance.now();
+    const b = (session.getBonus && session.getBonus()) || { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, runs: [], solos: [] };
+    const host = window.feedBack || window.slopsmith;
+    const cs = (host && host.currentSong) || {};
+    const diff = badge && badge.text ? badge.text : 'EXPERT';
+    const total = Math.round((st.score || 0) + (b.total || 0));
+    const { prev, isBest } = _recordBest(_bestKey(cs, diff), total);
+    const n = (x) => Math.round(x || 0).toLocaleString('en-US');
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const resolved = st.notesHit + st.notesMissed;
+    const acc = resolved ? 100 * st.notesHit / resolved : 100;
+    const stars = Math.floor(st.stars || 0), gold = (st.stars || 0) >= 6;
+    const starHtml = Array.from({ length: 5 }, (_, i) =>
+        `<span style="color:${gold ? '#ffcf3a' : i < stars ? '#f4f6ff' : '#3a4060'}">★</span>`).join('');
+    const chip = (label, col) => `<span style="font-size:12px;padding:3px 9px;border-radius:10px;background:rgba(255,255,255,.06);color:${col}">${label}</span>`;
+    const sp = st.starPowerScore || 0;
+    const chips = [
+        chip('notes × multiplier +' + n((st.score || 0) - sp), '#f1f5f9'),
+        sp ? chip('star power +' + n(sp), '#8fe6ff') : '',
+        (st.totalAccents || st.totalGhosts) ? chip('dynamics: ' + (st.accentsHit || 0) + '/' + (st.totalAccents || 0) + ' accents, '
+            + (st.ghostsHit || 0) + '/' + (st.totalGhosts || 0) + ' ghosts', '#b77bff') : '',
+        b.timing ? chip('spot-on timing +' + n(b.timing) + ' (' + b.perfect + ' hits)', '#ffc531') : '',
+        b.rolls ? chip('rolls +' + n(b.rolls) + (b.runs.length ? ' (' + b.runs.map((r) => r.h + '/' + r.n).join(', ') + ')' : ''), '#ff9a40') : '',
+        b.solo ? chip('solos +' + n(b.solo), '#c9b6ff') : '',
+    ].join('');
+    const solos = (b.solos || []).map((x) => `<div style="color:#c9b6ff;font-size:13px">${esc(x.rating)} ${Number(x.pct).toFixed(2)}% (${x.h}/${x.n}) · +${n(x.bonus)}</div>`).join('');
+    const ov = document.createElement('div');
+    ov.className = 'drums-endcard';
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-label', 'Drum score');
+    // z-index 40: above the player chrome (transport 20, rail 30), level with popovers.
+    ov.style.cssText = 'position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);font-family:system-ui,sans-serif';
+    ov.innerHTML = `<div style="width:30rem;max-width:92vw;background:#0e1322;border:1px solid #2b3556;border-radius:14px;padding:22px 24px;color:#cbd5e1;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+        <div style="font-size:12px;letter-spacing:3px;color:#8b95a5">DRUMS · ${esc(diff)}</div>
+        ${cs.title ? `<div style="font-size:17px;color:#f1f5f9;margin-top:2px">${esc(cs.title)}${cs.artist ? `<span style="color:#8b95a5"> — ${esc(cs.artist)}</span>` : ''}</div>` : ''}
+        <div style="font:900 46px/1.1 system-ui;color:${isBest ? '#ffc531' : '#f1f5f9'};margin-top:12px">${n(total)}</div>
+        <div style="font-size:12px;color:#8b95a5">${isBest ? '<b style="color:#ffc531">NEW BEST SCORE</b>' + (prev != null ? ' · previous ' + n(prev) : '') : 'best ' + n(prev)}</div>
+        <div style="font-size:26px;margin-top:6px;letter-spacing:4px">${starHtml}</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:14px 0">
+            <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${acc.toFixed(2)}%</div><div style="font-size:11px;color:#8b95a5">accuracy</div></div>
+            <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${st.notesHit} / ${st.totalNotes}</div><div style="font-size:11px;color:#8b95a5">notes hit</div></div>
+            <div><div style="font-weight:800;font-size:20px;color:${st.fullCombo ? '#ffc531' : '#f1f5f9'}">${st.fullCombo ? 'FC' : st.maxCombo}</div><div style="font-size:11px;color:#8b95a5">${st.fullCombo ? 'full combo!' : 'best streak'}</div></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:8px">${chips}</div>
+        ${solos}
+        ${st.overhits ? `<div style="font-size:12px;color:#8b95a5;margin-top:4px">${st.overhits} overhit${st.overhits > 1 ? 's' : ''}</div>` : ''}
+        <button type="button" class="drums-endcard-close" style="margin-top:14px;padding:6px 22px;border-radius:8px;border:1px solid #3a4670;background:#1b2440;color:#f1f5f9;cursor:pointer">Close</button>
+    </div>`;
+    const onKey = (e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); close(); } };
+    function close() {
+        ov.remove();
+        document.removeEventListener('keydown', onKey, true);
+        try { _bus().off('song:loading', close); } catch (_) { /* ignore */ }
+    }
+    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('.drums-endcard-close')) close(); });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(ov);
+    const btn = ov.querySelector('.drums-endcard-close');
+    if (btn) btn.focus();
+    try { _bus().on('song:loading', close); } catch (_) { /* no host */ }
+}
+
+// ── Drums settings screen (Plugins → Drums) ──────────────────────────
+// plugin.json's nav entry puts "Drums" in core's Plugins menu; core mounts
+// screen.html as #plugin-drums. The controls share their classes with the
+// in-player ⚙ panel, so the module-level setters keep both in sync. While
+// the screen shows it registers a pseudo-instance so the kit connects and
+// the pad tester receives hits (MIDI only routes to live instances).
+
+const _LANE_NAMES = { hihat: 'Hi-hat', snare: 'Snare', tom1: 'Tom 1', tom2: 'Tom 2', tom3: 'Floor tom',
+    crash: 'Crash', ride: 'Ride', kick: 'Kick' };
+let _page = null;          // #plugin-drums once wired
+let _pageVisible = false;
+const _padFlashTimers = {};
+let _pageRefs = null;      // data-dr -> element, resolved once
+
+const _pageInst = {
+    _handleDrumHit(midiNote, velocity) {
+        if (midiNote < 0 || midiNote > 127) return;
+        if (_learnConsume(midiNote)) { _pageLast('Learned: note ' + midiNote); return; }
+        _synthInit();
+        _synthDrumHit(midiNote, velocity);
+        const idx = _midiToLaneIdx(midiNote);
+        const lane = DRUM_LANES[idx];
+        _pageLast('note ' + midiNote + ' · velocity ' + velocity + ' → ' + (lane ? (_LANE_NAMES[lane.id] || lane.label) : 'not mapped'));
+        if (!lane || !_page) return;
+        const chip = _page.querySelector('.dr-pad[data-lane="' + idx + '"]');
+        if (!chip) return;
+        chip.classList.add('dr-on');
+        clearTimeout(_padFlashTimers[idx]);
+        _padFlashTimers[idx] = setTimeout(() => chip.classList.remove('dr-on'), 140);
+    },
+    _releaseAllSounding() {},
+    _difficultyChanged() {},
+    _proCymbalsChanged() {},
+    _assistsChanged() {},
+};
+
+function _pq(k) {
+    if (!_page) return null;
+    if (!_pageRefs) _pageRefs = {};
+    const el = _pageRefs[k];
+    if (el && el.isConnected) return el;
+    return (_pageRefs[k] = _page.querySelector('[data-dr="' + k + '"]'));
+}
+
+function _pageLast(text) {
+    const el = _pq('last');
+    if (el) el.textContent = text;
+}
+
+function _pageRenderPads() {
+    const box = _pq('pads');
+    if (!box) return;
+    box.textContent = '';
+    DRUM_LANES.forEach((lane, idx) => {
+        const chip = document.createElement('div');
+        chip.className = 'dr-pad';
+        chip.dataset.lane = String(idx);
+        chip.style.setProperty('--c', _rgbStr(lane.color[0], lane.color[1], lane.color[2]));
+        chip.textContent = _LANE_NAMES[lane.id] || lane.label;
+        box.appendChild(chip);
+    });
+}
+
+function _pageKitNote() {
+    const el = _pq('kitNote');
+    const k = DRUM_KITS[_cfg.kit];
+    if (el && k) el.textContent = 'Sound played when you hit a pad. ' + k.name + ': ' + k.note + '.';
+}
+
+function _pagePercent(key, val) {
+    const el = _pq(key);
+    if (el) el.textContent = Math.round(val * 100) + '%';
+}
+
+// Best scores saved on this computer, newest songs first in key order.
+function _pageRenderBest() {
+    const box = _pq('best');
+    if (!box) return;
+    const rows = [];
+    try {
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (!k || !k.startsWith(BEST_PREFIX)) continue;
+            const v = Number(localStorage.getItem(k));
+            if (!Number.isFinite(v)) continue;
+            const rest = k.slice(BEST_PREFIX.length);
+            const cut = rest.lastIndexOf('|');
+            rows.push({ song: cut >= 0 ? rest.slice(0, cut) : rest, diff: cut >= 0 ? rest.slice(cut + 1) : '', score: v });
+        }
+    } catch (_) { /* storage blocked */ }
+    rows.sort((a, b) => b.score - a.score);
+    box.textContent = '';
+    if (!rows.length) {
+        box.textContent = 'No scores yet: finish a song on the drum view to record one.';
+        return;
+    }
+    for (const r of rows.slice(0, 50)) {
+        const row = document.createElement('div');
+        row.className = 'dr-best-row';
+        const name = document.createElement('span');
+        name.textContent = r.song.replace(/\.(?:sloppak|feedpak)$/i, '');
+        const d = document.createElement('span');
+        d.className = 'dr-best-diff';
+        d.textContent = r.diff;
+        const sc = document.createElement('span');
+        sc.className = 'dr-best-score';
+        sc.textContent = Math.round(r.score).toLocaleString('en-US');
+        row.append(name, d, sc);
+        box.appendChild(row);
+    }
+}
+
+// Put the saved values into every control (first show and after a reset).
+function _pageFill() {
+    const q = _pq;
+    q('difficulty').innerHTML = _optList(DIFFICULTY_IDS, DIFFICULTY_NAMES, _cfg.difficulty);
+    q('autoKick').innerHTML = _autoOptions(_cfg.autoKick);
+    q('autoCymbals').innerHTML = _autoOptions(_cfg.autoCymbals);
+    q('timing').innerHTML = _timingOptions(_cfg.timing);
+    q('kit').innerHTML = _kitOptions(_cfg.kit);
+    q('channel').innerHTML = '<option value="-1">All channels</option>'
+        + Array.from({ length: 16 }, (_, i) => `<option value="${i}">${i + 1}${i === 9 ? ' (drums)' : ''}</option>`).join('');
+    q('channel').value = String(_cfg.midiChannel);
+    q('proCymbals').checked = _cfg.proCymbals;
+    q('volume').value = String(Math.round(_cfg.synthVolume * 100));
+    q('autoVolume').value = String(Math.round(_cfg.autoVolume * 100));
+    q('view').value = _cfg.view;
+    q('offset').value = String(_cfg.inputOffsetMs);
+    q('keyboard').checked = _cfg.keyboard;
+    q('lanes').value = _cfg.lanePreset;
+    q('labels').checked = _cfg.showLaneLabels;
+    q('hits').checked = _cfg.hitDetection;
+    const v = q('version');
+    if (v) v.textContent = 'Drum Highway ' + ASSET_VERSION;
+    _pageKitNote();
+    _pagePercent('volumeText', _cfg.synthVolume);
+    _pagePercent('autoVolumeText', _cfg.autoVolume);
+    _pageRenderPads();
+    _pageRenderBest();
+    _refreshAllMappingTables();
+    _midiUpdateAllDeviceLists();
+}
+
+function _pageWire() {
+    const q = _pq;
+    q('back').onclick = () => { if (typeof window.showScreen === 'function') window.showScreen('home'); };
+    q('difficulty').onchange = function () { _setDifficulty(this.value); };
+    q('autoKick').onchange = function () { _setAssist('autoKick', this.value); };
+    q('autoCymbals').onchange = function () { _setAssist('autoCymbals', this.value); };
+    q('timing').onchange = function () { _setAssist('timing', this.value); };
+    q('proCymbals').onchange = function () { _setProCymbals(this.checked); };
+    q('kit').onchange = function () {
+        const id = this.value;
+        _saveCfg('kit', id);
+        _pageKitNote();
+        _synthInit().then(() => _synthSetKit(id)).then(_synthPlayTest);
+    };
+    q('test').onclick = () => { _synthPlayTest(); };
+    q('volume').oninput = function () { _synthSetVolume(parseInt(this.value, 10) / 100); _pagePercent('volumeText', _cfg.synthVolume); };
+    q('autoVolume').oninput = function () { _synthInit(); _setAutoVolume(parseInt(this.value, 10) / 100); _pagePercent('autoVolumeText', _cfg.autoVolume); };
+    q('midi').onchange = function () {
+        _midiConnect(this.value);
+        _synthInit();
+    };
+    q('channel').onchange = function () {
+        _saveCfg('midiChannel', parseInt(this.value, 10));
+        document.querySelectorAll('.drums-channel-select').forEach((sel) => { sel.value = String(_cfg.midiChannel); });
+    };
+    q('resetMap').onclick = () => {
+        _saveCfg('customMapping', null);
+        _cfg.learnLane = null;
+        _refreshAllMappingTables();
+    };
+    q('view').onchange = function () {
+        _saveCfg('view', this.value);
+        document.querySelectorAll('.drums-view-select').forEach((sel) => { sel.value = _cfg.view; });
+    };
+    q('offset').onchange = function () {
+        _saveCfg('inputOffsetMs', this.value);
+        this.value = String(_cfg.inputOffsetMs);
+        document.querySelectorAll('.drums-offset-input').forEach((el) => { el.value = String(_cfg.inputOffsetMs); });
+    };
+    q('keyboard').onchange = function () {
+        _saveCfg('keyboard', this.checked);
+        document.querySelectorAll('.drums-chk-keys').forEach((el) => { el.checked = _cfg.keyboard; });
+    };
+    q('lanes').onchange = function () {
+        _saveCfg('lanePreset', this.value);
+        _applyLanePreset(_cfg.lanePreset);
+        _cfg.learnLane = null;
+        document.querySelectorAll('.drums-lane-preset').forEach((sel) => { sel.value = _cfg.lanePreset; });
+        _pageRenderPads();
+        _refreshAllMappingTables();
+    };
+    q('labels').onchange = function () {
+        _saveCfg('showLaneLabels', this.checked);
+        document.querySelectorAll('.drums-chk-labels').forEach((el) => { el.checked = _cfg.showLaneLabels; });
+    };
+    q('hits').onchange = function () {
+        _saveCfg('hitDetection', this.checked);
+        document.querySelectorAll('.drums-chk-hits').forEach((el) => { el.checked = _cfg.hitDetection; });
+    };
+    q('resetAll').onclick = () => {
+        if (!window.confirm('Reset the drum settings to their defaults? Your MIDI input, pad mapping and best scores are kept.')) return;
+        _resetDrumSettings();
+        _pageFill();
+    };
+}
+
+// Defaults for everything except the MIDI device, the pad mapping and scores.
+function _resetDrumSettings() {
+    _setDifficulty('expert');
+    _setProCymbals(true);
+    _setAssist('autoKick', 'off');
+    _setAssist('autoCymbals', 'off');
+    _setAssist('timing', 'normal');
+    _synthSetKit(DEFAULT_KIT);
+    _synthSetVolume(0.7);
+    _setAutoVolume(0.8);
+    _saveCfg('midiChannel', -1);
+    _saveCfg('view', 'auto');
+    _saveCfg('inputOffsetMs', 0);
+    _saveCfg('keyboard', true);
+    _saveCfg('lanePreset', 'phase_shift_8');
+    _applyLanePreset(_cfg.lanePreset);
+    _saveCfg('showLaneLabels', true);
+    _saveCfg('hitDetection', false);
+}
+
+function _pageSetVisible(on) {
+    if (on === _pageVisible) return;
+    _pageVisible = on;
+    if (on) {
+        _pageFill();
+        _instances.add(_pageInst);
+        if (!_activeInstance) _activeInstance = _pageInst;
+        _midiResumeHandler();
+        _midiInit();
+        _midiUpdateAllDeviceLists();
+    } else {
+        _instances.delete(_pageInst);
+        if (_activeInstance === _pageInst) _activeInstance = null;
+        _cfg.learnLane = null;
+        if (_instances.size === 0) _midiReleaseSession();
+    }
+}
+
+function _initDrumsScreen() {
+    const el = document.getElementById('plugin-drums');
+    if (!el || el.dataset.drumsWired === '1') return !!el;
+    el.dataset.drumsWired = '1';
+    _page = el;
+    _pageRefs = null;
+    _pageWire();
+    // Per-visit setup / teardown from core's screen:changed event.
+    if (_bus()) _bus().on('screen:changed', (e) => {
+        const id = (e && e.detail && e.detail.id) || (e && e.id);
+        _pageSetVisible(id === 'plugin-drums');
+    });
+    _pageSetVisible(el.classList.contains('active'));
+    return true;
+}
+
+try {
+    if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById) {
+        // Core mounts the screen before this script runs; retry briefly in case it doesn't.
+        if (!_initDrumsScreen()) {
+            let tries = 0;
+            const t = setInterval(() => { if (_initDrumsScreen() || ++tries > 40) clearInterval(t); }, 250);
+        }
+    }
+} catch (e) { console.warn('[Drums] settings screen failed to start:', e); }
+
 // Node-only export hook for tests; browsers keep the window.*Viz_drums wiring.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
@@ -3512,6 +3942,7 @@ if (typeof module !== 'undefined' && module.exports) {
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
         _resolveView, _VALID_VIEWS,
+        _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg,

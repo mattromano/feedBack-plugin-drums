@@ -22,6 +22,8 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 - **Difficulty** — Easy, Medium, Hard, Expert or Expert+ per player (browser), changeable mid-song. See [Difficulty](#difficulty).
 - **Assists** — auto kick, auto cymbals (each up to a chosen difficulty) and hit-timing presets. See [Assists](#assists).
 - **Inline settings** — MIDI device, volume, channel filter, lane labels, hit detection, and mapping table
+- **Drums settings page** — Plugins → **Drums**: every drum setting on one page, a pad tester for your kit and your best scores. See [Settings page](#settings-page).
+- **End-of-song card** — final score, stars, accuracy, streak and where the points came from, with your best score per song and difficulty.
 
 ## Drum Lanes
 
@@ -160,6 +162,30 @@ plugin assets route, so nothing comes from a CDN and the kits work offline. The 
 decoded when picked and play through plain `AudioBufferSourceNode`s for low latency. A missing kit folder
 falls back to JCLive. Sources, licences and the build script: `assets/sounds/README.md`, `NOTICE.md`,
 `tools/build_sample_kit.py`.
+
+## Settings page
+
+**Plugins → Drums** (the plugin's `nav` entry) collects every drum setting on one page, grouped into
+*Difficulty & assists*, *Drum sounds* (kit, **▶ Play test**, volume), *Your kit (MIDI)* and *Display &
+controls*, plus:
+
+- **MIDI status** — the device in use, how many hits arrived, the last note / velocity / channel, and why a
+  hit was dropped (no drum view focused, channel filter) or why the device failed to open.
+- **Pad tester** — hit your pads: the lane each one counts as lights up and the kit sound plays. **Learn**
+  works here too (open *Pad mapping*, click Learn, hit the pad).
+- **Best scores** — your best score per song and difficulty.
+- **Reset drum settings** — back to the defaults, keeping your MIDI input, pad mapping and scores.
+
+The controls are the same per-browser settings as the ⚙ panel in the player and stay in sync with it.
+
+## End-of-song card
+
+When a song you played ends, a card shows the final score (engine score plus the timing, roll and solo
+bonuses), stars, accuracy, notes hit, best streak or **FC**, and chips for where the points came from: notes ×
+multiplier, star power, accents / ghosts, spot-on timing, rolls and drum solos. The best score per song and
+difficulty is kept in this browser (`localStorage` key `drums_best_v1:<song>|<difficulty>`); a higher score
+shows **NEW BEST SCORE**. Close it with the button, Esc or Enter; it also closes when the next song loads.
+Watching a chart without playing it shows no card.
 
 ## Requirements
 

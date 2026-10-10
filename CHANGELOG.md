@@ -3,6 +3,18 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [4.4.0] - Unreleased
+
+### Added
+- **Drums settings page** (Plugins → Drums, `screen.html`): every drum setting on one page — difficulty and
+  assists, kit with **Play test** and volumes, MIDI input and channel, view, offset, keyboard, 2D options —
+  plus a **pad tester** (lights the lane each pad counts as; Learn works there), a **MIDI status** line
+  (hits received, last note, why a hit was dropped) and **Reset drum settings**. In sync with the player's
+  ⚙ panel, which also gains the MIDI status line.
+- **End-of-song card** (#1): final score with bonuses, stars, accuracy, notes hit, best streak / full combo
+  and a breakdown of the points; the **best score per song and difficulty** is kept in this browser and
+  listed on the settings page.
+
 ## [4.3.0] - Unreleased
 
 ### Added

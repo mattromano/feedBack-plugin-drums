@@ -252,3 +252,48 @@ test('auto notes: _autoNotesBetween returns the auto kick / cymbal notes in (fro
     assert.deepEqual(mod._autoNotesBetween(notes, chords, 3, 3, { kick: true }), [], 'empty window');
     assert.equal(mod._cfg().autoVolume, 0.8);
 });
+
+// ── settings page / end-of-song card ──────────────────────────────────────
+
+test('best score: per song and difficulty, only replaced by a higher score', () => {
+    const store = {};
+    global.window = {};
+    global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+    global.document = { addEventListener: () => {} };
+    const file = path.join(__dirname, '..', 'screen.js');
+    delete require.cache[require.resolve(file)];
+    const mod = require(file);
+    const key = mod._bestKey({ filename: 'song.sloppak', title: 'Song' }, 'HARD');
+    assert.equal(key, 'drums_best_v1:song.sloppak|HARD');
+    assert.equal(mod._bestKey({ title: 'Song' }, ''), 'drums_best_v1:Song|EXPERT');
+    assert.deepEqual(mod._recordBest(key, 1000), { prev: null, isBest: true });
+    assert.deepEqual(mod._recordBest(key, 900), { prev: 1000, isBest: false });
+    assert.equal(store[key], '1000');
+    assert.deepEqual(mod._recordBest(key, 1200), { prev: 1000, isBest: true });
+    assert.equal(store[key], '1200');
+    store[key] = 'junk';
+    assert.deepEqual(mod._recordBest(key, 5), { prev: null, isBest: true }, 'unreadable best is replaced');
+});
+
+test('MIDI status: hits are counted before routing, with the reason a hit was dropped', () => {
+    const mod = freshPlugin();
+    mod._midiOnMessage({ data: [0x99, 38, 100] });
+    assert.equal(mod._midiDiag.hits, 1);
+    assert.match(mod._midiDiag.last, /note 38 vel 100 ch 10 \(no drum view focused\)/);
+    mod._midiOnMessage({ data: [0x89, 38, 0] });     // note-off: not a hit
+    mod._midiOnMessage({ data: [0x99, 38, 0] });     // velocity-0 note-on: not a hit
+    assert.equal(mod._midiDiag.hits, 1);
+});
+
+test('Learn: the next pad hit is assigned to the waiting lane', () => {
+    const mod = freshPlugin();
+    const cfg = mod._cfg();
+    assert.equal(mod._learnConsume(60), false, 'nothing waiting');
+    const snare = mod.DRUM_LANES.findIndex(l => l.id === 'snare');
+    cfg.learnLane = snare;
+    global.document.querySelectorAll = () => [];
+    assert.equal(mod._learnConsume(60), true);
+    assert.equal(cfg.learnLane, null);
+    assert.equal(cfg.customMapping[60], 'snare');
+    assert.equal(mod._midiToLaneIdx(60), snare);
+});
