@@ -3,6 +3,18 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [4.2.0] - Unreleased
+
+### Added
+- **Rock Band-style 3D drum track** (`assets/highway3d.js`, on core's vendored three.js): pad lanes and a
+  kick bar, bevelled rectangle pad gems and domed cymbal gems, rectangular strikeline targets, hit flashes
+  and sparks, star power and fill highlighting, drum-solo tint, and a HUD with streak, multiplier, star
+  power, score, stars, accuracy and the difficulty badge. Scored by the same session as the 2D view.
+- **View** setting — Auto (3D with WebGL2) / 3D / 2D; the main player swaps renderers on change.
+  `feedBackViz_drums3d` / `feedBackViz_drums2d` for hosts that want one view.
+- **Keyboard drumming** in both views (**Keys**, on by default): B kick, F red, J/K/L toms,
+  Shift+J/K/L or U/I/O cymbals, Enter = star power.
+
 ## [4.1.0] - Unreleased
 
 ### Added

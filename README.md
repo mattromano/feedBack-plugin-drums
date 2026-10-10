@@ -16,6 +16,8 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 - **MIDI drum pad input** — connect any MIDI drum pad, electronic kit, or controller via Web MIDI API
 - **Custom MIDI mapping** — "Learn" mode to assign any MIDI note to any lane, for non-standard drum pads
 - **Built-in drum sounds** — WebAudioFont-powered GM drum kit playback on MIDI hit
+- **Rock Band-style 3D drum track** (default with WebGL2) — four pad lanes and a kick bar, rectangle pad gems, domed cymbals, star power and fill highlighting, and a score HUD. See [3D view](#3d-view).
+- **Keyboard drumming** — play without a kit: B kick, F snare, J/K/L toms, U/I/O cymbals, Enter = star power.
 - **Rock Band-style scoring** — score, multiplier, streak, stars and star power from a port of the YARG drums engine (`assets/engine.js`). See [Scoring](#scoring).
 - **Difficulty** — Easy, Medium, Hard, Expert or Expert+ per player (browser), changeable mid-song. See [Difficulty](#difficulty).
 - **Assists** — auto kick, auto cymbals (each up to a chosen difficulty) and hit-timing presets. See [Assists](#assists).
@@ -33,6 +35,51 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 | Crash | Cr | 49, 57 | Cyan | Diamond |
 | Ride | Ri | 51, 59 | White | Diamond |
 | Kick | Ki | 35, 36 | Red | Full-width bar |
+
+## 3D view
+
+The 3D view is a WebGL renderer (`assets/highway3d.js`, on the three.js copy that ships with feedBack core)
+in the style of the classic drum games:
+
+- **Lanes** — red, yellow, blue and green pad lanes plus an orange kick bar across the track; rectangular
+  pad targets in the lane colours sit on the strikeline.
+- **Gems** — snare and toms are bevelled rounded-rectangle blocks, cymbals (hi-hat, ride, crash) are raised
+  domes, kicks are flat orange bars (double kicks magenta with a white stripe). Accents are bigger and
+  brighter, ghost notes smaller and translucent; missed notes go grey and slide past the strikeline.
+- **Feedback** — a hit flashes its target and throws sparks; a miss or a hit on an empty lane flashes the
+  lane red. Beat and measure lines scroll with the chart; drum solos tint the track violet.
+- **Star power** — phrase notes are silver-white; with half a meter the fills are marked green and the note
+  that ends the fill gets a spinning ring. While active the track edges glow blue and the multiplier doubles.
+- **HUD** — streak and multiplier left of the track; star power meter, score, stars, accuracy and the
+  difficulty badge (click it, or D / Shift+D) right of it. Core draw hooks
+  (`window.highway.fireDrawHooks`) run on the HUD canvas, so overlay plugins still work.
+
+### Choosing the view
+
+The plugin registers one picker entry, **Drum Highway** (`window.feedBackViz_drums`), which Auto mode picks
+for drum parts. Each renderer it creates reads the **View** setting in the settings panel (gear):
+
+- **Auto** (default) — 3D when WebGL2 is available, otherwise 2D.
+- **3D** / **2D** — always that view (3D still falls back to 2D without WebGL2).
+
+Changing it swaps the renderer in the main player right away; splitscreen panels pick it up the next time
+their renderer is created. `window.feedBackViz_drums3d` / `feedBackViz_drums2d` are exported for hosts
+that want one view regardless of the setting (not in the picker).
+
+### Keyboard
+
+**Keys** (on by default) lets you play with the keyboard in either view:
+
+| Key | Pad |
+|---|---|
+| B | kick |
+| F | red (snare) |
+| J / K / L | yellow / blue / green tom |
+| Shift+J/K/L, or U / I / O | yellow / blue / green cymbal |
+| Enter | activate star power (when the chart has no fills) |
+
+The keys work only while the drum view is visible and focused (in splitscreen: the focused panel), and not
+while you type in a text field. Space stays play/pause; D / Shift+D change the difficulty.
 
 ## Scoring
 
@@ -138,7 +185,7 @@ Click "Reset Map" to return to standard GM mapping.
 ## Development
 
 Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node tests/engine.test.js`,
-`node tests/session.test.js`, `node tests/screen.test.js`.
+`node tests/session.test.js`, `node tests/highway3d.test.js`, `node tests/screen.test.js`.
 
 ## License
 
