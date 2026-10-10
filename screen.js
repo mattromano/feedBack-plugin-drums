@@ -1,6 +1,11 @@
 // Drum Highway visualization plugin — lane-based scrolling drum
 // renderer (Rock Band-style) with MIDI drum pad input, WebAudioFont
-// drum kit sounds, and accuracy scoring.
+// drum kit sounds, and Rock Band-style scoring.
+//
+// Scoring: assets/engine.js (an LGPL-3.0 port of YARG.Core's drums
+// engine, see NOTICE.md) driven through assets/session.js (difficulty
+// levels, star power, assists, bonuses). Both load lazily as plain
+// scripts on first use; this file only uses their public APIs.
 //
 // Wave C (slopsmith#36): per-instance refactor. Earlier Wave B
 // landed setRenderer support with an explicit single-instance
@@ -65,12 +70,52 @@ const STORE_KEYS = {
     // Cr/Ri/Ki layout. 'rb4' is a denser 7-lane Rock-Band-style preset.
     // Persisted via _saveCfg below.
     lanePreset:     'drums_lane_preset_v1',
+    // Drum difficulty: easy | medium | hard | expert | expert_plus. Per
+    // browser, so each player keeps their own; songs without that level
+    // play Expert without overwriting the choice.
+    difficulty:     'drums_difficulty_v1',
+    // Pro cymbals: true = pro drums (cymbal and tom of a colour are
+    // separate); false = non-pro, either pad of a colour hits its notes.
+    proCymbals:     'drums_pro_cymbals_v1',
+    // Accessibility: auto kick / auto cymbals are played for you up to a
+    // difficulty ('off' | 'easy' | 'medium' | 'hard' | 'all').
+    autoKick:       'drums_auto_kick_v1',
+    autoCymbals:    'drums_auto_cymbals_v1',
+    // Hit window preset (TIMING_PRESETS).
+    timing:         'drums_timing_v1',
+    // Volume of the notes the auto kick / auto cymbals play for you (0..1),
+    // separate from the pad volume so pads can be silent (the kit module
+    // makes the sound) while the auto notes still fill in for a muted drum
+    // stem.
+    autoVolume:     'drums_auto_volume_v1',
+    // Subtracted from the song time of every scored hit, in ms (positive =
+    // your hits register earlier; for audio / MIDI latency).
+    inputOffsetMs:  'drums_input_offset_ms',
 };
 
 // Valid preset ids — kept here so _saveCfg can validate before persisting
 // (drums_lane_preset_v1 is user-controlled, like every other storage key
 // in this plugin).
 const _VALID_LANE_PRESETS = new Set(['phase_shift_8', 'rb4']);
+// Same ids as DrumsSession.DIFFICULTIES (session.js loads lazily).
+const DIFFICULTY_IDS = ['easy', 'medium', 'hard', 'expert', 'expert_plus'];
+const DIFFICULTY_NAMES = { easy: 'Easy', medium: 'Medium', hard: 'Hard', expert: 'Expert', expert_plus: 'Expert+' };
+const _VALID_DIFFICULTIES = new Set(DIFFICULTY_IDS);
+// Same ids as DrumsSession.AUTO_LEVELS.
+const AUTO_LEVEL_IDS = ['off', 'easy', 'medium', 'hard', 'all'];
+const AUTO_LEVEL_NAMES = { off: 'Off', easy: 'Easy only', medium: 'Easy – Medium', hard: 'Easy – Hard', all: 'Every difficulty' };
+const _VALID_AUTO_LEVELS = new Set(AUTO_LEVEL_IDS);
+
+// Hit window presets for the engine (engine.js params.hitWindow).
+// Normal = YARG's default 140 ms window (±70 ms).
+const TIMING_PRESETS = {
+    relaxed:   { name: 'Relaxed (±130 ms)', params: { hitWindow: { maxWindow: 0.26, minWindow: 0.26, isDynamic: false } } },
+    forgiving: { name: 'Forgiving (±100 ms)', params: { hitWindow: { maxWindow: 0.20, minWindow: 0.20, isDynamic: false } } },
+    normal:    { name: 'Normal (±70 ms)', params: null },
+    precision: { name: 'Precision (tightens on fast notes)', params: { hitWindow: {
+        maxWindow: 0.13, minWindow: 0.05, isDynamic: true, dynamicScale: 1, dynamicSlope: 0.60615, dynamicGamma: 2 } } },
+};
+const TIMING_IDS = ['relaxed', 'forgiving', 'normal', 'precision'];
 
 // Safe localStorage reader — getItem can throw SecurityError in
 // sandboxed iframes, under Safari on file://, or when storage is
@@ -146,6 +191,25 @@ const _cfg = {
         const raw = _readStore(STORE_KEYS.lanePreset);
         return _VALID_LANE_PRESETS.has(raw) ? raw : 'phase_shift_8';
     })(),
+    autoVolume:     _readNum(STORE_KEYS.autoVolume, 0.8, 0, 1),
+    inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, -250, 250)),
+    difficulty:     (function () {
+        const raw = _readStore(STORE_KEYS.difficulty);
+        return _VALID_DIFFICULTIES.has(raw) ? raw : 'expert';
+    })(),
+    proCymbals:     _readStore(STORE_KEYS.proCymbals) !== 'false',
+    autoKick:       (function () {
+        const raw = _readStore(STORE_KEYS.autoKick);
+        return _VALID_AUTO_LEVELS.has(raw) ? raw : 'off';
+    })(),
+    autoCymbals:    (function () {
+        const raw = _readStore(STORE_KEYS.autoCymbals);
+        return _VALID_AUTO_LEVELS.has(raw) ? raw : 'off';
+    })(),
+    timing:         (function () {
+        const raw = _readStore(STORE_KEYS.timing);
+        return Object.prototype.hasOwnProperty.call(TIMING_PRESETS, raw) ? raw : 'normal';
+    })(),
     // Transient: which lane is in learn mode. Module-scope across
     // panels — the Learn-mode UX is "click Learn in any panel, then
     // hit a pad on the focused MIDI device." The next focused-panel
@@ -168,6 +232,23 @@ function _saveCfg(key, val) {
     }
     if (key === 'lanePreset' && !_VALID_LANE_PRESETS.has(val)) {
         val = 'phase_shift_8';
+    }
+    if (key === 'difficulty' && !_VALID_DIFFICULTIES.has(val)) {
+        val = 'expert';
+    }
+    if ((key === 'autoKick' || key === 'autoCymbals') && !_VALID_AUTO_LEVELS.has(val)) {
+        val = 'off';
+    }
+    if (key === 'timing' && !Object.prototype.hasOwnProperty.call(TIMING_PRESETS, val)) {
+        val = 'normal';
+    }
+    if (key === 'autoVolume' || key === 'synthVolume') {
+        const n = Number(val);
+        val = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : (key === 'autoVolume' ? 0.8 : 0.7);
+    }
+    if (key === 'inputOffsetMs') {
+        const n = Math.round(Number(val));
+        val = Number.isFinite(n) ? Math.max(-250, Math.min(250, n)) : 0;
     }
     _cfg[key] = val;
     const storeKey = STORE_KEYS[key];
@@ -208,10 +289,92 @@ const _instances = new Set();
 // Monotonic id for per-instance DOM tagging (useful for debugging).
 let _nextInstanceId = 0;
 
+// The host event bus (window.feedBack; window.slopsmith is its legacy alias).
+function _bus() {
+    const b = (typeof window !== 'undefined') && (window.feedBack || window.slopsmith);
+    return b && typeof b.on === 'function' ? b : null;
+}
+
+// Save the drum difficulty (per browser) and apply it to every live
+// instance: each one resolves it against its own chart (falling back to
+// Expert for that song when the level is missing) and, mid-song, rebuilds
+// its chart from the current position on its next frame.
+function _setDifficulty(id) {
+    _saveCfg('difficulty', id);
+    try {
+        document.querySelectorAll('.drums-difficulty-select').forEach((sel) => { sel.value = _cfg.difficulty; });
+    } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { inst._difficultyChanged(); } catch (e) { console.warn('[Drums] difficulty update failed:', e); }
+    }
+}
+
+// Save "Pro cymbals" (per browser) and apply it to every live instance;
+// mid-song, scoring restarts from the current position.
+function _setProCymbals(on) {
+    _saveCfg('proCymbals', !!on);
+    try {
+        document.querySelectorAll('.drums-chk-pro').forEach((chk) => { chk.checked = _cfg.proCymbals; });
+    } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { inst._proCymbalsChanged(); } catch (e) { console.warn('[Drums] pro cymbals update failed:', e); }
+    }
+}
+
+// Save an assist setting (auto kick / auto cymbals / timing) and apply it
+// to every live instance (mid-song, scoring restarts from the current
+// position, like a difficulty change).
+function _setAssist(key, val) {
+    _saveCfg(key, val);
+    const cls = { autoKick: '.drums-auto-kick', autoCymbals: '.drums-auto-cym', timing: '.drums-timing-select' }[key];
+    try {
+        if (cls) document.querySelectorAll(cls).forEach((sel) => { sel.value = _cfg[key]; });
+    } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { if (inst._assistsChanged) inst._assistsChanged(); } catch (e) { console.warn('[Drums] assist update failed:', e); }
+    }
+}
+
+// <option> lists for the settings selects (values are fixed ids; names are ours).
+function _optList(ids, names, current) {
+    return ids.map(id => `<option value="${id}"${id === current ? ' selected' : ''}>${names[id]}</option>`).join('');
+}
+function _autoOptions(current) { return _optList(AUTO_LEVEL_IDS, AUTO_LEVEL_NAMES, current); }
+function _timingOptions(current) {
+    const names = {};
+    for (const id of TIMING_IDS) names[id] = TIMING_PRESETS[id].name;
+    return _optList(TIMING_IDS, names, current);
+}
+
+const _SEL_CSS = 'background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:11px;color:#ccc;outline:none;';
+
+// Auto lanes for a difficulty: each setting is a ceiling ('easy' = on at
+// Easy only, 'hard' = Easy..Hard, 'all' = always). Mirrors
+// DrumsSession.autoFor (kept here so it works before session.js loads).
+function _autoAt(diffId) {
+    const rank = (id) => DIFFICULTY_IDS.indexOf(id);
+    const on = (lvl) => lvl === 'all' || (lvl !== 'off' && rank(diffId) >= 0 && rank(diffId) <= rank(lvl));
+    return { kick: on(_cfg.autoKick), cymbals: on(_cfg.autoCymbals) };
+}
+
+// 2D lane ids played for the player by the auto settings.
+function _laneIsAuto(laneIdx, auto) {
+    const lane = DRUM_LANES[laneIdx];
+    if (!lane || !auto) return false;
+    if (lane.id === 'kick') return !!auto.kick;
+    return !!auto.cymbals && (lane.id === 'hihat' || lane.id === 'crash' || lane.id === 'ride');
+}
+
+function _timingParams() {
+    const p = TIMING_PRESETS[_cfg.timing];
+    return p && p.params ? JSON.parse(JSON.stringify(p.params)) : null;
+}
+
 // ── Synth ─────────────────────────────────────────────────────────────
 let _audioCtx = null;
 let _synthPlayer = null;
 let _synthGain = null;
+let _autoGain = null;        // bus for auto-played notes (its own volume)
 let _synthLoading = false;
 let _playerScriptLoaded = false;
 const _drumPresets = {};           // midiNote -> preset
@@ -251,14 +414,19 @@ const PIECE_DEFAULT_MIDI = {
 };
 
 // Convert a drum_tab.hits[] payload into the legacy {t, s, f, ac, mt}
-// note objects the renderer already understands. Velocity ≥ 100 →
-// accent (renders larger + brighter glow). Ghost notes carry `mt: true`
-// (intent for dimming/shrinking — not yet consumed by the renderer). Flams
-// emit a small leading grace note 30 ms ahead so the user sees the
-// characteristic two-tap shape. Unknown piece-ids are dropped — better
-// silent than a mis-rendered piece on an outdated client.
+// note objects the renderer already understands. Accent (`ac`, renders
+// larger + brighter, scores the dynamics bonus): the tab's authored `a`
+// flag (feedpak 1.20.0) when the tab uses it anywhere, otherwise a written
+// velocity ≥ 100 as before. A hit without `v` is not an accent. Ghost notes
+// carry `mt: true`; a hit is never both. A double kick (`x2: true` on a
+// kick) becomes GM 35 — the engine's Expert+ kick — so the Expert chart can
+// drop it. Flams emit a small leading grace note 30 ms ahead so the user
+// sees the characteristic two-tap shape. Unknown piece-ids are dropped —
+// better silent than a mis-rendered piece on an outdated client.
+const KICK2X_MIDI = 35;
 function _drumTabHitsToNotes(hits) {
     if (!Array.isArray(hits)) return [];
+    const authoredAccents = hits.some(h => h && h.a === true);
     const out = [];
     for (const h of hits) {
         const piece = h && h.p;
@@ -266,8 +434,10 @@ function _drumTabHitsToNotes(hits) {
         // '__proto__', 'constructor', etc., the plain-object lookup would
         // return an inherited value instead of undefined.
         if (!Object.prototype.hasOwnProperty.call(PIECE_DEFAULT_MIDI, piece)) continue;
-        const midi = PIECE_DEFAULT_MIDI[piece];
+        const midi = (piece === 'kick' && h.x2 === true) ? KICK2X_MIDI : PIECE_DEFAULT_MIDI[piece];
         const v = (typeof h.v === 'number') ? h.v : 100;
+        const ghost = !!h.g;
+        const accent = !ghost && (authoredAccents ? h.a === true : (typeof h.v === 'number' && h.v >= 100));
         const t = +h.t;
         // Skip hits with missing or non-finite timestamps — rendering at t=0
         // by default would score bogus notes at the song start.
@@ -276,8 +446,8 @@ function _drumTabHitsToNotes(hits) {
             t,
             s: (midi / 24) | 0,
             f: midi % 24,
-            ac: v >= 100,
-            mt: !!h.g,        // ghost — carries intent for renderer (dim/small); TODO: wire up
+            ac: accent,
+            mt: ghost,        // ghost — the engine scores it; the renderer draws it smaller
             _piece: piece,    // carried for future rendering/debug use
             _vel: v,
         };
@@ -430,6 +600,37 @@ function _loadScript(url) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Scoring modules (engine.js + session.js, lazily loaded)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// plugin.json names one script, so the scoring files live in assets/ and
+// load through core's sandboxed /api/plugins/<id>/assets/ route on first
+// use. One shared promise, so N instances never race on the same tags.
+
+const PLUGIN_ID = 'drums';
+const ASSET_VERSION = '4.1.0';   // cache-buster for the lazily loaded files
+const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
+
+let _scoringPromise = null;
+function _loadScoring() {
+    if (window.DrumsEngine && window.DrumsSession) {
+        return Promise.resolve({ E: window.DrumsEngine, H: window.DrumsSession });
+    }
+    if (_scoringPromise) return _scoringPromise;
+    const want = (name, global) => (window[global]
+        ? Promise.resolve()
+        : _loadScript(PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION));
+    _scoringPromise = Promise.all([want('engine.js', 'DrumsEngine'), want('session.js', 'DrumsSession')]).then(() => {
+        if (!window.DrumsEngine || !window.DrumsSession) throw new Error('drums scoring modules did not register');
+        return { E: window.DrumsEngine, H: window.DrumsSession };
+    }).catch((e) => {
+        _scoringPromise = null;   // allow a retry on the next init
+        throw e;
+    });
+    return _scoringPromise;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // WebAudioFont drum kit synthesizer (module-level — one audio context per tab)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -455,10 +656,13 @@ async function _synthInit() {
         }
         if (typeof WebAudioFontPlayer === 'undefined') return;
 
-        _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        _audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
         _synthGain = _audioCtx.createGain();
         _synthGain.gain.value = _cfg.synthVolume;
         _synthGain.connect(_audioCtx.destination);
+        _autoGain = _audioCtx.createGain();
+        _autoGain.gain.value = _cfg.autoVolume;
+        _autoGain.connect(_audioCtx.destination);
         _synthPlayer = new WebAudioFontPlayer();
 
         await _synthLoadDrumKit();
@@ -497,21 +701,77 @@ function _synthEnsureCtx() {
     }
 }
 
-function _synthDrumHit(midiNote, velocity) {
+// One drum sound at `when` (AudioContext time; 0 = now). dest: the output
+// bus (default: the pad bus _synthGain; _autoGain for auto-played notes).
+function _synthPlayNote(midiNote, velocity, when, dest) {
     if (!_synthPlayer || !_audioCtx || !_synthGain) return;
     const preset = _drumPresets[midiNote];
     if (!preset) return;
-    _synthEnsureCtx();
+    dest = dest || _synthGain;
+    _synthPlayer.queueWaveTable(_audioCtx, dest, preset, when || 0, midiNote, when ? 0.6 : 0.5,
+        (velocity / 127) * (dest === _synthGain ? _cfg.synthVolume : 1));
+}
 
-    const vol = (velocity / 127) * _cfg.synthVolume;
-    _synthPlayer.queueWaveTable(
-        _audioCtx, _synthGain, preset, 0, midiNote, 0.5, vol
-    );
+function _synthDrumHit(midiNote, velocity) {
+    if (!_synthPlayer || !_audioCtx || !_synthGain) return;
+    _synthEnsureCtx();
+    _synthPlayNote(midiNote, velocity, 0);
 }
 
 function _synthSetVolume(vol) {
     _saveCfg('synthVolume', vol);
-    if (_synthGain) _synthGain.gain.value = vol;
+    if (_synthGain) _synthGain.gain.value = _cfg.synthVolume;
+    try {
+        document.querySelectorAll('.drums-vol-slider').forEach((el) => { el.value = String(Math.round(_cfg.synthVolume * 100)); });
+    } catch (_) { /* no DOM */ }
+}
+
+function _setAutoVolume(vol) {
+    _saveCfg('autoVolume', vol);
+    if (_autoGain) _autoGain.gain.value = _cfg.autoVolume;
+    try {
+        document.querySelectorAll('.drums-autovol-slider').forEach((el) => { el.value = String(Math.round(_cfg.autoVolume * 100)); });
+    } catch (_) { /* no DOM */ }
+}
+
+// GM notes the auto settings play for the player (engine.js MIDI_MAP: kick
+// pads and the yellow/blue/green cymbals; the hat pedal is never scored).
+const _AUTO_KICK_MIDI = new Set([35, 36]);
+const _AUTO_CYM_MIDI = new Set([42, 46, 49, 51, 52, 53, 55, 57, 59]);
+
+function _isAutoMidi(midi, auto) {
+    return !!auto && ((auto.kick && _AUTO_KICK_MIDI.has(midi)) || (auto.cymbals && _AUTO_CYM_MIDI.has(midi)));
+}
+
+// Velocity for an auto note: drum-tab velocity, else accent / ghost / normal.
+function _autoVelocity(n) {
+    if (Number.isFinite(n._vel)) return n._vel;
+    return n.ac ? 118 : (n.mt ? 55 : 100);
+}
+
+// Auto notes with from < t <= to in a sorted wire list ({t, s, f}) and its
+// chords, as [{t, midi, vel}]. Pure (tested).
+function _autoNotesBetween(notes, chords, from, to, auto) {
+    const out = [];
+    if (!auto || (!auto.kick && !auto.cymbals) || !(to > from)) return out;
+    const scan = (list, each) => {
+        if (!Array.isArray(list)) return;
+        let lo = 0, hi = list.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (!(list[m] && list[m].t > from)) lo = m + 1; else hi = m; }
+        for (let i = lo; i < list.length && list[i] && list[i].t <= to; i++) each(list[i]);
+    };
+    scan(notes, (n) => {
+        if (n._noScore) return;
+        const midi = (n.s | 0) * 24 + (n.f | 0);
+        if (_isAutoMidi(midi, auto)) out.push({ t: n.t, midi, vel: _autoVelocity(n) });
+    });
+    scan(chords, (c) => {
+        for (const cn of (c.notes || [])) {
+            const midi = (cn.s | 0) * 24 + (cn.f | 0);
+            if (_isAutoMidi(midi, auto)) out.push({ t: c.t, midi, vel: _autoVelocity(cn) });
+        }
+    });
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1058,6 +1318,459 @@ function createFactory() {
     // closure across the destroy.
     let _focusSubscribed = false;
 
+    // ── Scoring (engine.js via session.js) ──
+    // The chart (drum tab hits, or the legacy notes) is the full Expert+
+    // part; Easy/Medium/Hard come from the tab's `levels` (feedpak 1.20.0).
+    let _h = null;                  // DrumsSession (helpers + session factory) once loaded
+    let _E = null;                  // DrumsEngine once loaded
+    let _session = null;            // _h.createSession(...) for this instance
+    let _chartRefs = null;          // [notes, chords, beats] identities loaded into the session
+    let _metaKey;                   // drum tab the metadata was parsed from (undefined = none yet)
+    let _metaCache = null;          // _h.parseDrumTabMeta(...) for _metaKey (null = Expert only, no star power)
+    const _clock = { time: NaN, wall: NaN, prevTime: NaN, prevWall: NaN };
+    let _diffOptions = null;        // _h.difficultyOptions(...) for the loaded chart
+    let _diff = null;               // _h.resolveDifficulty(...) in use: {id, requested, fallback, reason}
+    let _badge = null;              // _h.difficultyBadge(...) drawn in the HUD
+    let _diffUiKey = '';            // last difficulty state written to the DOM
+    let _lvlMemo = null;            // {notes, chords, id, src, chart}: chart for the difficulty
+    let _has2xMemo = null;          // {notes, chords, val}
+    let _badgeBtn = null;           // clickable button over the HUD badge
+    let _badgeRectKey = '';
+    let _diffMenu = null;           // difficulty pop-up menu
+    let _onDiffKey = null, _onMenuOutside = null;
+    let _onVisibility = null, _onCanvasReplaced = null;
+    let _hwVisible = true;
+    let _auto = { kick: false, cymbals: false };   // auto lanes for the difficulty in use
+    // Auto-note sounds: song time up to which they're scheduled, and the last
+    // frame's (song time, wall ms) for the playback-rate estimate.
+    let _autoSchedTo = NaN, _autoPrevT = NaN, _autoPrevWall = NaN;
+
+    // Play the auto notes (kick / cymbals) so a muted drum stem doesn't leave
+    // holes. Scheduled ~60 ms ahead on the audio clock for tight timing; a
+    // pause, seek or song change resets the schedule (nothing is replayed).
+    const AUTO_LOOKAHEAD = 0.06;
+    function _scheduleAutoSounds(notes, chords, t) {
+        const wall = performance.now();
+        const prevT = _autoPrevT, prevWall = _autoPrevWall;
+        _autoPrevT = t; _autoPrevWall = wall;
+        if ((!_auto.kick && !_auto.cymbals) || !_audioCtx || !_autoGain || _cfg.autoVolume <= 0) {
+            _autoSchedTo = NaN;
+            return;
+        }
+        const dt = t - prevT, dw = (wall - prevWall) / 1000;
+        if (!Number.isFinite(dt) || dt <= 0 || dt > 0.5 || !(dw > 0)) {
+            // first frame, paused, seek or jump back: start from here
+            _autoSchedTo = t;
+            return;
+        }
+        const rate = Math.max(0.25, Math.min(2, dt / dw));
+        if (!Number.isFinite(_autoSchedTo) || _autoSchedTo < t - 0.1 || _autoSchedTo > t + 1) _autoSchedTo = t;
+        const to = t + AUTO_LOOKAHEAD * rate;
+        const due = _autoNotesBetween(notes, chords, _autoSchedTo, to, _auto);
+        _autoSchedTo = to;
+        if (!due.length) return;
+        _synthEnsureCtx();
+        const now = _audioCtx.currentTime;
+        for (const n of due) _synthPlayNote(n.midi, n.vel, now + Math.max(0, (n.t - t) / rate), _autoGain);
+    }
+
+    function _now() { return performance.now(); }
+
+    // Song time for an input arriving now (between frames), minus the
+    // user's input offset.
+    function _inputTime() {
+        const t = _h ? _h.estimateTime(_clock, _now()) : _clock.time;
+        return t - (_cfg.inputOffsetMs || 0) / 1000;
+    }
+
+    // Load engine.js + session.js and build this instance's scoring session.
+    function _startScoring() {
+        _loadScoring().then(({ E, H }) => {
+            if (_instanceDestroyed || !_isReady) return;
+            _E = E;
+            _h = H;
+            if (!_session) {
+                _auto = _autoAt(_diff ? _diff.id : _cfg.difficulty);
+                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams() });
+                _chartRefs = null;
+            }
+        }).catch((e) => console.warn('[Drums] scoring unavailable (engine/session failed to load):', e));
+    }
+
+    // Shared bus wiring. The difficulty badge is sibling DOM, so hide it
+    // with the highway canvas (splitscreen display:none's #highway). Filter
+    // by canvas: every highway instance emits on the shared bus.
+    function _wireBus() {
+        const bus = _bus();
+        if (!bus || typeof bus.off !== 'function') return;
+        _onVisibility = (e) => {
+            if (!e || !e.detail || e.detail.canvas !== _highwayCanvas) return;
+            _hwVisible = e.detail.visible !== false;
+            if (!_hwVisible) { _placeBadge(null); _toggleDiffMenu(false); }
+        };
+        _onCanvasReplaced = (e) => {
+            if (!e || !e.detail || e.detail.oldCanvas !== _highwayCanvas) return;
+            _highwayCanvas = e.detail.newCanvas;
+        };
+        try { bus.on('highway:visibility', _onVisibility); } catch (_) { _onVisibility = null; }
+        try { bus.on('highway:canvas-replaced', _onCanvasReplaced); } catch (_) { _onCanvasReplaced = null; }
+    }
+
+    function _unwireBus() {
+        const bus = _bus();
+        if (bus && typeof bus.off === 'function') {
+            if (_onVisibility) { try { bus.off('highway:visibility', _onVisibility); } catch (_) { /* ignore */ } }
+            if (_onCanvasReplaced) { try { bus.off('highway:canvas-replaced', _onCanvasReplaced); } catch (_) { /* ignore */ } }
+        }
+        _onVisibility = null;
+        _onCanvasReplaced = null;
+    }
+
+    // Gameplay metadata (star power, fills, solos, difficulty levels)
+    // rides on the drum tab core streams (feedpak 1.20.0). Parsed once per
+    // tab: draw() only runs after `ready`, when every level chunk is in. A
+    // legacy chart (GM-encoded notes, no tab) or a pre-1.20.0 tab has none:
+    // Expert only, no star power.
+    function _syncMeta(dt) {
+        if (!_h || dt === _metaKey) return;
+        _metaKey = dt;
+        _metaCache = dt ? _h.parseDrumTabMeta(dt, _drumTabHitsToNotes) : null;
+        if (_session && _chartRefs) _session.setMeta(_metaCache);
+    }
+
+    // ── Difficulty ──
+
+    // Chart for the selected difficulty, memoised on the source arrays so
+    // identities stay stable across frames (the session reloads only when
+    // they change). Before session.js loads the chart plays as it is.
+    function _applyDifficulty(bundle, notes, chords) {
+        const H = _h;
+        if (!H) return { notes, chords };
+        const chordKey = (Array.isArray(chords) && chords.length) ? chords : null;
+        if (!_has2xMemo || _has2xMemo.notes !== notes || _has2xMemo.chords !== chordKey) {
+            _has2xMemo = { notes, chords: chordKey, val: H.hasKick2x(notes, chordKey) };
+        }
+        _diffOptions = H.difficultyOptions({ meta: _metaCache, has2x: _has2xMemo.val });
+        _diff = H.resolveDifficulty(_cfg.difficulty, _diffOptions);
+        const id = _diff.id;
+        const src = _metaCache && _metaCache.levels ? (_metaCache.levels[id] || null) : null;
+        const m = _lvlMemo;
+        if (!m || m.notes !== notes || m.chords !== chordKey || m.id !== id || m.src !== src) {
+            const switched = !!(m && m.notes === notes && m.chords === chordKey && m.id !== id);
+            const chart = H.difficultyChart(id, notes, chordKey || chords, _metaCache);
+            _lvlMemo = { notes, chords: chordKey, id, src, chart };
+            // Same song, other difficulty: the session reloads (scoring
+            // from the current time, like a seek); clear the hit marks.
+            if (switched) _resetScoring();
+        }
+        _refreshDifficultyUI();
+        _syncAuto();
+        return _lvlMemo.chart;
+    }
+
+    // Auto kick / cymbals follow the difficulty being played.
+    function _syncAuto() {
+        const a = _autoAt(_diff ? _diff.id : _cfg.difficulty);
+        if (a.kick !== _auto.kick || a.cymbals !== _auto.cymbals) {
+            _auto = a;
+            _resetScoring();
+        }
+        if (_session) _session.setAuto(_auto);
+    }
+
+    function _assistsChanged() {
+        _syncAuto();
+        if (_session) _session.setParams(_timingParams());
+    }
+
+    function _proCymbalsChanged() {
+        if (_session) _session.setProDrums(_cfg.proCymbals);
+    }
+
+    function _difficultyChanged() {
+        if (_h && _diffOptions) _diff = _h.resolveDifficulty(_cfg.difficulty, _diffOptions);
+        _refreshDifficultyUI(true);
+    }
+
+    function _optionsHtml() {
+        const H = _h;
+        const opts = _diffOptions || (H ? H.difficultyOptions({}) : null);
+        const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+        return DIFFICULTY_IDS.map((id) => {
+            const o = opts ? opts.find(x => x.id === id) : null;
+            const off = !!(o && !o.available);
+            const text = DIFFICULTY_NAMES[id] + (o && o.generated ? ' (auto)' : '') + (off ? ' – n/a' : '');
+            return `<option value="${id}"${id === _cfg.difficulty ? ' selected' : ''}${off ? ' disabled' : ''}`
+                + `${off && o.reason ? ` title="${esc(o.reason)}"` : ''}>${esc(text)}</option>`;
+        }).join('');
+    }
+
+    function _difficultyNote() {
+        if (!_diff) return '';
+        if (_diff.fallback) {
+            return 'Playing Expert: ' + (_diff.reason || (DIFFICULTY_NAMES[_diff.requested] + ' is not available'));
+        }
+        const o = _diffOptions ? _diffOptions.find(x => x.id === _diff.id) : null;
+        return o && o.generated ? DIFFICULTY_NAMES[_diff.id] + ' is auto-generated from Expert' : '';
+    }
+
+    // Push the difficulty state into the DOM (badge tooltip, settings
+    // panel, open menu) when it changed.
+    function _refreshDifficultyUI(force) {
+        const H = _h;
+        if (!H || !_diff || !_diffOptions) return;
+        const key = _cfg.difficulty + '|' + _diff.id + '|' + _diff.fallback + '|'
+            + _diffOptions.map(o => (o.available ? 1 : 0) + (o.generated ? 'g' : '') + o.reason).join(',');
+        if (!force && key === _diffUiKey) return;
+        _diffUiKey = key;
+        _badge = H.difficultyBadge(_diff, _diffOptions);
+        if (_badgeBtn) {
+            _badgeBtn.title = _badge.title + '. Click, or press D / Shift+D, to change.';
+            _badgeBtn.setAttribute('aria-label', 'Drum difficulty: ' + _badge.text
+                + (_badge.sub ? ' ' + _badge.sub : '') + '. Change difficulty');
+            _badgeBtn.dataset.difficulty = _badge.id;
+            _badgeBtn.dataset.fallback = _badge.fallback ? '1' : '0';
+        }
+        if (_settingsPanel) {
+            const sel = _settingsPanel.querySelector('.drums-difficulty-select');
+            if (sel) { sel.innerHTML = _optionsHtml(); sel.value = _cfg.difficulty; }
+            const note = _settingsPanel.querySelector('.drums-difficulty-note');
+            if (note) note.textContent = _difficultyNote();
+        }
+        if (_diffMenu && _diffMenu.style.display !== 'none') _renderDiffMenu();
+    }
+
+    // Clickable (transparent) button over the HUD difficulty badge.
+    function _ensureBadge() {
+        if (_badgeBtn || !_highwayCanvas || !_highwayCanvas.parentNode) return;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'drums-diff-badge';
+        b.dataset.drumsInstance = String(_instanceId);
+        b.setAttribute('aria-haspopup', 'menu');
+        b.setAttribute('aria-label', 'Change drum difficulty');
+        b.style.cssText = 'position:absolute;z-index:3;display:none;margin:0;padding:0;border:0;'
+            + 'background:transparent;cursor:pointer;border-radius:999px;';
+        b.onclick = (e) => {
+            e.stopPropagation();
+            b.blur();   // keep Space = play/pause rather than "click the badge again"
+            _toggleDiffMenu();
+        };
+        _highwayCanvas.parentNode.insertBefore(b, _highwayCanvas.nextSibling);
+        _badgeBtn = b;
+        _diffUiKey = '';
+        _refreshDifficultyUI();
+    }
+
+    // rect: the badge in canvas css px (from the HUD draw), or null to hide.
+    function _placeBadge(rect) {
+        if (!_badgeBtn) return;
+        if (!rect || !_hwVisible || !_highwayCanvas) {
+            if (_badgeRectKey !== '') { _badgeBtn.style.display = 'none'; _badgeRectKey = ''; }
+            return;
+        }
+        const x = Math.round(_highwayCanvas.offsetLeft + rect.x);
+        const y = Math.round(_highwayCanvas.offsetTop + rect.y);
+        const w = Math.round(rect.w), h = Math.round(rect.h);
+        const key = x + '|' + y + '|' + w + '|' + h;
+        if (key === _badgeRectKey) return;
+        _badgeRectKey = key;
+        const st = _badgeBtn.style;
+        st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
+        st.display = '';
+    }
+
+    function _renderDiffMenu() {
+        const menu = _diffMenu;
+        if (!menu) return;
+        menu.textContent = '';
+        const head = document.createElement('div');
+        head.textContent = 'Difficulty';
+        head.style.cssText = 'font:700 10px system-ui,sans-serif;color:#7a84a6;padding:2px 8px 4px;'
+            + 'letter-spacing:0.08em;text-transform:uppercase;';
+        menu.appendChild(head);
+        const colors = (_h && _h.DIFFICULTY_COLORS) || {};
+        for (const o of (_diffOptions || [])) {
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'drums-diff-option';
+            item.dataset.diff = o.id;
+            item.setAttribute('role', 'menuitemradio');
+            const current = !!(_diff && _diff.id === o.id);
+            item.setAttribute('aria-checked', current ? 'true' : 'false');
+            item.disabled = !o.available;
+            if (!o.available) item.title = o.reason;
+            item.style.cssText = 'display:block;width:100%;text-align:left;border:0;border-radius:6px;padding:4px 8px;'
+                + 'font:700 12px system-ui,sans-serif;background:' + (current ? 'rgba(255,255,255,0.09)' : 'transparent') + ';'
+                + 'color:' + (o.available ? (colors[o.id] || '#ddd') : '#5a6078') + ';'
+                + 'cursor:' + (o.available ? 'pointer' : 'not-allowed') + ';';
+            const label = document.createElement('span');
+            label.textContent = (current ? '▸ ' : ' ') + o.name;
+            item.appendChild(label);
+            const tag = (text) => {
+                const g = document.createElement('span');
+                g.textContent = ' ' + text;
+                g.style.cssText = 'font:800 9px system-ui,sans-serif;color:#9aa4c4;';
+                item.appendChild(g);
+            };
+            if (o.generated) tag('AUTO');
+            if (_diff && _diff.fallback && _diff.requested === o.id) tag('(saved)');
+            if (!o.available && o.reason) {
+                const r = document.createElement('div');
+                r.textContent = o.reason;
+                r.style.cssText = 'font:400 10px system-ui,sans-serif;color:#5a6078;padding-left:1.3em;white-space:normal;';
+                item.appendChild(r);
+            }
+            item.onclick = (e) => {
+                e.stopPropagation();
+                item.blur();
+                _toggleDiffMenu(false);
+                _setDifficulty(o.id);
+            };
+            menu.appendChild(item);
+        }
+    }
+
+    function _toggleDiffMenu(open) {
+        const isOpen = !!(_diffMenu && _diffMenu.style.display !== 'none');
+        if (open === undefined) open = !isOpen;
+        if (!open) {
+            if (_diffMenu) _diffMenu.style.display = 'none';
+            if (_onMenuOutside) { document.removeEventListener('pointerdown', _onMenuOutside, true); _onMenuOutside = null; }
+            return;
+        }
+        if (!_badgeBtn || !_badgeBtn.parentNode) return;
+        if (!_diffMenu) {
+            const m = document.createElement('div');
+            m.className = 'drums-diff-menu';
+            m.dataset.drumsInstance = String(_instanceId);
+            m.setAttribute('role', 'menu');
+            m.style.cssText = 'position:absolute;z-index:26;display:none;min-width:150px;max-width:260px;padding:4px;'
+                + 'background:rgba(8,10,24,0.96);border:1px solid #2a3150;border-radius:8px;'
+                + 'box-shadow:0 6px 20px rgba(0,0,0,0.5);';
+            _badgeBtn.parentNode.insertBefore(m, _badgeBtn.nextSibling);
+            _diffMenu = m;
+        }
+        _renderDiffMenu();
+        const bx = _badgeBtn.offsetLeft, by = _badgeBtn.offsetTop, bh = _badgeBtn.offsetHeight;
+        _diffMenu.style.left = bx + 'px';
+        _diffMenu.style.top = (by + bh + 4) + 'px';
+        _diffMenu.style.display = '';
+        // Open upward when it would run off the bottom of the highway.
+        if (_highwayCanvas) {
+            const mh = _diffMenu.offsetHeight;
+            const bottom = _highwayCanvas.offsetTop + _highwayCanvas.offsetHeight;
+            if (by + bh + 4 + mh > bottom && by - mh - 4 >= _highwayCanvas.offsetTop) {
+                _diffMenu.style.top = (by - mh - 4) + 'px';
+            }
+        }
+        if (!_onMenuOutside) {
+            _onMenuOutside = (e) => {
+                if (_diffMenu && _diffMenu.contains(e.target)) return;
+                if (_badgeBtn && _badgeBtn.contains(e.target)) return;
+                _toggleDiffMenu(false);
+            };
+            document.addEventListener('pointerdown', _onMenuOutside, true);
+        }
+    }
+
+    function _removeDifficultyUI() {
+        _toggleDiffMenu(false);
+        if (_diffMenu) { _diffMenu.remove(); _diffMenu = null; }
+        if (_badgeBtn) { _badgeBtn.remove(); _badgeBtn = null; }
+        _badgeRectKey = '';
+        if (_onDiffKey) { window.removeEventListener('keydown', _onDiffKey, true); _onDiffKey = null; }
+    }
+
+    // D = harder, Shift+D = easier (focused, visible panel only; not while typing).
+    function _wireDifficultyKey() {
+        if (_onDiffKey) return;
+        _onDiffKey = (e) => {
+            if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h) return;
+            const H = _h;
+            if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
+            const k = H.isDifficultyKey(e);
+            if (!k) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (e.repeat) return;
+            _setDifficulty(H.nextDifficulty(_diff ? _diff.id : _cfg.difficulty, _diffOptions, k.dir));
+        };
+        window.addEventListener('keydown', _onDiffKey, true);
+    }
+
+    // The badge is drawn on the lane canvas, top centre: left of the score
+    // HUD when it shows (hudLeft), else on its own (the player's song title
+    // overlay owns the top-left corner).
+    function _drawDifficulty2D(ctx, W, hudLeft) {
+        const b = _badge;
+        if (!b) { _placeBadge(null); return; }
+        const y = 8, h = 20, padX = 8, gap = 5;
+        ctx.save();
+        ctx.font = 'italic bold 11px sans-serif';
+        const tw = ctx.measureText(b.text).width;
+        ctx.font = 'bold 8px sans-serif';
+        const sw = b.sub ? ctx.measureText(b.sub).width + gap : 0;
+        const w = tw + sw + padX * 2;
+        const x = Number.isFinite(hudLeft) ? Math.max(4, hudLeft - w - 6) : Math.round((W - w) / 2);
+        ctx.fillStyle = 'rgba(8,8,20,0.8)';
+        _roundRect(ctx, x, y, w, h, h / 2);
+        ctx.fill();
+        ctx.globalAlpha = b.fallback ? 0.55 : 1;
+        ctx.strokeStyle = b.color;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.font = 'italic bold 11px sans-serif';
+        ctx.fillStyle = b.color;
+        ctx.fillText(b.text, x + padX, y + h / 2 + 0.5);
+        if (b.sub) {
+            ctx.font = 'bold 8px sans-serif';
+            ctx.fillStyle = '#9aa4c4';
+            ctx.fillText(b.sub, x + padX + tw + gap, y + h / 2 + 0.5);
+        }
+        ctx.restore();
+        _placeBadge({ x, y, w, h });
+    }
+
+    // ── Engine session ──
+
+    // Load the difficulty's chart into the session when its arrays change
+    // identity (new song / difficulty) and advance it to the playhead.
+    // Empty chord lists compare as "none": the drum_tab path builds a fresh
+    // [] every frame. A reload mid-song scores from the current time.
+    function _syncSession(bundle, notes, chords) {
+        if (!_session) return;
+        const chordKey = (Array.isArray(chords) && chords.length) ? chords : null;
+        if (!_chartRefs || _chartRefs[0] !== notes || _chartRefs[1] !== chordKey || _chartRefs[2] !== bundle.beats) {
+            _chartRefs = [notes, chordKey, bundle.beats];
+            _session.load({ notes, chords, beats: bundle.beats });
+            _session.setMeta(_metaCache);
+            _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
+            _resetScoring();
+        }
+        const t = +bundle.currentTime || 0;
+        _clock.prevTime = _clock.time;
+        _clock.prevWall = _clock.wall;
+        _clock.time = t;
+        _clock.wall = _now();
+        _session.update(t);
+    }
+
+    // Engine verdicts -> the lane view's hit / miss marks (keyed like the
+    // drawn notes: time + GM note).
+    function _drainSessionEvents() {
+        if (!_session) return;
+        for (const ev of _session.drainEvents()) {
+            if (ev.type !== 'hit' && ev.type !== 'miss') continue;
+            const info = _session.noteInfo(ev.id);
+            if (!info) continue;
+            (ev.type === 'hit' ? _hitNoteKeys : _missedNoteKeys).add(_noteKey(info.t, info.midi));
+        }
+    }
+
     // ── Listener refs (per-instance so destroy() detach matches) ──
     const _onWinResize = () => _applyCanvasDims();
     const _onFocusChange = () => _updateFocusState();
@@ -1142,6 +1855,16 @@ function createFactory() {
             });
         }
 
+        if (_session && _h && _E) {
+            // The engine scores: a Learn/custom mapping entry wins, else GM.
+            const m = _h.midiToPad(midiNote, _cfg.customMapping, _E.padFromMidi);
+            if (m) {
+                const r = _session.hit(_inputTime(), m.pad, { cymbal: m.cymbal, velocity });
+                if (r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
+            }
+            return;
+        }
+
         if (_cfg.hitDetection) {
             _checkHit(midiNote);
         }
@@ -1165,6 +1888,7 @@ function createFactory() {
 
         const playedLane = _midiToLaneIdx(playedMidi);
         if (playedLane < 0) return;
+        if (_laneIsAuto(playedLane, _auto)) return;   // played for you: no hit, no miss
 
         let foundHit = false;
 
@@ -1216,7 +1940,9 @@ function createFactory() {
     }
 
     function _updateMissedNotes(t, notes, chords) {
-        if (!_cfg.hitDetection) return;
+        _expireFlashes();
+        // With the engine loaded its verdicts mark the notes (_drainSessionEvents).
+        if (!_cfg.hitDetection || _session) return;
         const cutoff = t - HIT_TOLERANCE - 0.05;
 
         if (notes) {
@@ -1227,6 +1953,7 @@ function createFactory() {
                 // user is expected to hit the main note, not the grace ornament.
                 if (n._noScore) continue;
                 const songMidi = noteToMidi(n.s, n.f);
+                if (_laneIsAuto(_songNoteToLaneIdx(songMidi), _auto)) continue;
                 const key = _noteKey(n.t, songMidi);
                 if (!_hitNoteKeys.has(key) && !_missedNoteKeys.has(key) && n.t < cutoff) {
                     _missedNoteKeys.add(key);
@@ -1239,6 +1966,7 @@ function createFactory() {
                 if (c.t < cutoff - 2) continue;
                 for (const cn of (c.notes || [])) {
                     const songMidi = noteToMidi(cn.s, cn.f);
+                    if (_laneIsAuto(_songNoteToLaneIdx(songMidi), _auto)) continue;
                     const key = _noteKey(c.t, songMidi);
                     if (!_hitNoteKeys.has(key) && !_missedNoteKeys.has(key) && c.t < cutoff) {
                         _missedNoteKeys.add(key);
@@ -1246,7 +1974,9 @@ function createFactory() {
                 }
             }
         }
+    }
 
+    function _expireFlashes() {
         const now = performance.now();
         while (_wrongFlashes.length && now - _wrongFlashes[0].wall > 400) {
             _wrongFlashes.shift();
@@ -1270,6 +2000,9 @@ function createFactory() {
     function _resetForNewChart() {
         _resetScoring();
         _heldPads.clear();
+        _chartRefs = null;
+        _metaKey = undefined;
+        _metaCache = null;
         // Drop the drum_tab → notes memo so a song-change replay
         // doesn't keep showing the previous chart's drum hits while
         // the new bundle is still loading.
@@ -1398,12 +2131,57 @@ function createFactory() {
                     <input type="checkbox" class="drums-chk-labels" ${_cfg.showLaneLabels ? 'checked' : ''}
                         style="accent-color:#ef4444;"> Labels
                 </label>
-                <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;">
+                <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;"
+                    title="Show the score: hit / miss marks on the notes, score, multiplier, streak and star power.">
                     <input type="checkbox" class="drums-chk-hits" ${_cfg.hitDetection ? 'checked' : ''}
-                        style="accent-color:#22cc66;"> Hits
+                        style="accent-color:#22cc66;"> Score
                 </label>
                 <button class="drums-reset-map" style="background:#1a1a2e;border:1px solid #333;border-radius:4px;
                     padding:2px 8px;font-size:10px;color:#aaa;cursor:pointer;">Reset Map</button>
+            </div>
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Drum difficulty, saved in this browser. Expert+ adds the double-kick notes. Easy/Medium/Hard need a chart that has them; otherwise the song plays Expert. While playing: click the difficulty badge, or press D (harder) / Shift+D (easier).">
+                    Difficulty
+                    <select class="drums-difficulty-select" aria-label="Drum difficulty" style="${_SEL_CSS}width:128px;">
+                        ${_optionsHtml()}
+                    </select>
+                </label>
+                <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;"
+                    title="On: pro drums, cymbals and toms of the same colour are separate notes. Off: either the cymbal or the tom of a colour hits that colour's notes.">
+                    <input type="checkbox" class="drums-chk-pro" ${_cfg.proCymbals ? 'checked' : ''}
+                        style="accent-color:#eab308;"> Pro cymbals
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="How early or late a hit can be and still count.">
+                    Timing
+                    <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(_cfg.timing)}</select>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late).">
+                    Offset
+                    <input type="number" class="drums-offset-input" min="-250" max="250" step="5"
+                        value="${_cfg.inputOffsetMs}" style="${_SEL_CSS}width:58px;"> ms
+                </label>
+                <span class="drums-difficulty-note" style="font-size:10px;color:#a8946a;">${_difficultyNote()}</span>
+            </div>
+            <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Kick notes are played for you (no score, no misses) at the difficulties picked here.">
+                    Auto kick
+                    <select class="drums-auto-kick" aria-label="Auto kick" style="${_SEL_CSS}width:118px;">${_autoOptions(_cfg.autoKick)}</select>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Cymbal notes (hi-hat, ride, crash) are played for you at the difficulties picked here.">
+                    Auto cymbals
+                    <select class="drums-auto-cym" aria-label="Auto cymbals" style="${_SEL_CSS}width:118px;">${_autoOptions(_cfg.autoCymbals)}</select>
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="Volume of the kick / cymbal notes played for you (so a muted drum stem has no holes).">
+                    Auto vol
+                    <input type="range" class="drums-autovol-slider" min="0" max="100"
+                        value="${Math.round(_cfg.autoVolume * 100)}" style="width:70px;accent-color:#ef4444;height:14px;">
+                </label>
             </div>
             <details style="margin-top:2px;">
                 <summary style="font-size:10px;color:#666;cursor:pointer;">MIDI Mapping</summary>
@@ -1464,6 +2242,21 @@ function createFactory() {
             _refreshAllMappingTables();
             _midiUpdateAllDeviceLists();
         };
+
+        panel.querySelector('.drums-chk-pro').onchange = function () {
+            _setProCymbals(this.checked);
+        };
+        panel.querySelector('.drums-difficulty-select').onchange = function () {
+            _setDifficulty(this.value);
+        };
+        panel.querySelector('.drums-offset-input').onchange = function () {
+            _saveCfg('inputOffsetMs', this.value);
+            this.value = String(_cfg.inputOffsetMs);
+        };
+        panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
+        panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
+        panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
+        panel.querySelector('.drums-autovol-slider').oninput = function () { _setAutoVolume(parseInt(this.value, 10) / 100); };
 
         _wireLearnButtons(panel);
     }
@@ -1535,6 +2328,10 @@ function createFactory() {
         ctx.fillStyle = '#040408';
         ctx.fillRect(0, 0, W, H);
 
+        const st = _session ? _session.getState() : null;
+        const spActive = !!(st && st.starPower && st.starPower.active);
+        const meta = _session ? _session.meta : null;
+
         // ── Lane backgrounds (vertical columns) ─────────────────────────
         for (let i = 0; i < laneLayout.length; i++) {
             const ll = laneLayout[i];
@@ -1558,6 +2355,27 @@ function createFactory() {
                         ctx.fillRect(ll.x, topY, ll.w, nowLineY + 20);
                     }
                 }
+            }
+        }
+
+        // Star power active: a blue wash over the lanes.
+        if (spActive) {
+            const last = laneLayout[laneLayout.length - 1];
+            ctx.fillStyle = 'rgba(80,170,255,0.10)';
+            ctx.fillRect(laneLayout[0].x, topY, last.x + last.w - laneLayout[0].x, nowLineY + 20);
+        }
+        // Fills (star power activation): a green band while star power is
+        // ready; the fill ends on the note that activates it.
+        if (meta && meta.activation.length && st && st.starPower && st.starPower.canActivate && !spActive) {
+            const last = laneLayout[laneLayout.length - 1];
+            for (const f of meta.activation) {
+                if (f.end < t - 0.3 || f.start > t + VISIBLE_SECONDS) continue;
+                const y0 = _timeToY(Math.min(f.end - t, VISIBLE_SECONDS), nowLineY, topY);
+                const y1 = _timeToY(Math.max(f.start - t, -0.3), nowLineY, topY);
+                ctx.fillStyle = 'rgba(56,255,168,0.10)';
+                ctx.fillRect(laneLayout[0].x, y0, last.x + last.w - laneLayout[0].x, y1 - y0);
+                ctx.fillStyle = 'rgba(56,255,168,0.7)';
+                ctx.fillRect(laneLayout[0].x, y0 - 1, last.x + last.w - laneLayout[0].x, 2);
             }
         }
 
@@ -1603,8 +2421,10 @@ function createFactory() {
             _drawLaneLabels(ctx, laneLayout, nowLineY, H);
         }
 
-        if (_cfg.hitDetection && (_hits + _misses) > 0) {
-            _drawAccuracyHUD(ctx, W, H);
+        let hudLeft = null;
+        if (_cfg.hitDetection) {
+            if (_session) hudLeft = _drawScoreHud(ctx, W);
+            else if ((_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
         }
 
         // MIDI indicator — show on the focused panel only; non-focused
@@ -1620,6 +2440,8 @@ function createFactory() {
             ctx.textBaseline = 'middle';
             ctx.fillText('MIDI', W - 28, 16);
         }
+
+        _drawDifficulty2D(ctx, W, hudLeft);
     }
 
     function _drawScrollingNotes(ctx, notes, chords, t, laneLayout, nowLineY, topY /* , W, H */) {
@@ -1630,7 +2452,7 @@ function createFactory() {
                 const dt = n.t - t;
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1) continue;
-                allNotes.push({ midi: noteToMidi(n.s, n.f), t: n.t, ac: n.ac });
+                allNotes.push({ midi: noteToMidi(n.s, n.f), t: n.t, ac: n.ac, mt: n.mt });
             }
         }
         if (chords) {
@@ -1639,10 +2461,22 @@ function createFactory() {
                 if (dt > VISIBLE_SECONDS + 1) break;
                 if (dt < -1) continue;
                 for (const cn of (c.notes || [])) {
-                    allNotes.push({ midi: noteToMidi(cn.s, cn.f), t: c.t, ac: cn.ac });
+                    allNotes.push({ midi: noteToMidi(cn.s, cn.f), t: c.t, ac: cn.ac, mt: cn.mt });
                 }
             }
         }
+
+        // Star power phrases still alive: their notes are drawn silver-white.
+        // Resolved once per frame for the phrases on screen.
+        const spRanges = (_session && _session.engine && _session.meta) ? _session.meta.starPower : null;
+        const livePhrases = spRanges
+            ? spRanges.filter(r => r.end > t - 1 && r.start < t + VISIBLE_SECONDS + 1 && !_spFailed(r)) : [];
+        const inLivePhrase = (nt) => {
+            for (const r of livePhrases) {
+                if (nt >= r.start - 0.0001 && nt < r.end - 0.0001) return true;
+            }
+            return false;
+        };
 
         for (const n of allNotes) {
             const laneIdx = _songNoteToLaneIdx(n.midi);
@@ -1667,8 +2501,9 @@ function createFactory() {
             let [cr, cg, cb] = lane.color;
             if (useHitColor) { cr = 0; cg = 1; cb = 0.27; }
             else if (useMissColor) { cr = 0.33; cg = 0.33; cb = 0.4; }
+            else if (inLivePhrase(n.t)) { cr = 0.86; cg = 0.95; cb = 1; }
 
-            const velFactor = n.ac ? 1.3 : 1.0;
+            const velFactor = n.ac ? 1.3 : (n.mt ? 0.75 : 1.0);
             const cx = ll.centerX;
 
             if (lane.id === 'kick') {
@@ -1824,6 +2659,98 @@ function createFactory() {
         }
     }
 
+    // A star power phrase the player already broke (a miss inside it).
+    function _spFailed(range) {
+        if (!_session || !_session.engine || !_session.gems.length) return false;
+        const gems = _session.gems;
+        const [i0, i1] = _h.visibleRange(gems, range.start - 0.0001, range.end - 0.0001);
+        for (let i = i0; i < i1; i++) {
+            // Auto notes and notes before a rebuild point aren't scored: skip them.
+            const info = gems[i].auto ? null : _session.engine.noteInfo(gems[i].id);
+            if (info) return !info.starPower;
+        }
+        return false;
+    }
+
+    // Engine HUD: score, multiplier, streak, stars and the star power bar
+    // (top centre), plus the live drum-solo percentage.
+    function _drawScoreHud(ctx, W) {
+        const st = _session.getState();
+        if (!st || !_h) return;
+        const m = _h.hudModel(st);
+        const bonus = _session.getBonus ? _session.getBonus() : null;
+        const score = _h.formatScore((st.score || 0) + (bonus ? bonus.total : 0));
+        ctx.save();
+        const y = 6, h = 24;
+        ctx.font = 'bold 13px sans-serif';
+        const scoreW = Math.max(70, ctx.measureText(score).width + 16);
+        const streakText = m.streakText + ' streak';
+        ctx.font = 'bold 11px sans-serif';
+        const streakW = ctx.measureText(streakText).width + 16;
+        const multW = 34, spW = 80, starW = 66, gap = 6;
+        const total = scoreW + streakW + multW + spW + starW + gap * 4;
+        let x = Math.max(120, (W - total) / 2);
+        const left = x;
+        const box = (w) => { ctx.fillStyle = 'rgba(8,8,20,0.78)'; _roundRect(ctx, x, y, w, h, 6); ctx.fill(); };
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        // multiplier
+        box(multW);
+        ctx.font = 'italic bold 13px sans-serif';
+        ctx.fillStyle = m.multiplierColor;
+        ctx.fillText(m.multiplierText, x + multW / 2, y + h / 2);
+        x += multW + gap;
+        // score
+        box(scoreW);
+        ctx.font = 'bold 13px sans-serif';
+        ctx.fillStyle = '#f1f5f9';
+        ctx.fillText(score, x + scoreW / 2, y + h / 2);
+        x += scoreW + gap;
+        // streak
+        box(streakW);
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillStyle = m.fullCombo && m.streak > 0 ? '#ffc531' : '#c8ccd8';
+        ctx.fillText(streakText, x + streakW / 2, y + h / 2);
+        x += streakW + gap;
+        // stars
+        box(starW);
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'left';
+        for (let i = 0; i < 5; i++) {
+            ctx.fillStyle = m.gold ? '#ffcf3a' : (i < m.stars ? '#f4f6ff' : '#3a4060');
+            ctx.fillText('★', x + 5 + i * 12, y + h / 2);
+        }
+        ctx.textAlign = 'center';
+        x += starW + gap;
+        // star power bar
+        box(spW);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(x + 6, y + 9, spW - 12, 6);
+        ctx.fillStyle = m.spActive ? '#7fe6ff' : (m.spReady ? '#bff3ff' : '#4aa8ff');
+        ctx.fillRect(x + 6, y + 9, (spW - 12) * m.spAmount, 6);
+        if (m.spReady && !m.spActive) {
+            ctx.strokeStyle = 'rgba(191,243,255,0.8)';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 5.5, y + 8.5, spW - 11, 7);
+        }
+        // live drum solo
+        const solo = bonus && bonus.soloLive && bonus.soloLive.active ? bonus.soloLive : null;
+        if (solo) {
+            const pct = solo.n ? Math.round(100 * solo.h / solo.n) : 100;
+            const text = 'SOLO ' + pct + '%  ' + solo.h + '/' + solo.n;
+            ctx.font = 'bold 12px sans-serif';
+            const sw = ctx.measureText(text).width + 18;
+            const sx = (W - sw) / 2;
+            ctx.fillStyle = 'rgba(60,30,110,0.85)';
+            _roundRect(ctx, sx, y + h + 6, sw, 20, 6);
+            ctx.fill();
+            ctx.fillStyle = '#e6dbff';
+            ctx.fillText(text, W / 2, y + h + 16);
+        }
+        ctx.restore();
+        return left;
+    }
+
     function _drawAccuracyHUD(ctx, W /* , H */) {
         const total = _hits + _misses;
         if (total === 0) return;
@@ -1864,7 +2791,22 @@ function createFactory() {
         }
         _drumCanvas = null;
         _drumCtx = null;
+        _removeDifficultyUI();
+        _unwireBus();
         _highwayCanvas = null;
+        _hwVisible = true;
+        _session = null;
+        _chartRefs = null;
+        _metaKey = undefined;
+        _metaCache = null;
+        _diffOptions = null;
+        _diff = null;
+        _badge = null;
+        _diffUiKey = '';
+        _lvlMemo = null;
+        _has2xMemo = null;
+        _autoSchedTo = _autoPrevT = _autoPrevWall = NaN;
+        _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
 
         _removeSettingsPanel();
         _removeSettingsGear();
@@ -1934,6 +2876,9 @@ function createFactory() {
             _injectSettingsGear();
             _applyCanvasDims();
             window.addEventListener('resize', _onWinResize);
+            _wireBus();
+            _ensureBadge();
+            _wireDifficultyKey();
 
             const ss = window.slopsmithSplitscreen;
             // Subscribe only when splitscreen is FULLY supported and
@@ -1961,6 +2906,7 @@ function createFactory() {
             _synthInit();
 
             _isReady = true;
+            _startScoring();
 
             // Determine focus BEFORE resuming the MIDI handler so
             // _activeInstance is populated when onmidimessage gets
@@ -2019,9 +2965,24 @@ function createFactory() {
                 drumNotes = bundle.notes;
                 drumChords = bundle.chords;
             }
+            if (isReady) {
+                // Difficulty: Expert+ = the full chart, Expert drops the
+                // double kicks, Easy/Medium/Hard come from the tab's levels.
+                _syncMeta((dt && Array.isArray(dt.hits)) ? dt : null);
+                const lv = _applyDifficulty(bundle, drumNotes, drumChords);
+                drumNotes = lv.notes;
+                drumChords = lv.chords;
+            }
             _latestNotes = drumNotes;
             _latestChords = drumChords;
             _latestTime = bundle.currentTime;
+            if (isReady) {
+                _scheduleAutoSounds(drumNotes, drumChords, +bundle.currentTime || 0);
+                _syncSession(bundle, drumNotes, drumChords);
+                _drainSessionEvents();
+            } else {
+                _autoSchedTo = NaN;
+            }
 
             // Loading / reconnect window — chart isn't confirmed
             // yet. Paint the plugin's base background so the
@@ -2035,6 +2996,7 @@ function createFactory() {
                     _drumCtx.fillStyle = '#040408';
                     _drumCtx.fillRect(0, 0, W, H);
                 }
+                _placeBadge(null);
                 return;
             }
 
@@ -2074,6 +3036,15 @@ function createFactory() {
         // Internal hooks used by module-level MIDI router + device-swap.
         _handleDrumHit,
         _releaseAllSounding,
+        // Called by the module-level setters for every live instance.
+        _difficultyChanged,
+        _proCymbalsChanged,
+        _assistsChanged,
+        // Read-only snapshots for debugging / tools: engine state
+        // (DrumsEngine.getState()), the difficulty in use and auto lanes.
+        _engineState() { return _session ? _session.getState() : null; },
+        _difficulty() { return _diff ? Object.assign({ options: _diffOptions }, _diff) : null; },
+        _autoLanes() { return Object.assign({}, _auto); },
     };
 
     return instance;
@@ -2106,8 +3077,12 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         noteToMidi, _rgbStr, _validateCustomMapping, _drumTabHitsToNotes,
         _applyLanePreset, _getActiveDrumMap, _midiToLaneIdx, _songNoteToLaneIdx,
-        _midiResolveSaved, DRUM_LANES, PIECE_DEFAULT_MIDI,
+        _midiResolveSaved, DRUM_LANES, PIECE_DEFAULT_MIDI, KICK2X_MIDI,
         matchesArrangement: createFactory.matchesArrangement,
+        DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
+        _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
+        _setDifficulty, _setAssist, _saveCfg,
+        _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
     };
 }
 
