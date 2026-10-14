@@ -522,3 +522,82 @@ test('auto notes: scheduled from the audio clock, forward only, cancelled on a s
     assert.ok(!Number.isFinite(mod._autoSched.to), 'paused: schedule reset');
     delete global.window.highway;
 });
+
+test('not drums: arrangement check and the message (pick the Drums part / no drums at all)', () => {
+    const mod = freshPlugin();
+    const arrs = [{ index: 0, name: 'Lead' }, { index: 1, name: 'Drums' }];
+    assert.equal(mod._isDrumsArrangement({ arrangement: 'Drums' }), true);
+    assert.equal(mod._isDrumsArrangement({ arrangement_index: 1, arrangements: arrs }), true);
+    assert.equal(mod._isDrumsArrangement({ arrangement: 'Lead', arrangement_index: 0, arrangements: arrs }), false);
+    assert.equal(mod._isDrumsArrangement(null), false);
+    assert.equal(mod._notDrumsMessage({ arrangement: 'Lead', arrangements: arrs }), 'Pick the Drums part: Lead is not drums');
+    assert.equal(mod._notDrumsMessage({ arrangement: 'Lead', arrangements: [{ index: 0, name: 'Lead' }] }), 'This song has no drums');
+});
+
+// A tiny <select> stand-in for the split view picker tests.
+function fakeSelect(entries, value) {
+    const sel = { options: [], value, changes: 0 };
+    sel.dispatchEvent = () => { sel.changes++; };
+    const mk = ([v, text]) => ({ value: v, textContent: text, hidden: false, disabled: false, isConnected: true,
+        get previousElementSibling() { const i = sel.options.indexOf(this); return i > 0 ? sel.options[i - 1] : null; },
+        after(o) { sel.options.splice(sel.options.indexOf(o), 1); sel.options.splice(sel.options.indexOf(this) + 1, 0, o); } });
+    sel.options = entries.map(mk);
+    sel.insertBefore = (o, ref) => { sel.options.splice(sel.options.indexOf(o), 1); sel.options.splice(sel.options.indexOf(ref), 0, o); };
+    return sel;
+}
+
+test('one drum highway: a split picker shows Drums once, on the Drum Highway', () => {
+    const mod = freshPlugin();
+    global.Event = function (type) { this.type = type; };
+    const sel = fakeSelect([['0', 'Lead'], ['1', 'Drums'], ['__viz__:drums:0', 'Lead (Drum Highway)'],
+        ['__viz__:drums:1', 'Drums (Drum Highway)'], ['__viz__:highway_3d:1', 'Drums (3D Highway)'], ['__viz__:highway_3d:0', 'Lead (3D Highway)']], '0');
+    mod._tidyPanelSelect(sel);
+    const vis = sel.options.filter((o) => !o.hidden).map((o) => o.value);
+    assert.deepEqual(vis, ['0', '__viz__:drums:1', '__viz__:highway_3d:0']);
+    assert.equal(sel.options.find((o) => o.value === '__viz__:drums:1').textContent, 'Drums', 'named like the arrangement');
+    assert.equal(sel.changes, 0, 'nothing moved');
+    // a Drums arrangement picked in the 3D guitar view moves to the Drum Highway
+    const s2 = fakeSelect([['0', 'Lead'], ['1', 'Drums'], ['__viz__:drums:1', 'Drums (Drum Highway)'], ['__viz__:highway_3d:1', 'Drums (3D Highway)']], '__viz__:highway_3d:1');
+    mod._tidyPanelSelect(s2);
+    assert.equal(s2.value, '__viz__:drums:1');
+    assert.equal(s2.changes, 1);
+    // a Drum Highway panel stuck on Lead moves to this song's Drums
+    const s3 = fakeSelect([['0', 'Lead'], ['1', 'Drums'], ['__viz__:drums:0', 'Lead (Drum Highway)'], ['__viz__:drums:1', 'Drums (Drum Highway)']], '__viz__:drums:0');
+    mod._tidyPanelSelect(s3);
+    assert.equal(s3.value, '__viz__:drums:1');
+    // a song without drums keeps the saved Drum Highway entry (it shows "This song has no drums")
+    const s4 = fakeSelect([['0', 'Lead'], ['__viz__:drums:0', 'Lead (Drum Highway)'], ['__viz__:highway_3d:0', 'Lead (3D Highway)']], '__viz__:drums:0');
+    mod._tidyPanelSelect(s4);
+    assert.equal(s4.value, '__viz__:drums:0');
+    assert.equal(s4.options.find((o) => o.value === '__viz__:drums:0').hidden, false, 'the selected entry is never hidden');
+    // other selects are left alone
+    const other = fakeSelect([['a', 'A'], ['b', 'B']], 'a');
+    mod._tidyPanelSelect(other);
+    assert.ok(other.options.every((o) => !o.hidden));
+    assert.equal(mod._panelArrIndex('__viz__:drums:12'), 12);
+    assert.equal(mod._panelArrIndex('lyrics'), -1);
+});
+
+test('one drum highway: the main player shows a Drums arrangement on the Drum Highway, then gives the view back', () => {
+    const mod = freshPlugin();
+    const picker = { value: 'highway_3d' };
+    global.document.getElementById = (id) => (id === 'viz-picker' ? picker : null);
+    let si = { arrangement: 'Drums' };
+    const installed = [];
+    global.window.highway = { setRenderer: (r) => installed.push(r), getSongInfo: () => si };
+    let restored = null;
+    global.window.setViz = (id) => { restored = id; };
+    mod._drumsTakeover();
+    assert.equal(installed.length, 1);
+    assert.equal(typeof installed[0].draw, 'function', 'a Drum Highway renderer');
+    mod._drumsTakeover();
+    assert.equal(installed.length, 1, 'only once per song');
+    si = { arrangement: 'Lead' };
+    mod._drumsTakeover();
+    assert.equal(restored, 'highway_3d', 'the picked view is back');
+    picker.value = 'drum_highway_3d';
+    si = { arrangement: 'Drums' };
+    mod._drumsTakeover();
+    assert.equal(installed.length, 1, "core's own drum view is a drum view: left alone");
+    delete global.window.highway; delete global.window.setViz;
+});

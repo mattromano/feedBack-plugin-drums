@@ -4033,6 +4033,25 @@ function createFactory(forceView) {
         ctx.fillText(text, W / 2, hudY + hudH / 2);
     }
 
+    // A one-line message across the middle of the 2D view.
+    function _drawCenterMessage(text) {
+        if (!_drumCanvas || !_drumCtx || !text) return;
+        const dpr = window.devicePixelRatio || 1;
+        const W = _drumCanvas.width / dpr, H = _drumCanvas.height / dpr;
+        const ctx = _drumCtx;
+        ctx.save();
+        ctx.font = '600 14px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const w = ctx.measureText(text).width + 28;
+        ctx.fillStyle = 'rgba(8,8,20,0.85)';
+        _roundRect(ctx, (W - w) / 2, H * 0.4 - 16, w, 32, 10);
+        ctx.fill();
+        ctx.fillStyle = '#c8d0ee';
+        ctx.fillText(text, W / 2, H * 0.4);
+        ctx.restore();
+    }
+
     // ── Teardown ──
 
     function _teardown() {
@@ -4257,6 +4276,26 @@ function createFactory(forceView) {
                 drumNotes = bundle.notes;
                 drumChords = bundle.chords;
             }
+            // Not a drum chart: a split-view panel left on the Drum Highway
+            // falls back to Lead on a song with no Drums part, and guitar
+            // notes read as drum notes (string * 24 + fret) gave a few random
+            // gems. Show a message instead, with nothing to play or score.
+            if (isReady && !(dt && Array.isArray(dt.hits)) && !_isDrumsArrangement(bundle.songInfo)) {
+                const ft = _frameTime(bundle);
+                _latestNotes = [];
+                _latestChords = [];
+                _latestTime = ft;
+                const msg = _notDrumsMessage(bundle.songInfo);
+                if (_view === '3d') {
+                    if (_view3d) _view3d.render({ time: ft, session: null, wallNow: _now(), message: msg });
+                    _placeBadge(null);
+                    _placeTimingBtn(null);
+                    return;
+                }
+                _draw([], [], ft, bundle.beats);
+                _drawCenterMessage(msg);
+                return;
+            }
             if (isReady) {
                 // Difficulty: Expert+ = the full chart, Expert drops the
                 // double kicks, Easy/Medium/Hard come from the tab's levels.
@@ -4367,6 +4406,25 @@ function createFactory(forceView) {
     return instance;
 }
 
+// The loaded arrangement is a drum part (by name).
+function _isDrumsArrangement(si) {
+    if (!si) return false;
+    if (si.arrangement && DRUMS_PATTERNS.test(si.arrangement)) return true;
+    if (Array.isArray(si.arrangements)) {
+        const arr = si.arrangements.find(a => a && a.index === si.arrangement_index);
+        if (arr && DRUMS_PATTERNS.test(arr.name || '')) return true;
+    }
+    return false;
+}
+
+// What the drum view says on a part that isn't drums: pick the song's
+// Drums part, or the song simply has none.
+function _notDrumsMessage(si) {
+    si = si || {};
+    const hasDrums = Array.isArray(si.arrangements) && si.arrangements.some((a) => a && DRUMS_PATTERNS.test(a.name || ''));
+    return hasDrums ? 'Pick the Drums part: ' + (si.arrangement || 'this part') + ' is not drums' : 'This song has no drums';
+}
+
 createFactory.matchesArrangement = function (songInfo) {
     if (!songInfo) return false;
     // First-class signal: sloppaks with a top-level `drum_tab:` manifest
@@ -4432,6 +4490,119 @@ if (typeof window !== 'undefined') {
         }
         return out;
     };
+}
+
+// ── One drum highway ─────────────────────────────────────────────────
+// A Drums arrangement is always shown by a drum view, never as guitar
+// notes. Main player: when the picker holds a guitar-style view (e.g. the
+// fresh-install 3D Highway) and the loaded arrangement is Drums, the Drum
+// Highway takes over for this song only; the picker and the saved choice
+// stay as they are, and the next non-drum song gets the picked view back.
+// Auto, the Drum Highway itself and core's own 3D drum view are left alone.
+// Stands down when core does this itself (_instrumentVizOverride).
+const _DRUM_VIEWS = new Set(['drums', 'drum_highway_3d', 'auto', '']);
+let _drumsOverride = false;
+function _drumsTakeover() {
+    if (typeof window._instrumentVizOverride === 'function') return;   // core handles it
+    const sel = document.getElementById('viz-picker');
+    const hw = window.highway;
+    if (!sel || !hw || typeof hw.setRenderer !== 'function') return;
+    const picked = sel.value || '';
+    if (_DRUM_VIEWS.has(picked)) { _drumsOverride = false; return; }
+    const si = typeof hw.getSongInfo === 'function' ? (hw.getSongInfo() || {}) : {};
+    if (_isDrumsArrangement(si)) {
+        if (_drumsOverride) return;
+        let r = null;
+        try { r = createFactory(); } catch (e) { console.error('[Drums] takeover failed', e); }
+        if (!r || typeof r.draw !== 'function') return;
+        _drumsOverride = true;
+        hw.setRenderer(r);
+    } else if (_drumsOverride) {
+        _drumsOverride = false;
+        if (typeof window.setViz === 'function') window.setViz(picked);   // the user's own view, unchanged
+        else hw.setRenderer(null);
+    }
+}
+
+// Split view pickers (splitscreen's per-panel select, options
+// "<arrangement index>" and "__viz__:<viz>:<index>") offer every view for
+// every arrangement: "Lead (Drum Highway)" (guitar notes read as drums),
+// "Drums (3D Highway)", a plain "Drums" (the guitar view)... Tidy them to
+// one rule: a Drums arrangement is shown by the Drum Highway, as one entry
+// named like the arrangement, and no other arrangement is offered on it.
+// The selected entry is never hidden; a Drums arrangement picked in another
+// view moves to the Drum Highway, and a Drum Highway panel saved on a
+// non-drums part (a song without drums falls back to Lead and is saved that
+// way) moves to this song's Drums. A no-op for pickers of another shape.
+const _VIZ_OPT = /^__viz__:([^:]+):(\d+)$/;
+function _panelArrIndex(value) {
+    const v = String(value);
+    if (/^\d+$/.test(v)) return +v;
+    const m = _VIZ_OPT.exec(v) || /^[^:]+:(\d+)$/.exec(v);   // viz option, or a "<prefix>:<i>" tab option
+    return m ? +(m[2] !== undefined ? m[2] : m[1]) : -1;
+}
+function _tidyPanelSelect(sel) {
+    const opts = [...sel.options];
+    if (!opts.some((o) => _VIZ_OPT.test(o.value))) return;   // not an arrangement picker
+    const drums = new Set(opts.filter((o) => /^\d+$/.test(o.value) && DRUMS_PATTERNS.test(o.textContent || '')).map((o) => +o.value));
+    const drumVizIdx = new Map(opts.map((o) => [o, _VIZ_OPT.exec(o.value)]).filter(([, m]) => m && m[1] === 'drums').map(([o, m]) => [+m[2], o]));
+    const selected = sel.value;
+    const selIdx = _panelArrIndex(selected);
+    const selViz = _VIZ_OPT.exec(selected);
+    const move = (o) => { sel.value = o.value; sel.dispatchEvent(new Event('change', { bubbles: true })); };
+    // A Drums arrangement picked in some other view: move it to the Drum Highway.
+    if (drums.has(selIdx) && !(selViz && selViz[1] === 'drums') && drumVizIdx.has(selIdx)) {
+        move(drumVizIdx.get(selIdx));
+        return;   // splitscreen rebuilds the picker; tidy again next pass
+    }
+    // The Drum Highway on a non-drums part while this song has Drums: move it there.
+    if (selViz && selViz[1] === 'drums' && !drums.has(selIdx)) {
+        const target = [...drumVizIdx].find(([i]) => drums.has(i));
+        if (target) { move(target[1]); return; }
+    }
+    for (const o of opts) {
+        const i = _panelArrIndex(o.value);
+        if (i < 0) continue;   // Lyrics etc.
+        const m = _VIZ_OPT.exec(o.value);
+        const isDrumViz = !!(m && m[1] === 'drums');
+        // Hidden, not removed: the plain "Drums" entry still tells later
+        // passes which arrangement is the drums.
+        const hide = o.value !== selected && (drums.has(i) ? !isDrumViz : isDrumViz);
+        if (o.hidden !== hide) { o.hidden = hide; o.disabled = hide; }
+    }
+    // The one drum entry, named like the arrangement and placed with them.
+    for (const [i, o] of drumVizIdx) {
+        if (!drums.has(i) || !o.isConnected) continue;
+        const name = (opts.find((x) => x.value === String(i)) || {}).textContent || 'Drums';
+        if (o.textContent !== name) o.textContent = name;
+        const lastPlain = [...sel.options].filter((x) => /^\d+$/.test(x.value) && !x.hidden).pop();
+        if (lastPlain && o.previousElementSibling !== lastPlain && o !== lastPlain) lastPlain.after(o);
+        else if (!lastPlain && sel.options[0] !== o) sel.insertBefore(o, sel.options[0]);
+    }
+}
+function _tidyDrumChoices() {
+    try {
+        const wrap = document.getElementById('splitscreen-wrap');
+        if (wrap) wrap.querySelectorAll('select').forEach(_tidyPanelSelect);
+    } catch (e) { /* cosmetic: never break the page */ }
+}
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+    const tidyTimer = setInterval(_tidyDrumChoices, 1000);
+    if (tidyTimer && typeof tidyTimer.unref === 'function') tidyTimer.unref();   // node tests
+    document.addEventListener('mousedown', (e) => { if (e.target && e.target.tagName === 'SELECT') _tidyDrumChoices(); }, true);
+    try {
+        if (_bus()) {
+            _bus().on('song:ready', _drumsTakeover);
+            // A pick mid-song re-applies the rule once core has switched views:
+            // a Drums arrangement stays on a drum view whatever is picked.
+            document.addEventListener('change', (e) => {
+                if (e.target && e.target.id === 'viz-picker') {
+                    _drumsOverride = false;
+                    setTimeout(_drumsTakeover, 150);
+                }
+            }, true);
+        }
+    } catch (_) { /* no host */ }
 }
 
 // ── End-of-song card ─────────────────────────────────────────────────
@@ -4874,6 +5045,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoSchedule, _autoSched, _autoCancel,
+        _isDrumsArrangement, _notDrumsMessage, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
         // Test seam: a fake audio context / buses / sampled kit + player.
         _testSynth: (o) => {
             _audioCtx = o.ctx; _synthGain = o.synthGain || null; _autoGain = o.autoGain || null;
