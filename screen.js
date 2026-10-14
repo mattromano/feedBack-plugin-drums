@@ -119,6 +119,8 @@ const _VALID_VIEWS = new Set(['auto', '3d', '2d']);
 const DIFFICULTY_IDS = ['easy', 'medium', 'hard', 'expert', 'expert_plus'];
 const DIFFICULTY_NAMES = { easy: 'Easy', medium: 'Medium', hard: 'Hard', expert: 'Expert', expert_plus: 'Expert+' };
 const _VALID_DIFFICULTIES = new Set(DIFFICULTY_IDS);
+// Split view: a drum panel's own difficulty, per panel slot (+ index).
+const PANEL_DIFF_PREFIX = 'drums_difficulty_panel';
 // Same ids as DrumsSession.AUTO_LEVELS.
 const AUTO_LEVEL_IDS = ['off', 'easy', 'medium', 'hard', 'all'];
 const AUTO_LEVEL_NAMES = { off: 'Off', easy: 'Easy only', medium: 'Easy – Medium', hard: 'Easy – Hard', all: 'Every difficulty' };
@@ -350,7 +352,9 @@ function _bus() {
 // instance: each one resolves it against its own chart (falling back to
 // Expert for that song when the level is missing) and, mid-song, rebuilds
 // its chart from the current position on its next frame.
-function _setDifficulty(id) {
+function _setDifficulty(id, inst) {
+    // Split view: each drum panel keeps its own difficulty (per panel slot).
+    if (inst && inst._inSplit && inst._inSplit()) { inst._setOwnDifficulty(id); return; }
     _saveCfg('difficulty', id);
     try {
         document.querySelectorAll('.drums-difficulty-select').forEach((sel) => { sel.value = _cfg.difficulty; });
@@ -1305,6 +1309,21 @@ function _refreshMidiStatus() {
     }, 150);
 }
 
+// Which drum view gets kit hits. In split view focus starts on panel 1 and
+// moves on click, so a drum panel that wasn't clicked, or the hidden
+// main-player view, used to swallow them. Now: the focused drum view if it
+// is on screen, else the first drum view on screen, else whatever is
+// focused (single view, the settings page).
+function _routeTarget() {
+    const vis = [];
+    for (const i of _instances) {
+        try { if (i._isVisible && i._isVisible()) vis.push(i); } catch (_) { /* ignore */ }
+    }
+    if (_activeInstance && vis.includes(_activeInstance)) return _activeInstance;
+    if (vis.length) return vis[0];
+    return _activeInstance;
+}
+
 function _midiOnMessage(e) {
     const [status, note, velocity] = e.data;
     const ch = status & 0x0F;
@@ -1314,19 +1333,19 @@ function _midiOnMessage(e) {
         // reaches the plugin at all, and why a hit was dropped.
         _midiDiag.hits++;
         _midiDiag.last = 'note ' + note + ' vel ' + velocity + ' ch ' + (ch + 1)
-            + (!_activeInstance ? ' (no drum view focused)'
+            + (!_routeTarget() ? ' (no drum view on screen)'
                 : (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) ? ' (ignored: channel filter is ' + (_cfg.midiChannel + 1) + ')' : '');
         _refreshMidiStatus();
     }
-    // Only the focused instance receives MIDI. Module-level
-    // _activeInstance is the routing slot; it points at null when
-    // no instance is focused (splitscreen toggled off mid-session
-    // between teardowns, or no instance initialised yet).
-    if (!_activeInstance) return;
+    // One drum view receives the hits (_routeTarget); null when no drum
+    // view is live (splitscreen toggled off mid-session between teardowns,
+    // or no instance initialised yet).
+    const target = _routeTarget();
+    if (!target) return;
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
     if (cmd === 0x90 && velocity > 0) {
-        _activeInstance._handleDrumHit(note, velocity, e.timeStamp);
+        target._handleDrumHit(note, velocity, e.timeStamp);
     }
     // Drums don't need note-off handling (one-shot hits)
 }
@@ -1869,7 +1888,7 @@ function createFactory(forceView) {
             _E = E;
             _h = H;
             if (!_session) {
-                _auto = _autoAt(_diff ? _diff.id : _cfg.difficulty);
+                _auto = _autoAt(_diff ? _diff.id : _myDiff());
                 _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams() });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
@@ -1941,7 +1960,7 @@ function createFactory(forceView) {
             _has2xMemo = { notes, chords: chordKey, val: H.hasKick2x(notes, chordKey) };
         }
         _diffOptions = H.difficultyOptions({ meta: _metaCache, has2x: _has2xMemo.val });
-        _diff = H.resolveDifficulty(_cfg.difficulty, _diffOptions);
+        _diff = H.resolveDifficulty(_myDiff(), _diffOptions);
         const id = _diff.id;
         const src = _metaCache && _metaCache.levels ? (_metaCache.levels[id] || null) : null;
         const m = _lvlMemo;
@@ -1960,7 +1979,7 @@ function createFactory(forceView) {
 
     // Auto kick / cymbals follow the difficulty being played.
     function _syncAuto() {
-        const a = _autoAt(_diff ? _diff.id : _cfg.difficulty);
+        const a = _autoAt(_diff ? _diff.id : _myDiff());
         if (a.kick !== _auto.kick || a.cymbals !== _auto.cymbals) {
             _auto = a;
             _resetScoring();
@@ -1977,8 +1996,70 @@ function createFactory(forceView) {
         if (_session) _session.setProDrums(_cfg.proCymbals);
     }
 
+    // ── Split view: this panel's own difficulty + a picker in its bar ──
+    let _diffPref = null;   // null = the global (per browser) difficulty
+    function _myDiff() { return _diffPref || _cfg.difficulty; }
+    function _inSplit() { return _ssActive(); }
+    function _panelDiffKey() {
+        try {
+            const ss = window.slopsmithSplitscreen;
+            const i = ss && typeof ss.panelIndexFor === 'function' && _highwayCanvas ? ss.panelIndexFor(_highwayCanvas) : -1;
+            return Number.isInteger(i) && i >= 0 ? PANEL_DIFF_PREFIX + i : null;
+        } catch (_) { return null; }
+    }
+    function _loadOwnDifficulty() {
+        _diffPref = null;
+        if (!_ssActive()) return;
+        const k = _panelDiffKey();
+        const v = k ? _readStore(k) : null;
+        if (_VALID_DIFFICULTIES.has(v)) _diffPref = v;
+    }
+    function _setOwnDifficulty(id) {
+        if (!_VALID_DIFFICULTIES.has(id)) return;
+        _diffPref = id;
+        const k = _panelDiffKey();
+        try { if (k) localStorage.setItem(k, id); } catch (_) { /* storage blocked */ }
+        _difficultyChanged();
+    }
+    // Replace splitscreen's generic phrase-level "Difficulty" slider in this
+    // panel's bar with a drum difficulty picker (Easy ... Expert+).
+    let _panelDiffSel = null, _ssHidden = [];
+    function _removePanelDiffSelect() {
+        if (_panelDiffSel) { _panelDiffSel.remove(); _panelDiffSel = null; }
+        for (const el of _ssHidden) el.style.display = '';
+        _ssHidden = [];
+    }
+    function _ensurePanelDiffSelect() {
+        if (!_ssActive()) return;
+        const bar = _ssSettingsAnchor(_highwayCanvas);
+        if (!bar || typeof bar.querySelectorAll !== 'function') return;
+        // splitscreen's bar: "Difficulty" heading, the range slider, a "—" label.
+        let slot = null;
+        for (const el of bar.querySelectorAll(':scope > input[type="range"]')) {
+            if (!/difficult|mastery/i.test(el.title || '')) continue;
+            if (el.style.display !== 'none') { el.style.display = 'none'; _ssHidden.push(el); }
+            const lbl = el.nextElementSibling;
+            if (lbl && lbl.tagName === 'SPAN' && lbl.style.display !== 'none'
+                && /^(—|-|\d+%)?$/.test((lbl.textContent || '').trim())) { lbl.style.display = 'none'; _ssHidden.push(lbl); }
+            slot = el;
+        }
+        if (!_panelDiffSel || !_panelDiffSel.isConnected) {
+            _panelDiffSel = document.createElement('select');
+            _panelDiffSel.className = 'drums-panel-diff';
+            _panelDiffSel.title = 'Drum difficulty for this panel';
+            _panelDiffSel.setAttribute('aria-label', 'Drum difficulty for this panel');
+            _panelDiffSel.style.cssText = 'margin:0 4px;padding:1px 4px;font-size:11px;background:#1f2937;color:#e5e7eb;'
+                + 'border:1px solid #374151;border-radius:4px;flex:0 0 auto';
+            _panelDiffSel.addEventListener('change', function () { _setDifficulty(this.value, instance); });
+            _panelDiffSel.addEventListener('pointerdown', (e) => e.stopPropagation());
+            if (slot) slot.after(_panelDiffSel); else bar.appendChild(_panelDiffSel);
+        }
+        _panelDiffSel.innerHTML = _optionsHtml();
+        _panelDiffSel.value = _myDiff();
+    }
+
     function _difficultyChanged() {
-        if (_h && _diffOptions) _diff = _h.resolveDifficulty(_cfg.difficulty, _diffOptions);
+        if (_h && _diffOptions) _diff = _h.resolveDifficulty(_myDiff(), _diffOptions);
         _refreshDifficultyUI(true);
     }
 
@@ -1990,7 +2071,7 @@ function createFactory(forceView) {
             const o = opts ? opts.find(x => x.id === id) : null;
             const off = !!(o && !o.available);
             const text = DIFFICULTY_NAMES[id] + (o && o.generated ? ' (auto)' : '') + (off ? ' – n/a' : '');
-            return `<option value="${id}"${id === _cfg.difficulty ? ' selected' : ''}${off ? ' disabled' : ''}`
+            return `<option value="${id}"${id === _myDiff() ? ' selected' : ''}${off ? ' disabled' : ''}`
                 + `${off && o.reason ? ` title="${esc(o.reason)}"` : ''}>${esc(text)}</option>`;
         }).join('');
     }
@@ -2009,7 +2090,7 @@ function createFactory(forceView) {
     function _refreshDifficultyUI(force) {
         const H = _h;
         if (!H || !_diff || !_diffOptions) return;
-        const key = _cfg.difficulty + '|' + _diff.id + '|' + _diff.fallback + '|'
+        const key = _myDiff() + '|' + _diff.id + '|' + _diff.fallback + '|'
             + _diffOptions.map(o => (o.available ? 1 : 0) + (o.generated ? 'g' : '') + o.reason).join(',');
         if (!force && key === _diffUiKey) return;
         _diffUiKey = key;
@@ -2023,11 +2104,12 @@ function createFactory(forceView) {
         }
         if (_settingsPanel) {
             const sel = _settingsPanel.querySelector('.drums-difficulty-select');
-            if (sel) { sel.innerHTML = _optionsHtml(); sel.value = _cfg.difficulty; }
+            if (sel) { sel.innerHTML = _optionsHtml(); sel.value = _myDiff(); }
             const note = _settingsPanel.querySelector('.drums-difficulty-note');
             if (note) note.textContent = _difficultyNote();
         }
         if (_diffMenu && _diffMenu.style.display !== 'none') _renderDiffMenu();
+        if (_ssActive()) _ensurePanelDiffSelect();
     }
 
     // Clickable (transparent) button over the HUD difficulty badge.
@@ -2154,7 +2236,7 @@ function createFactory(forceView) {
                 e.stopPropagation();
                 item.blur();
                 _toggleDiffMenu(false);
-                _setDifficulty(o.id);
+                _setDifficulty(o.id, instance);
             };
             menu.appendChild(item);
         }
@@ -2225,7 +2307,7 @@ function createFactory(forceView) {
             e.preventDefault();
             e.stopImmediatePropagation();
             if (e.repeat) return;
-            _setDifficulty(H.nextDifficulty(_diff ? _diff.id : _cfg.difficulty, _diffOptions, k.dir));
+            _setDifficulty(H.nextDifficulty(_diff ? _diff.id : _myDiff(), _diffOptions, k.dir), instance);
         };
         window.addEventListener('keydown', _onDiffKey, true);
     }
@@ -2807,7 +2889,7 @@ function createFactory(forceView) {
             _setProCymbals(this.checked);
         };
         panel.querySelector('.drums-difficulty-select').onchange = function () {
-            _setDifficulty(this.value);
+            _setDifficulty(this.value, instance);
         };
         panel.querySelector('.drums-offset-input').onchange = function () { _setInputOffset(this.value); };
         panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
@@ -3350,6 +3432,7 @@ function createFactory(forceView) {
         }
         _drumCanvas = null;
         _drumCtx = null;
+        try { _removePanelDiffSelect(); } catch (_) { /* ignore */ }
         if (_onKeyDown) { window.removeEventListener('keydown', _onKeyDown, true); _onKeyDown = null; }
         _removeDifficultyUI();
         _unwireBus();
@@ -3485,7 +3568,11 @@ function createFactory(forceView) {
             _resetForNewChart();
 
             _instances.add(instance);
-            _onSongEnded = () => { if (_session) _drumsEndCard(_session, _badge); };
+            _loadOwnDifficulty();
+            setTimeout(() => { try { if (_isReady) _ensurePanelDiffSelect(); } catch (_) { /* ignore */ } }, 300);
+            // Split view has no single end card: a results card for every
+            // panel can use window.__drumsPanelResults.
+            _onSongEnded = () => { if (_session && !_ssActive()) _drumsEndCard(_session, _badge); };
             if (_bus()) { try { _bus().on('song:ended', _onSongEnded); } catch (_) { _onSongEnded = null; } }
 
             // Kick off MIDI + synth. One-time init — subsequent
@@ -3639,6 +3726,21 @@ function createFactory(forceView) {
         _releaseAllSounding,
         // Called by the module-level setters for every live instance.
         _difficultyChanged,
+        _inSplit,
+        _setOwnDifficulty,
+        // Split view routing / results: is this drum view on screen, and its numbers.
+        _isVisible() {
+            const c = _highwayCanvas;
+            return !!(c && c.isConnected && c.getClientRects().length && _hwVisible !== false);
+        },
+        _results() {
+            if (!_session) return null;
+            const st = _session.getState();
+            if (!st) return null;
+            const b = _session.getBonus ? _session.getBonus() : null;
+            return { canvas: _highwayCanvas, difficulty: _badge && _badge.text ? _badge.text : 'EXPERT', state: st, bonus: b,
+                score: Math.round((st.score || 0) + ((b && b.total) || 0)) };
+        },
         _proCymbalsChanged,
         _assistsChanged,
         // Read-only snapshots for debugging / tools: engine state
@@ -3703,6 +3805,15 @@ if (typeof window !== 'undefined') {
         midi: (data, timeStamp) => _midiOnMessage({ data, timeStamp }),
         audioCtx: () => _audioCtx,
         diag: () => Object.assign({}, _midiDiag),
+        routeTarget: () => _routeTarget(),
+    };
+    // Split view: every drum panel's results on screen (for a results card).
+    window.__drumsPanelResults = () => {
+        const out = [];
+        for (const i of _instances) {
+            try { const r = i._results && i._results(); if (r && r.canvas && i._isVisible()) out.push(r); } catch (_) { /* ignore */ }
+        }
+        return out;
     };
 }
 
@@ -4079,7 +4190,8 @@ if (typeof module !== 'undefined' && module.exports) {
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
-        _setDifficulty, _setAssist, _saveCfg,
+        _setDifficulty, _setAssist, _saveCfg, _routeTarget, PANEL_DIFF_PREFIX,
+        _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
     };
 }

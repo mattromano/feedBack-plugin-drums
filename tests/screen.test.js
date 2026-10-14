@@ -279,7 +279,7 @@ test('MIDI status: hits are counted before routing, with the reason a hit was dr
     const mod = freshPlugin();
     mod._midiOnMessage({ data: [0x99, 38, 100] });
     assert.equal(mod._midiDiag.hits, 1);
-    assert.match(mod._midiDiag.last, /note 38 vel 100 ch 10 \(no drum view focused\)/);
+    assert.match(mod._midiDiag.last, /note 38 vel 100 ch 10 \(no drum view on screen\)/);
     mod._midiOnMessage({ data: [0x89, 38, 0] });     // note-off: not a hit
     mod._midiOnMessage({ data: [0x99, 38, 0] });     // velocity-0 note-on: not a hit
     assert.equal(mod._midiDiag.hits, 1);
@@ -309,4 +309,44 @@ test('calibration hooks: wide hit window, input offset setter, config snapshot',
     assert.equal(mod._cfg().inputOffsetMs, 37);
     assert.equal(global.window.__drumsSetInputOffset(900), 250, 'clamped');
     assert.equal(global.window.__drumsGetConfig().inputOffsetMs, 250);
+});
+
+test('split view: kit hits go to the focused drum view on screen, else the first one on screen', () => {
+    const mod = freshPlugin();
+    const view = (name, visible) => ({ name, hits: [], _isVisible: () => visible,
+        _handleDrumHit(n, v, ts) { this.hits.push([n, v, ts]); } });
+    const hidden = view('main (hidden)', false);
+    const panel = view('panel 2', true);
+    mod._instances.add(hidden);
+    mod._instances.add(panel);
+    mod._setActiveInstance(hidden);          // focus is on the hidden main-player view
+    assert.equal(mod._routeTarget(), panel);
+    mod._midiOnMessage({ data: [0x99, 38, 100], timeStamp: 1234.5 });
+    assert.deepEqual(panel.hits, [[38, 100, 1234.5]], 'the MIDI arrival time is passed along');
+    assert.deepEqual(hidden.hits, []);
+    const other = view('panel 1', true);
+    mod._instances.add(other);
+    mod._setActiveInstance(other);           // a visible focused view wins
+    assert.equal(mod._routeTarget(), other);
+    mod._instances.clear();
+    const page = { _handleDrumHit() {} };   // the settings page has no _isVisible
+    mod._instances.add(page);
+    mod._setActiveInstance(page);
+    assert.equal(mod._routeTarget(), page, 'nothing on screen: the focused one');
+    mod._instances.clear();
+    mod._setActiveInstance(null);
+    assert.equal(mod._routeTarget(), null);
+});
+
+test('split view: _setDifficulty hands a split panel its own difficulty, others the global one', () => {
+    const mod = freshPlugin();
+    global.document.querySelectorAll = () => [];
+    let own = null;
+    const panel = { _inSplit: () => true, _setOwnDifficulty: (id) => { own = id; }, _difficultyChanged() {} };
+    mod._setDifficulty('hard', panel);
+    assert.equal(own, 'hard');
+    assert.equal(mod._cfg().difficulty, 'expert', 'the global difficulty is untouched');
+    mod._setDifficulty('easy');
+    assert.equal(mod._cfg().difficulty, 'easy');
+    assert.equal(mod.PANEL_DIFF_PREFIX, 'drums_difficulty_panel');
 });
