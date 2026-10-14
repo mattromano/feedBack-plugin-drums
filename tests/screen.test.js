@@ -424,3 +424,26 @@ test('hi-hat pedal: a hi-hat pad on an unknown note (Alesis 24) follows the peda
     assert.equal(mod._hh.value, 127);
     assert.equal(mod._hhArticulation(24, 42, true), 42);
 });
+
+test('MIDI monitor: _midiMonSummary gives per-note velocity stats and controller ranges', () => {
+    const mod = freshPlugin();
+    const log = [[0, 0x99, 38, 20], [5, 0x99, 38, 90], [9, 0x99, 38, 60], [12, 0x89, 38, 0], [13, 0x99, 38, 0],
+        [20, 0xB9, 4, 127], [30, 0xB9, 4, 0], [40, 0xA9, 49, 100], [50, 0xD9, 7, 0]];
+    const s = mod._midiMonSummary(log);
+    assert.deepEqual(s.notes[38], { count: 3, ch: 10, min: 20, median: 60, max: 90 });
+    assert.deepEqual(s.ctrls.cc4, { count: 2, min: 0, max: 127 });
+    assert.equal(s.ctrls.polyAT49.count, 1);
+    assert.equal(s.ctrls.chanAT.max, 7);
+    assert.equal(s.other.noteOff, 2, 'note-off and note-on velocity 0');
+});
+
+test('MIDI monitor: records raw messages only while on, skipping clock / active sensing', () => {
+    const mod = freshPlugin();
+    global.performance = global.performance || { now: () => 0 };
+    mod._midiOnMessage({ data: [0x99, 36, 100], timeStamp: 10 });
+    assert.equal(mod._midiMon.log.length, 0);
+    mod._midiMonStart();
+    mod._midiOnMessage({ data: [0xFE] });
+    mod._midiOnMessage({ data: [0xB9, 4, 64], timeStamp: mod._midiMon.t0 + 12.34 });
+    assert.deepEqual(mod._midiMon.log, [[12.3, 0xB9, 4, 64]]);
+});

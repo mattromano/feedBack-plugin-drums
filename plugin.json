@@ -10,6 +10,12 @@
   },
   "screen": "screen.html",
   "script": "screen.js",
+  "routes": "routes.py",
+  "diagnostics": {
+    "server_files": [
+      "drums/midi_log.jsonl"
+    ]
+  },
   "standards": [
     "capability-pipelines.v1",
     "plugin-runtime-idempotent.v1"

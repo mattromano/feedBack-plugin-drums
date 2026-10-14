@@ -1679,7 +1679,56 @@ function _routeTarget() {
     return _activeInstance;
 }
 
+// ── MIDI monitor (Plugins → Drums) ──
+// Records every raw message from the kit (notes, controllers such as the
+// hi-hat pedal, aftertouch) with its time, plus per-note velocity and
+// per-controller value stats, so what the kit really sends can be seen and
+// saved (POST /api/plugins/drums/midi-log -> <config>/drums/midi_log.jsonl).
+const _midiMon = { on: false, t0: 0, log: [], drawn: false };
+const MIDI_MON_MAX = 50000;
+function _midiMonRecord(e) {
+    if (!_midiMon.on || !e || !e.data || !e.data.length) return;
+    const st = e.data[0] & 0xFF;
+    if (st >= 0xF8) return;   // clock / active sensing
+    const t = Number.isFinite(e.timeStamp) && e.timeStamp > 0 ? e.timeStamp : performance.now();
+    if (_midiMon.log.length < MIDI_MON_MAX) {
+        _midiMon.log.push([Math.round((t - _midiMon.t0) * 10) / 10, st, (e.data[1] | 0) & 0x7F, (e.data[2] | 0) & 0x7F]);
+    }
+    if (!_midiMon.drawn) {
+        _midiMon.drawn = true;
+        const draw = () => { _midiMon.drawn = false; _pageMonRender(); };
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(draw); else setTimeout(draw, 50);
+    }
+}
+function _midiMonStart() { _midiMon.on = true; _midiMon.t0 = performance.now(); _midiMon.log = []; }
+// Per note-on note: count + velocity min / median / max; per controller (CC,
+// aftertouch): count + value min / max; other message kinds counted. Pure (tested).
+function _midiMonSummary(log) {
+    const notes = {}, ctrls = {}, other = {};
+    for (const [, st, d1, d2] of log) {
+        const cmd = st & 0xF0, ch = (st & 0x0F) + 1;
+        if (cmd === 0x90 && d2 > 0) {
+            const n = (notes[d1] = notes[d1] || { count: 0, vels: [], ch });
+            n.count++; n.vels.push(d2);
+        } else if (cmd === 0xB0 || cmd === 0xA0 || cmd === 0xD0) {
+            const k = cmd === 0xB0 ? 'cc' + d1 : cmd === 0xA0 ? 'polyAT' + d1 : 'chanAT';
+            const v = cmd === 0xD0 ? d1 : d2;
+            const c = (ctrls[k] = ctrls[k] || { count: 0, min: 127, max: 0 });
+            c.count++; c.min = Math.min(c.min, v); c.max = Math.max(c.max, v);
+        } else {
+            const k = cmd === 0x80 || cmd === 0x90 ? 'noteOff' : 'status' + cmd.toString(16);
+            other[k] = (other[k] || 0) + 1;
+        }
+    }
+    for (const k of Object.keys(notes)) {
+        const v = notes[k].vels.slice().sort((a, b) => a - b);
+        notes[k] = { count: v.length, ch: notes[k].ch, min: v[0], median: v[v.length >> 1], max: v[v.length - 1] };
+    }
+    return { notes, ctrls, other };
+}
+
 function _midiOnMessage(e) {
+    _midiMonRecord(e);
     const [status, note, velocity] = e.data;
     const ch = status & 0x0F;
     const cmd = status & 0xF0;
@@ -4171,6 +4220,7 @@ if (typeof window !== 'undefined') {
         midi: (data, timeStamp) => _midiOnMessage({ data, timeStamp }),
         audioCtx: () => _audioCtx,
         hh: _hh,
+        monitor: _midiMon,
         kit: () => _sampleKit,
         diag: () => Object.assign({}, _midiDiag),
         routeTarget: () => _routeTarget(),
@@ -4389,6 +4439,48 @@ function _pageRenderBest() {
     }
 }
 
+function _pageMonRender() {
+    const out = _pq('monOut');
+    if (!out) return;
+    const btn = _pq('monToggle');
+    if (btn) btn.textContent = _midiMon.on ? '■ Stop' : '● Record';
+    const sum = _midiMonSummary(_midiMon.log);
+    const lines = [];
+    const lane = (n) => {
+        const i = _midiToLaneIdx(Number(n));
+        return i >= 0 && DRUM_LANES[i] ? (_LANE_NAMES[DRUM_LANES[i].id] || DRUM_LANES[i].label) : '-';
+    };
+    const nk = Object.keys(sum.notes).map(Number).sort((a, b) => a - b);
+    if (nk.length) lines.push('note  lane        hits   vel min / median / max');
+    for (const n of nk) {
+        const x = sum.notes[n];
+        lines.push(String(n).padEnd(6) + lane(n).padEnd(12) + String(x.count).padEnd(7) + x.min + ' / ' + x.median + ' / ' + x.max);
+    }
+    for (const [k, c] of Object.entries(sum.ctrls)) lines.push(k.padEnd(18) + String(c.count).padEnd(7) + 'value ' + c.min + '..' + c.max);
+    for (const [k, c] of Object.entries(sum.other)) lines.push(k.padEnd(18) + c);
+    const recent = _midiMon.log.slice(-10).map(([t, st, a, b]) => (t / 1000).toFixed(3).padStart(8) + ' s  ' + st.toString(16).toUpperCase() + ' ' + a + ' ' + b);
+    if (recent.length) lines.push('', 'last messages (time, status hex, data):', ...recent);
+    out.textContent = lines.length ? lines.join('\n') : (_midiMon.on ? 'Recording: hit the pads…' : 'Not recording.');
+}
+
+async function _pageMonSave() {
+    const st = _pq('monState');
+    if (!_midiMon.log.length) { if (st) st.textContent = 'Nothing recorded yet.'; return; }
+    const body = {
+        saved: new Date().toISOString(),
+        device: (_midiInput && (_midiInput.name || _midiInput.key)) || null,
+        summary: _midiMonSummary(_midiMon.log),
+        log: _midiMon.log,
+    };
+    try {
+        const r = await fetch('/api/plugins/drums/midi-log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const j = await r.json().catch(() => ({}));
+        if (st) st.textContent = r.ok ? 'Saved ' + _midiMon.log.length + ' messages to ' + (j.path || 'the drums log') + '.' : 'Save failed (HTTP ' + r.status + ').';
+    } catch (e) {
+        if (st) st.textContent = 'Save failed: ' + e;
+    }
+}
+
 // Put the saved values into every control (first show and after a reset).
 function _pageFill() {
     const q = _pq;
@@ -4420,6 +4512,7 @@ function _pageFill() {
     _pagePercent('roomText', _cfg.room);
     _pagePercent('autoVolumeText', _cfg.autoVolume);
     _pageRenderPads();
+    _pageMonRender();
     _pageRenderBest();
     _refreshAllMappingTables();
     _midiUpdateAllDeviceLists();
@@ -4444,6 +4537,14 @@ function _pageWire() {
     q('room').oninput = function () { _setRoom(parseInt(this.value, 10) / 100); _pagePercent('roomText', _cfg.room); };
     q('velCurve').onchange = function () { _saveCfg('velCurve', this.value); };
     q('hhPedal').onchange = function () { _saveCfg('hhPedal', this.checked ? 'auto' : 'off'); };
+    q('monToggle').onclick = () => {
+        if (_midiMon.on) _midiMon.on = false; else { _midiMonStart(); _synthInit(); }
+        const st = _pq('monState');
+        if (st) st.textContent = '';
+        _pageMonRender();
+    };
+    q('monClear').onclick = () => { _midiMon.log = []; _midiMon.t0 = performance.now(); _pageMonRender(); };
+    q('monSave').onclick = () => { _pageMonSave(); };
     q('autoVolume').oninput = function () { _synthInit(); _setAutoVolume(parseInt(this.value, 10) / 100); _pagePercent('autoVolumeText', _cfg.autoVolume); };
     q('midi').onchange = function () {
         _midiConnect(this.value);
@@ -4574,6 +4675,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _hh, _hhReset, _hhArticulation, _hhLearn, _hhPedalMove, HH_SEMI_NOTE,
+        _midiMon, _midiMonStart, _midiMonSummary,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
     };
 }
