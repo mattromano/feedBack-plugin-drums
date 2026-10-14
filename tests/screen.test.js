@@ -601,3 +601,54 @@ test('one drum highway: the main player shows a Drums arrangement on the Drum Hi
     assert.equal(installed.length, 1, "core's own drum view is a drum view: left alone");
     delete global.window.highway; delete global.window.setViz;
 });
+
+test('_midiAutoChoice: the drum kit beats an auto-picked device; a hand pick or explicit None is kept', () => {
+    const m = freshPlugin();
+    const store = {};
+    global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+    const ins = [{ name: 'Loupedeck Live', key: 'web-midi::loupe' }, { name: 'Alesis Drum Module', key: 'web-midi::kit' }];
+    assert.equal(m._midiAutoChoice('web-midi::loupe', ins), 'web-midi::kit', 'auto-picked Loupedeck saved earlier -> the kit');
+    assert.equal(m._midiAutoChoice(null, ins), 'web-midi::kit', 'never picked -> the kit');
+    assert.equal(m._midiAutoChoice('', ins), null, 'explicit None stays off');
+    store.drums_midi_manual = '1';
+    assert.equal(m._midiAutoChoice('web-midi::loupe', ins), 'web-midi::loupe', 'picked by hand -> kept');
+    delete store.drums_midi_manual;
+    const noKit = [{ name: 'Loupedeck Live', key: 'web-midi::loupe' }, { name: 'Arturia KeyStep', key: 'web-midi::keys' }];
+    assert.equal(m._midiAutoChoice('web-midi::keys', noKit), 'web-midi::keys', 'no kit: keep the saved device');
+    assert.equal(m._midiAutoChoice(null, noKit), 'web-midi::loupe', 'never picked -> first input');
+    assert.equal(m._midiAutoChoice('web-midi::gone', noKit), null, 'saved device unplugged: wait for it');
+});
+
+test('_kitSource: exact Clone Hero name, drum-looking names, no loose substring matches', () => {
+    const m = freshPlugin();
+    const ins = [{ name: 'Launch Control XL', key: 'a' }, { name: 'Loupedeck Live', key: 'b' }];
+    assert.equal(m._kitSource(ins, 'CH 2'), null);
+    assert.equal(m._kitSource([...ins, { name: 'CH 2', key: 'c' }], 'CH 2').key, 'c');
+    assert.equal(m._kitSource([...ins, { name: 'Alesis Drum Module · direct', key: 'x' }], 'Alesis Drum Module 0').key, 'x');
+    assert.equal(m._kitSource([...ins, { name: 'Roland TD-17', key: 'd' }], '').key, 'd');
+    assert.equal(m._kitSource([...ins, { name: 'Yamaha DTX-PRO', key: 'e' }], '').key, 'e');
+});
+
+test('Clone Hero kit map: default map until a Learn map is saved, with velocity thresholds', () => {
+    const m = freshPlugin();
+    m._applyKitMapping({ mapping: { 24: 'hihat', 38: 'snare', 49: 'ride' }, min_velocity: { 38: 10 }, device: 'CH 2' });
+    assert.equal(m._midiToLaneIdx(24), m.DRUM_LANES.findIndex((l) => l.id === 'hihat'));
+    assert.equal(m._belowKitThreshold(38, 5), true);
+    assert.equal(m._belowKitThreshold(38, 50), false);
+    assert.match(m._mapSourceText(), /Clone Hero profile "CH 2"/);
+    m._saveCfg('customMapping', { 38: 'snare' });
+    assert.equal(m._baseMapping()[24], undefined, 'a Learn map wins');
+    assert.equal(m._belowKitThreshold(38, 5), false, 'thresholds only with the profile map');
+    assert.equal(m._mapSourceText(), 'your Learn map');
+});
+
+test('_drumTabFor: a Drums arrangement with notes wins over the sloppak drum tab', () => {
+    const mod = freshPlugin();
+    const dt = { hits: [{ t: 1, p: 'kick' }] };
+    const drums = { arrangement: 'Drums' };
+    assert.equal(mod._drumTabFor({ drumTab: dt, songInfo: drums, notes: [{ t: 1, s: 1, f: 12 }] }), null);
+    assert.equal(mod._drumTabFor({ drumTab: dt, songInfo: drums, notes: [] }), dt, 'empty chart: fall back to the tab');
+    assert.equal(mod._drumTabFor({ drumTab: dt, songInfo: { arrangement: 'Lead' }, notes: [{ t: 1, s: 0, f: 3 }] }), dt);
+    assert.equal(mod._drumTabFor({ songInfo: drums, notes: [] }), null);
+    assert.equal(mod._drumTabFor({ drumTab: { hits: 'x' } }), null);
+});

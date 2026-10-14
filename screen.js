@@ -71,6 +71,10 @@ const HIT_TOLERANCE = 0.05;        // seconds (drums need tighter timing than pi
 
 const STORE_KEYS = {
     midiInputId:    'drums_midi_input',
+    // '1' when the MIDI input was picked by hand in the dropdown. Auto picks
+    // (first start, hotplug) never set it, so a later start can still move
+    // an auto-picked non-kit device (e.g. a Loupedeck) to the drum kit.
+    midiManual:     'drums_midi_manual',
     synthVolume:    'drums_synth_vol',
     midiChannel:    'drums_midi_ch',
     hitDetection:   'drums_hit_detect',
@@ -636,6 +640,45 @@ function _applyLanePreset(presetName) {
 }
 _applyLanePreset(_cfg.lanePreset);
 
+// ── E-kit mapping from Clone Hero ────────────────────────────────────
+// GET /api/plugins/drums/kit-mapping reads the kit mapping from Clone
+// Hero's active MIDI profile on the computer running feedBack (so a LAN
+// guest gets the same map). It is the default MIDI map whenever no Learn
+// map is saved: Learn edits start from it and Reset returns to it. Its
+// per-note velocity thresholds drop crosstalk / ghost triggers below them,
+// as Clone Hero does.
+let _kitMap = null;          // {midi: laneId} or null (no Clone Hero profile)
+let _kitMinVel = {};         // {midi: velocity}
+let _kitInfo = null;         // {device} for the settings panel
+function _baseMapping() {
+    return _cfg.customMapping || _kitMap;
+}
+let _kitMappingPromise = null;
+function _applyKitMapping(d) {
+    const map = d && d.mapping ? _validateCustomMapping(d.mapping) : null;
+    _kitMap = map;
+    _kitMinVel = {};
+    if (map && d.min_velocity && typeof d.min_velocity === 'object') {
+        for (const [k, v] of Object.entries(d.min_velocity)) {
+            const n = parseInt(k, 10), vel = Number(v);
+            if (Number.isFinite(n) && Number.isFinite(vel) && vel > 0) _kitMinVel[n] = vel;
+        }
+    }
+    _kitInfo = map ? { device: (d && d.device) || '' } : null;
+}
+function _loadKitMapping() {
+    if (typeof fetch !== 'function') return;
+    _kitMappingPromise = fetch('/api/plugins/drums/kit-mapping').then(r => (r.ok ? r.json() : null)).then((d) => {
+        _applyKitMapping(d);
+        try { _refreshAllMappingTables(); } catch (_) { /* no panel yet */ }
+    }).catch(() => { /* no endpoint */ });
+}
+// Below the kit profile's threshold for this note (only while its map is in use).
+function _belowKitThreshold(midiNote, velocity) {
+    return !_cfg.customMapping && !!_kitMinVel[midiNote] && velocity < _kitMinVel[midiNote];
+}
+_loadKitMapping();
+
 function _getActiveDrumMap() {
     // For the settings mapping table and Learn-mode, return the custom map
     // when set, otherwise derive the default map from _midiToLane (which is
@@ -649,10 +692,11 @@ function _getActiveDrumMap() {
     // same effective mapping that _midiToLaneIdx() produces (i.e. entries
     // that fall back to the preset-aware default are shown as unassigned
     // rather than pointing at a lane that doesn't exist).
-    if (_cfg.customMapping) {
+    const base = _baseMapping();
+    if (base) {
         const activeLaneIds = new Set(DRUM_LANES.map(l => l.id));
         const filtered = {};
-        for (const [midi, laneId] of Object.entries(_cfg.customMapping)) {
+        for (const [midi, laneId] of Object.entries(base)) {
             if (activeLaneIds.has(laneId)) filtered[midi] = laneId;
         }
         return filtered;
@@ -671,7 +715,7 @@ function _midiToLaneIdx(midiNote) {
     // _applyLanePreset() and already returns the correct index for the active
     // preset — avoiding stale lane-id references (e.g. 'tom2' in rb4 which
     // has no tom2 lane, causing findIndex to return -1 for mid-tom live hits).
-    const custom = _cfg.customMapping;
+    const custom = _baseMapping();
     if (custom) {
         const laneId = custom[midiNote];
         if (laneId) {
@@ -828,7 +872,7 @@ function _hasSound(midi) {
 }
 function _soundNote(midi) {
     if (_hasSound(midi)) return midi;
-    const map = _cfg.customMapping;
+    const map = _baseMapping();
     let lane = map ? map[midi] : null;
     if (!lane && _midiToLane[midi] != null) lane = DRUM_LANES[_midiToLane[midi]] && DRUM_LANES[_midiToLane[midi]].id;
     return (lane && LANE_SOUND_NOTE[lane]) || midi;
@@ -1240,7 +1284,7 @@ function _hhLearn(midi) {
 }
 function _isHihatPad(midi, snd) {
     if (midi === 42 || midi === 46 || snd === 42 || snd === 46) return true;
-    const map = _cfg.customMapping;
+    const map = _baseMapping();
     return !!(map && map[midi] === 'hihat');
 }
 // The sound for a hi-hat stroke given the pedal (pure apart from _hh; tested).
@@ -1698,9 +1742,8 @@ function _midiReconcileSources() {
         if (raw === '') {
             // explicit None — stay disconnected.
         } else {
-            const key = _midiResolveSaved(raw, sources);
-            if (key) _midiConnect(key);                              // saved device present → reconnect
-            else if (raw == null && sources.length) _midiConnect(sources[0].key);  // never picked → first-hotplug
+            const key = _midiAutoChoice(raw, sources);
+            if (key) _midiConnect(key);   // saved device (or the kit, or first-hotplug) present → connect
             // else: a saved pick exists but is absent → preserve (reconnect on replug)
         }
     }
@@ -1717,19 +1760,44 @@ function _midiResolveSaved(saved, sources) {
     return m ? m.key : null;
 }
 
-function _midiAutoConnect() {
+async function _midiAutoConnect() {
+    // Wait (briefly) for Clone Hero's device name so the kit can be recognised.
+    if (_kitMappingPromise) { try { await Promise.race([_kitMappingPromise, new Promise(r => setTimeout(r, 1500))]); } catch (_) { /* ignore */ } }
     const inputs = _midiSources();
     if (!inputs.length) return;
+    const key = _midiAutoChoice(_readStore(STORE_KEYS.midiInputId), inputs);
+    if (key) _midiConnect(key);
+}
 
-    // Distinguish "never picked a device" from "explicitly picked None".
-    // _readStore returns null for the never-set case and '' for an explicit-None
-    // save via _midiConnect. Only respect the explicit-None sentinel; otherwise
-    // resolve the saved selection (logicalSourceKey, or a legacy sourceId) and
-    // fall back to the first input when it's absent.
-    const raw = _readStore(STORE_KEYS.midiInputId);
-    if (raw === '') return;
+// Which input to open without asking. Explicit "None" ('') stays off and a
+// device picked by hand is kept. Otherwise the drum kit wins: an auto-picked
+// device that isn't the kit is replaced by the kit when the kit is present.
+// A saved device that is absent (unplugged) is kept for its return unless
+// the kit is here. Never picked: the first input. Returns a
+// logicalSourceKey or null.
+function _midiAutoChoice(raw, inputs) {
+    if (raw === '' || !inputs.length) return null;
+    const saved = _midiResolveSaved(raw, inputs);
+    const manual = _readStore(STORE_KEYS.midiManual) === '1';
+    if (saved && manual) return saved;
+    const kit = _kitSource(inputs);
+    if (kit) return kit.key;
+    if (saved) return saved;
+    return raw == null ? inputs[0].key : null;
+}
 
-    _midiConnect(_midiResolveSaved(raw, inputs) || inputs[0].key);
+// The drum kit among the inputs, or null: the device Clone Hero's profile is
+// named after (exact match, ignoring case, Clone Hero's " 0" index suffix and
+// the direct input's " · direct"), then a name that looks like a drum module.
+const _DRUM_NAME = /\bdrums?\b|alesis|\btd-?\d|e-?kit|roland td|yamaha dtx|\bdtx\b/i;
+function _kitSource(inputs, kitDevice) {
+    const norm = (x) => String(x || '').toLowerCase().replace(/ · direct$/, '').replace(/\s+\d+$/, '').trim();
+    const want = norm(kitDevice !== undefined ? kitDevice : (_kitInfo && _kitInfo.device));
+    if (want) {
+        const m = inputs.find(s => norm(s.name) === want);
+        if (m) return m;
+    }
+    return inputs.find(s => _DRUM_NAME.test(s.name || '')) || null;
 }
 
 async function _midiConnect(key) {
@@ -2081,7 +2149,7 @@ function _learnConsume(midiNote) {
     // Use the full customMapping (not the filtered active-only view) so
     // that inactive preset lane assignments (e.g. tom2 in rb4 mode) are
     // preserved — only the new assignment is added/overwritten.
-    const map = Object.assign({}, _cfg.customMapping || _getActiveDrumMap());
+    const map = Object.assign({}, _cfg.customMapping || _kitMap || _getActiveDrumMap());
     map[midiNote] = DRUM_LANES[_cfg.learnLane].id;
     _saveCfg('customMapping', map);
     _cfg.learnLane = null;
@@ -2090,7 +2158,16 @@ function _learnConsume(midiNote) {
     return true;
 }
 
+// Where the MIDI map in use comes from, for the settings panel / page.
+// (Lanes are by colour in the 3D view: Ri = blue cymbal, Cr = green cymbal.)
+function _mapSourceText() {
+    if (_cfg.customMapping) return 'your Learn map';
+    if (_kitMap) return 'Clone Hero profile "' + ((_kitInfo && _kitInfo.device) || 'kit') + '" (Ri = blue cymbal, Cr = green cymbal)';
+    return 'General MIDI defaults';
+}
+
 function _refreshAllMappingTables() {
+    try { document.querySelectorAll('.drums-map-source').forEach((el) => { el.textContent = '— ' + _mapSourceText(); }); } catch (_) { /* no DOM */ }
     const tables = document.querySelectorAll('.drums-map-table');
     if (!tables.length) return;
     const html = _buildMappingRows();
@@ -3045,6 +3122,9 @@ function createFactory(forceView) {
         // Learn mode: assign this MIDI note to the pending lane.
         if (_learnConsume(midiNote)) return;
 
+        // Clone Hero kit thresholds (only while its map is the one in use).
+        if (_belowKitThreshold(midiNote, velocity)) return;
+
         _heldPads.set(midiNote, { velocity, wall: performance.now() });
         _synthDrumHit(midiNote, velocity);
         _synthEnsureCtx();
@@ -3063,7 +3143,7 @@ function createFactory(forceView) {
             // The engine scores: a Learn/custom mapping entry wins, else GM.
             // (The 3D view always uses the 4-lane pro layout; the 2D lane
             // presets only change how notes are drawn.)
-            const m = _h.midiToPad(midiNote, _cfg.customMapping, _E.padFromMidi);
+            const m = _h.midiToPad(midiNote, _baseMapping(), _E.padFromMidi);
             if (m) {
                 const ht = _inputTime(ts);
                 const r = _session.hit(ht, m.pad, { cymbal: m.cymbal, velocity });
@@ -3421,7 +3501,7 @@ function createFactory(forceView) {
                 </label>
             </div>
             <details style="margin-top:2px;">
-                <summary style="font-size:10px;color:#666;cursor:pointer;">MIDI Mapping</summary>
+                <summary style="font-size:10px;color:#666;cursor:pointer;">MIDI Mapping <span class="drums-map-source" style="color:#888;">— ${_mapSourceText()}</span></summary>
                 <table class="drums-map-table" style="font-size:11px;margin-top:4px;">${_buildMappingRows()}</table>
             </details>`;
 
@@ -3435,6 +3515,7 @@ function createFactory(forceView) {
         _settingsPanel = panel;
 
         panel.querySelector('.drums-midi-select').onchange = function () {
+            _saveCfg('midiManual', this.value ? '1' : '');
             _midiConnect(this.value);
             _synthInit();
         };
@@ -4261,7 +4342,7 @@ function createFactory(forceView) {
             // the canonical drum_tab hits via _drumTabHitsToNotes.
             let drumNotes = null;
             let drumChords = null;
-            const dt = bundle.drumTab;
+            const dt = _drumTabFor(bundle);
             if (dt && Array.isArray(dt.hits)) {
                 if (_drumTabCacheKey !== dt) {
                     _drumTabCacheKey = dt;
@@ -4404,6 +4485,18 @@ function createFactory(forceView) {
     };
 
     return instance;
+}
+
+// The drum tab to play, or null. A sloppak's drum tab is for songs without
+// a real drum chart: when the loaded arrangement IS a Drums arrangement with
+// notes, that chart wins over the tab.
+function _drumTabFor(bundle) {
+    const dt = bundle && bundle.drumTab;
+    if (!dt || !Array.isArray(dt.hits)) return null;
+    const hasChart = (Array.isArray(bundle.notes) && bundle.notes.length > 0)
+        || (Array.isArray(bundle.chords) && bundle.chords.length > 0);
+    if (hasChart && _isDrumsArrangement(bundle.songInfo)) return null;
+    return dt;
 }
 
 // The loaded arrangement is a drum part (by name).
@@ -4715,6 +4808,10 @@ const _pageInst = {
     _handleDrumHit(midiNote, velocity) {
         if (midiNote < 0 || midiNote > 127) return;
         if (_learnConsume(midiNote)) { _pageLast('Learned: note ' + midiNote); return; }
+        if (_belowKitThreshold(midiNote, velocity)) {
+            _pageLast('note ' + midiNote + ' vel ' + velocity + ' — below the kit profile\'s threshold (' + _kitMinVel[midiNote] + '), ignored');
+            return;
+        }
         _synthInit();
         _synthDrumHit(midiNote, velocity);
         const idx = _midiToLaneIdx(midiNote);
@@ -4917,6 +5014,7 @@ function _pageWire() {
     q('monSave').onclick = () => { _pageMonSave(); };
     q('autoVolume').oninput = function () { _synthInit(); _setAutoVolume(parseInt(this.value, 10) / 100); _pagePercent('autoVolumeText', _cfg.autoVolume); };
     q('midi').onchange = function () {
+        _saveCfg('midiManual', this.value ? '1' : '');
         _midiConnect(this.value);
         _synthInit();
     };
@@ -5045,7 +5143,8 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoSchedule, _autoSched, _autoCancel,
-        _isDrumsArrangement, _notDrumsMessage, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
+        _isDrumsArrangement, _notDrumsMessage, _drumTabFor,
+        _midiAutoChoice, _kitSource, _applyKitMapping, _baseMapping, _belowKitThreshold, _mapSourceText, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
         // Test seam: a fake audio context / buses / sampled kit + player.
         _testSynth: (o) => {
             _audioCtx = o.ctx; _synthGain = o.synthGain || null; _autoGain = o.autoGain || null;

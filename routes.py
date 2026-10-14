@@ -1,5 +1,10 @@
 """Drum Highway backend routes.
 
+GET /api/plugins/drums/kit-mapping
+    The e-kit's pad mapping from Clone Hero's active MIDI profile on this computer (read live, so
+    remapping the kit in Clone Hero carries over). screen.js uses it as the default MIDI map when no
+    Learn map is saved, with the profile's per-note velocity thresholds.
+
 POST /api/plugins/drums/midi-log
     The settings screen's MIDI monitor: appends one recording (JSON: summary + raw messages) as a line
     to <config>/drums/midi_log.jsonl. Loopback clients only, 8 MB max.
@@ -16,6 +21,7 @@ GET /api/plugins/drums/native-midi, WS /ws/plugins/drums/midi?id=<n>
 """
 
 import asyncio
+import configparser
 import importlib.util
 import json
 import os
@@ -51,6 +57,87 @@ def append_midi_log(config_dir, body: bytes):
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(data, separators=(",", ":")) + "\n")
     return path
+
+
+# Clone Hero pro-drums binding names -> this plugin's lane ids (lanes are by colour:
+# ride = blue cymbal, crash = green cymbal, tom1/2/3 = yellow/blue/green tom).
+_CH_LANES = {
+    "Kick Pad": "kick", "Red Pad": "snare",
+    "Yellow Pad": "tom1", "Blue Pad": "tom2", "Green Pad": "tom3",
+    "Yellow Cymbal": "hihat", "Blue Cymbal": "ride", "Green Cymbal": "crash",
+}
+
+
+def clone_hero_dirs():
+    """Folders Clone Hero may keep its settings in (CLONE_HERO_DIR first)."""
+    home = Path.home()
+    cands = []
+    if os.environ.get("CLONE_HERO_DIR"):
+        cands.append(Path(os.environ["CLONE_HERO_DIR"]))
+    cands += [home / "Documents" / "Clone Hero", home / "OneDrive" / "Documents" / "Clone Hero",
+              home / "Clone Hero", home / "Library" / "Application Support" / "Clone Hero"]
+    return [d for d in cands if (d / "MIDI Profiles").is_dir()]
+
+
+def _active_device_names(ch_dir: Path):
+    """midi_device_name of each profile in profiles.ini, profile0 first."""
+    ini = configparser.ConfigParser(interpolation=None)
+    try:
+        ini.read(ch_dir / "profiles.ini", encoding="utf-8")
+    except (OSError, configparser.Error):
+        return []
+    names = []
+    for sec in sorted(ini.sections()):
+        n = ini.get(sec, "midi_device_name", fallback="").strip()
+        if n and n not in names:
+            names.append(n)
+    return names
+
+
+def parse_ch_midi_profile(text: str):
+    """Clone Hero MIDI profile YAML -> (device, {midi: lane_id}, {midi: min_velocity})."""
+    import yaml
+    data = yaml.safe_load(text) or {}
+    mapping, min_vel = {}, {}
+    for ch_name, entries in (data.get("Mappings") or {}).items():
+        lane = _CH_LANES.get(ch_name)
+        if not lane or not isinstance(entries, list):
+            continue
+        for e in entries:
+            try:
+                n = int(e.get("NoteNumber"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if 0 <= n <= 127 and n not in mapping:
+                mapping[n] = lane
+                v = e.get("Velocity")
+                if isinstance(v, (int, float)) and v > 0:
+                    min_vel[n] = int(v)
+    return data.get("DeviceName") or "", mapping, min_vel
+
+
+def find_kit_mapping():
+    """The active Clone Hero profile's kit mapping, or {'mapping': None, 'reason': ...}."""
+    dirs = clone_hero_dirs()
+    if not dirs:
+        return {"mapping": None, "reason": "Clone Hero settings folder not found"}
+    for d in dirs:
+        prof_dir = d / "MIDI Profiles"
+        files = sorted(prof_dir.glob("*.yaml"), key=lambda p: p.stat().st_mtime, reverse=True)
+        by_name = {f.stem: f for f in files}
+        pick = next((by_name[n] for n in _active_device_names(d) if n in by_name), None)
+        pick = pick or (files[0] if files else None)
+        if pick is None:
+            continue
+        try:
+            device, mapping, min_vel = parse_ch_midi_profile(pick.read_text(encoding="utf-8"))
+        except Exception as e:  # malformed YAML etc.
+            return {"mapping": None, "reason": f"Could not read {pick.name}: {e}"}
+        if mapping:
+            return {"mapping": {str(k): v for k, v in sorted(mapping.items())},
+                    "min_velocity": {str(k): v for k, v in sorted(min_vel.items())},
+                    "device": device or pick.stem, "source": str(pick)}
+    return {"mapping": None, "reason": "No Clone Hero MIDI profile with drum mappings"}
 
 
 _TEST_DEV = 999
@@ -175,6 +262,14 @@ def setup(app, context):
     except Exception as e:   # never block the plugin over the optional MIDI bridge
         if log:
             log.warning("direct MIDI input unavailable: %s", e)
+
+    @app.get("/api/plugins/drums/kit-mapping")
+    def drums_kit_mapping(request: Request):
+        r = find_kit_mapping()
+        if not is_loopback(request.client):
+            r.pop("source", None)   # LAN guests get the map, not this computer's file paths
+            r.pop("reason", None)
+        return r
 
     @app.post("/api/plugins/drums/midi-log")
     async def drums_midi_log(request: Request):
