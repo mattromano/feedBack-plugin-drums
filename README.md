@@ -15,9 +15,15 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 - **Auto-activate** — switches on automatically for Drums/Percussion arrangements
 - **MIDI drum pad input** — connect any MIDI drum pad, electronic kit, or controller via Web MIDI API
 - **Custom MIDI mapping** — "Learn" mode to assign any MIDI note to any lane, for non-standard drum pads
-- **Built-in drum sounds** — WebAudioFont-powered GM drum kit playback on MIDI hit
-- **Accuracy scoring** — hit detection with tight +/-50ms timing window, accuracy %, streak counter
+- **Built-in drum sounds** — six kits, all bundled (works offline): two real multi-sampled acoustic kits with velocity layers, **Crocell** (rock, default) and **Virtuosity** (jazz), and four WebAudioFont GM kits (JCLive, FluidR3 GM, Sound Blaster Live!, Chaos). See [Drum kits](#drum-kits).
+- **Rock Band-style 3D drum track** (default with WebGL2) — four pad lanes and a kick bar, rectangle pad gems, domed cymbals, star power and fill highlighting, and a score HUD. See [3D view](#3d-view).
+- **Keyboard drumming** — play without a kit: B kick, F snare, J/K/L toms, U/I/O cymbals, Enter = star power.
+- **Rock Band-style scoring** — score, multiplier, streak, stars and star power from a port of the YARG drums engine (`assets/engine.js`). See [Scoring](#scoring).
+- **Difficulty** — Easy, Medium, Hard, Expert or Expert+ per player (browser), changeable mid-song. See [Difficulty](#difficulty).
+- **Assists** — auto kick, auto cymbals (each up to a chosen difficulty) and hit-timing presets. See [Assists](#assists).
 - **Inline settings** — MIDI device, volume, channel filter, lane labels, hit detection, and mapping table
+- **Drums settings page** — Plugins → **Drums**: every drum setting on one page, a pad tester for your kit and your best scores. See [Settings page](#settings-page).
+- **End-of-song card** — final score, stars, accuracy, streak and where the points came from, with your best score per song and difficulty.
 
 ## Drum Lanes
 
@@ -31,6 +37,155 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 | Crash | Cr | 49, 57 | Cyan | Diamond |
 | Ride | Ri | 51, 59 | White | Diamond |
 | Kick | Ki | 35, 36 | Red | Full-width bar |
+
+## 3D view
+
+The 3D view is a WebGL renderer (`assets/highway3d.js`, on the three.js copy that ships with feedBack core)
+in the style of the classic drum games:
+
+- **Lanes** — red, yellow, blue and green pad lanes plus an orange kick bar across the track; rectangular
+  pad targets in the lane colours sit on the strikeline.
+- **Gems** — snare and toms are bevelled rounded-rectangle blocks, cymbals (hi-hat, ride, crash) are raised
+  domes, kicks are flat orange bars (double kicks magenta with a white stripe). Accents are bigger and
+  brighter, ghost notes smaller and translucent; missed notes go grey and slide past the strikeline.
+- **Feedback** — a hit flashes its target and throws sparks; a miss or a hit on an empty lane flashes the
+  lane red. Beat and measure lines scroll with the chart; drum solos tint the track violet.
+- **Star power** — phrase notes are silver-white; with half a meter the fills are marked green and the note
+  that ends the fill gets a spinning ring. While active the track edges glow blue and the multiplier doubles.
+- **HUD** — streak and multiplier left of the track; star power meter, score, stars, accuracy and the
+  difficulty badge (click it, or D / Shift+D) right of it. Core draw hooks
+  (`window.highway.fireDrawHooks`) run on the HUD canvas, so overlay plugins still work.
+
+### Choosing the view
+
+The plugin registers one picker entry, **Drum Highway** (`window.feedBackViz_drums`), which Auto mode picks
+for drum parts. Each renderer it creates reads the **View** setting in the settings panel (gear):
+
+- **Auto** (default) — 3D when WebGL2 is available, otherwise 2D.
+- **3D** / **2D** — always that view (3D still falls back to 2D without WebGL2).
+
+Changing it swaps the renderer in the main player right away; splitscreen panels pick it up the next time
+their renderer is created. `window.feedBackViz_drums3d` / `feedBackViz_drums2d` are exported for hosts
+that want one view regardless of the setting (not in the picker).
+
+### Keyboard
+
+**Keys** (on by default) lets you play with the keyboard in either view:
+
+| Key | Pad |
+|---|---|
+| B | kick |
+| F | red (snare) |
+| J / K / L | yellow / blue / green tom |
+| Shift+J/K/L, or U / I / O | yellow / blue / green cymbal |
+| Enter | activate star power (when the chart has no fills) |
+
+The keys work only while the drum view is visible and focused (in splitscreen: the focused panel), and not
+while you type in a text field. Space stays play/pause; D / Shift+D change the difficulty.
+
+## Scoring
+
+Turn on **Score** in the settings panel (gear) to see the scoring HUD: multiplier, score, streak, stars
+and the star power meter. Hit notes turn green, missed notes grey, and a pad hit on an empty lane flashes it
+red.
+
+Scoring is a JavaScript port of YARG.Core's drums engine (`assets/engine.js`, LGPL-3.0 — see
+[License](#license)), used through `assets/session.js`:
+
+- **Hit window** ±70 ms (see [Assists](#assists) for wider ones); one pad hit hits at most one note.
+- **Multiplier** grows every 10 notes up to x4, doubled during star power (x8). 60 points per note (pro
+  drums), plus a dynamics bonus for hitting an accent hard or a ghost note soft (needs a velocity-sensitive
+  kit). Pro drums: a cymbal and the tom of the same colour are different notes; with **Pro cymbals** off
+  either one hits that colour's notes.
+- **Star power** — notes in a star power phrase are drawn silver-white; hitting every note of a phrase fills
+  a quarter of the meter. With half a meter, the chart's **fills** are marked green: the hit that ends the
+  fill activates star power.
+- **Bonuses** (shown in the score) — +10 x multiplier for a hit within 25 ms, extra points for snare / tom
+  rolls, and a drum-solo bonus (100 per note hit, doubled for a perfect solo) with a live percentage during
+  a solo.
+- **Offset** (ms) — subtracted from the time of every hit; raise it if your hits register late (audio or
+  MIDI latency). Hits between frames are placed using the playback rate, not quantised to the frame rate.
+- Seeking (or a loop jumping back) restarts scoring from the new position; skipped notes aren't misses.
+
+The scoring files load on first use from core's plugin assets route (`/api/plugins/drums/assets/`). Until
+they have loaded the view shows the chart as it is.
+
+### Difficulty
+
+Each player picks **Easy**, **Medium**, **Hard**, **Expert** or **Expert+**, stored per browser
+(`localStorage` key `drums_difficulty_v1`, default Expert), so in splitscreen / multiplayer every player
+keeps their own. Change it in the settings panel, by clicking the difficulty badge (top-left of the lanes),
+or with **D** (harder) / **Shift+D** (easier) while the view is focused.
+
+- **Expert+** is the drum part as charted, double kicks included; **Expert** drops the double-kick notes
+  (`x2`). **Easy / Medium / Hard** come from the chart's own easier levels; the badge says **AUTO** when a
+  level was reduced by software rather than hand-charted.
+- A level the chart doesn't have is greyed out with the reason; a song without your saved level plays
+  Expert (the badge is dimmed) and your choice is kept for the next song.
+- Changing difficulty mid-song rebuilds the chart from the current position, like a seek.
+
+### Where star power, fills and levels come from
+
+They are part of the song's drum tab (`drum_tab.json`, feedpak 1.20.0 "drum gameplay metadata"): per-hit
+`a` (accent) and `x2` (double kick) flags, `star_power` / `fills` / `solos` as `{start_time, end_time}`
+ranges, and `levels.easy|medium|hard` with their own `hits` and a `generated` marker. feedBack's Rock Band /
+Clone Hero / YARG chart importer writes them, and core streams them to the plugin with the tab
+(`bundle.drumTab`). A tab without them — an older tab, a core that doesn't stream them yet, or drums encoded
+as guitar notes — plays **Expert only, without star power**; everything else works the same.
+
+### Assists
+
+- **Auto kick / Auto cymbals** (`drums_auto_kick_v1`, `drums_auto_cymbals_v1`): `Off`, `Easy only`,
+  `Easy – Medium`, `Easy – Hard` or `Every difficulty` — the assist is on at that difficulty and the ones
+  below it. Those notes are left out of scoring, marked as played when they reach the now line, and pad hits
+  on them are ignored. Cymbals = the chart's hi-hat, ride and crash notes. They are **played on the drum
+  sound** (scheduled ~60 ms ahead on the audio clock) so muting the drum stem leaves no holes, at their own
+  **Auto vol** (`drums_auto_volume_v1`, default 80%), so pads can stay silent when the kit module makes the
+  sound.
+- **Timing** (`drums_timing_v1`): Relaxed ±130 ms, Forgiving ±100 ms, Normal ±70 ms (YARG's default),
+  Precision (YARG's dynamic window that tightens on fast notes).
+
+## Drum kits
+
+**Kit** in the settings panel (`drums_kit_v1`) picks the sound for pad hits and the auto notes; only the
+chosen kit is loaded.
+
+- **Crocell (rock)**, the default — a real sampled kit (CrocellKit, CC BY 4.0) with 4 velocity layers x 2
+  round-robins per piece, so soft and hard hits sound different and repeated hits don't sound identical; a
+  closed / pedal hi-hat cuts a ringing open hi-hat.
+- **Virtuosity (jazz)** — the same kind of kit (Virtuosity Drums, CC0).
+- **JCLive**, **FluidR3 GM**, **Sound Blaster Live!**, **Chaos** — WebAudioFont General MIDI kits, one
+  sample per note.
+
+Everything ships in `assets/sounds/` (about 12 MB, Ogg Vorbis for the sampled kits) and loads from core's
+plugin assets route, so nothing comes from a CDN and the kits work offline. The sampled kits are fetched and
+decoded when picked and play through plain `AudioBufferSourceNode`s for low latency. A missing kit folder
+falls back to JCLive. Sources, licences and the build script: `assets/sounds/README.md`, `NOTICE.md`,
+`tools/build_sample_kit.py`.
+
+## Settings page
+
+**Plugins → Drums** (the plugin's `nav` entry) collects every drum setting on one page, grouped into
+*Difficulty & assists*, *Drum sounds* (kit, **▶ Play test**, volume), *Your kit (MIDI)* and *Display &
+controls*, plus:
+
+- **MIDI status** — the device in use, how many hits arrived, the last note / velocity / channel, and why a
+  hit was dropped (no drum view focused, channel filter) or why the device failed to open.
+- **Pad tester** — hit your pads: the lane each one counts as lights up and the kit sound plays. **Learn**
+  works here too (open *Pad mapping*, click Learn, hit the pad).
+- **Best scores** — your best score per song and difficulty.
+- **Reset drum settings** — back to the defaults, keeping your MIDI input, pad mapping and scores.
+
+The controls are the same per-browser settings as the ⚙ panel in the player and stay in sync with it.
+
+## End-of-song card
+
+When a song you played ends, a card shows the final score (engine score plus the timing, roll and solo
+bonuses), stars, accuracy, notes hit, best streak or **FC**, and chips for where the points came from: notes ×
+multiplier, star power, accents / ghosts, spot-on timing, rolls and drum solos. The best score per song and
+difficulty is kept in this browser (`localStorage` key `drums_best_v1:<song>|<difficulty>`); a higher score
+shows **NEW BEST SCORE**. Close it with the button, Esc or Enter; it also closes when the next song loads.
+Watching a chart without playing it shows no card.
 
 ## Requirements
 
@@ -71,6 +226,16 @@ Different drum pads send different MIDI note numbers. Use the "Learn" mode in se
 
 Click "Reset Map" to return to standard GM mapping.
 
+## Development
+
+Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node tests/engine.test.js`,
+`node tests/session.test.js`, `node tests/highway3d.test.js`, `node tests/kits.test.js`,
+`node tests/screen.test.js`. `tools/build_sample_kit.py` rebuilds the sampled kits (needs numpy, scipy,
+soundfile and ffmpeg).
+
 ## License
 
-MIT
+MIT, except the bundled sounds (see [Drum kits](#drum-kits) and NOTICE.md) and `assets/engine.js` / `tests/engine.test.js`: they are ports of
+[YARG.Core](https://github.com/YARC-Official/YARG.Core) and stay under the **LGPL-3.0**
+(`LICENSE.LGPL-3.0`, with the GPL-3.0 it builds on in `LICENSE.GPL-3.0`). The engine is a separate,
+replaceable file that the MIT code only calls through its public API. Details in [NOTICE.md](NOTICE.md).
