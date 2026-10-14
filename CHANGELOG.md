@@ -3,6 +3,48 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [4.5.0] - Unreleased
+
+Ported from the drums plugin of the earlier Slopsmith 0.2.9 setup (5.9 - 5.18.3).
+
+### Added
+- **Hit timing on the audio clock**: a pad hit is timed by its MIDI message's arrival time (the listener's
+  timestamp), with the highway's own render offset; keyboard hits by the key event's time.
+- **Input grace**: the engine trails the frame clock by 60 ms, so a hit struck before the last frame keeps
+  its own time (was moved to the frame: +9 ms late).
+- **Frame-exact highway clock** for both views (`window.__hwtFrameTime` when highway tweaks provides it, else
+  the 60 Hz sample extrapolated to the draw).
+- **Early/late timing meter** in the 3D HUD with a suggested input offset and an Apply button.
+- **Calibration hooks**: `drums:judgment` events, `__drumsSetInputOffset`, `__drumsGetConfig`,
+  `__drumsRefreshParams`, `__drumsSetPadVolume`, `__drumsCalibrationWindow`, `__drumsMutePads`.
+- **Split view**: kit hits reach the drum panel on screen; per-panel difficulty with a picker in the panel
+  bar; `window.__drumsPanelResults()`; no single end card in split view.
+- **Drum bus**: stereo room (Room setting, default 35 %) with low shelf and presence, no added delay;
+  per-piece panning for the GM kits; half the generated room for kits with their own room mics.
+- **Balanced, dynamic drum sounds**: one velocity law for every kit, levelled and blended sampled layers,
+  per-piece GM levels, darker soft GM hits, natural GM ring length, voice limits; a note the kit has no
+  sound for plays its lane's sound; **Velocity curve** setting.
+- **DRS** multi-mic kit as an optional kit (built locally with `tools/build_drumgizmo_kit.py`, listed when
+  present via `GET /api/plugins/drums/kits`); `tools/kit_loudness.py`, `tools/apply_balance.py`.
+- **Hi-hat pedal (CC4)** articulation (semi-open, choke, chick), **Hi-hat pedal** setting.
+- Sampled kits are playable once the first hit of every layer is decoded.
+- **MIDI monitor** on the settings page, saved to `<config>/drums/midi_log.jsonl` by the new `routes.py`.
+- **Direct MIDI input (Windows)**: `native_midi.py` (WinMM) + a loopback WebSocket, registered as a
+  midi-input provider; a harmless no-op on macOS / Linux.
+- **Clone Hero kit map** (`GET /api/plugins/drums/kit-mapping`) as the default pad map with its velocity
+  thresholds; MIDI auto-connect prefers the drum kit over another auto-picked device.
+- **One drum highway**: a Drums arrangement in a guitar view is shown on the Drum Highway (main player, per
+  song); split view pickers offer Drums once, on the Drum Highway.
+
+### Changed
+- Auto kick / cymbals are scheduled from the song's audio clock by one shared, forward-only schedule (were
+  ~28 ms late with ±16 ms wobble from the frame clock, ~7 % played twice).
+- The drum view no longer reads guitar notes as drums: on a part that isn't drums it says *Pick the Drums
+  part* or *This song has no drums*.
+- A loaded Drums arrangement with notes plays its chart rather than the sloppak's drum tab.
+- GM kits: the pad volume is no longer applied twice.
+- A missing sampled kit falls back to the default kit before a GM kit.
+
 ## [4.4.0] - Unreleased
 
 ### Added

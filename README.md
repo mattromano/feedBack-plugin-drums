@@ -15,7 +15,10 @@ A plugin for [Slopsmith](https://github.com/got-feedback/feedback) that replaces
 - **Auto-activate** — switches on automatically for Drums/Percussion arrangements
 - **MIDI drum pad input** — connect any MIDI drum pad, electronic kit, or controller via Web MIDI API
 - **Custom MIDI mapping** — "Learn" mode to assign any MIDI note to any lane, for non-standard drum pads
-- **Built-in drum sounds** — six kits, all bundled (works offline): two real multi-sampled acoustic kits with velocity layers, **Crocell** (rock, default) and **Virtuosity** (jazz), and four WebAudioFont GM kits (JCLive, FluidR3 GM, Sound Blaster Live!, Chaos). See [Drum kits](#drum-kits).
+- **Built-in drum sounds** — six kits, all bundled (works offline): two real multi-sampled acoustic kits with velocity layers, **Crocell** (rock, default) and **Virtuosity** (jazz), and four WebAudioFont GM kits (JCLive, FluidR3 GM, Sound Blaster Live!, Chaos), balanced and dynamic, through a stereo room; plus the multi-mic **DRS** kit when built locally. See [Drum kits](#drum-kits).
+- **Tight timing** — hits are timed by the MIDI message's arrival on the audio clock, a frame-exact highway clock, and an early/late meter with a suggested input offset. See [Timing](#timing).
+- **Split view** — kit hits reach the drum panel on screen, each panel keeps its own difficulty. See [Split view](#split-view).
+- **Hi-hat pedal (CC4)**, **Clone Hero kit map**, **MIDI monitor** and, on Windows, **direct MIDI input** when the browser can't see the kit. See [Your kit](#your-kit).
 - **Rock Band-style 3D drum track** (default with WebGL2) — four pad lanes and a kick bar, rectangle pad gems, domed cymbals, star power and fill highlighting, and a score HUD. See [3D view](#3d-view).
 - **Keyboard drumming** — play without a kit: B kick, F snare, J/K/L toms, U/I/O cymbals, Enter = star power.
 - **Rock Band-style scoring** — score, multiplier, streak, stars and star power from a port of the YARG drums engine (`assets/engine.js`). See [Scoring](#scoring).
@@ -104,7 +107,7 @@ Scoring is a JavaScript port of YARG.Core's drums engine (`assets/engine.js`, LG
   rolls, and a drum-solo bonus (100 per note hit, doubled for a perfect solo) with a live percentage during
   a solo.
 - **Offset** (ms) — subtracted from the time of every hit; raise it if your hits register late (audio or
-  MIDI latency). Hits between frames are placed using the playback rate, not quantised to the frame rate.
+  MIDI latency). The 3D HUD's timing meter suggests a value (see [Timing](#timing)).
 - Seeking (or a loop jumping back) restarts scoring from the new position; skipped notes aren't misses.
 
 The scoring files load on first use from core's plugin assets route (`/api/plugins/drums/assets/`). Until
@@ -145,6 +148,39 @@ as guitar notes — plays **Expert only, without star power**; everything else w
 - **Timing** (`drums_timing_v1`): Relaxed ±130 ms, Forgiving ±100 ms, Normal ±70 ms (YARG's default),
   Precision (YARG's dynamic window that tightens on fast notes).
 
+### Timing
+
+- **Hit time** — a pad hit is timed when its MIDI message arrived (the listener's timestamp), on the audio
+  clock: the playhead now plus this highway's chart / A/V offset (`window.__hwtRenderOffset` from highway
+  tweaks when present), minus how long ago the message arrived. Without it the frame clock is extrapolated
+  to now, minus the same arrival lag. Keyboard hits use the key event's timestamp.
+- **Input grace** — the engine runs 60 ms behind the frame clock (`session.js` `INPUT_GRACE`), so a hit struck
+  before the last frame but delivered after it keeps its own time (YARG's input queue used to move it to the
+  frame: measured +9 ms late). Misses become final 60 ms later.
+- **Frame clock** — both views draw from a frame-exact clock (`window.__hwtFrameTime` from highway tweaks when
+  present; else the 60 Hz `bundle.currentTime` sample extrapolated to the draw, like core's 3D highway).
+  Measured with the precise clock: per-frame step error sd 3.7 ms → 0.1 ms.
+- **Timing meter** (3D HUD, under the difficulty badge) — your last 24 hits on a ±100 ms bar (blue early,
+  orange late), their median, and after 6 hits the input offset that would centre them, with an **Apply**
+  button.
+- **Pad sounds** reach the ears tens of ms after the stick through Web Audio; for the tightest feel, set the
+  volume to 0 and listen to the kit module.
+- **Calibration hooks** for sync tools: every judged hit is a `drums:judgment` window event (`errMs`, + =
+  late); `window.__drumsSetInputOffset(ms)`, `__drumsGetConfig()`, `__drumsRefreshParams()`,
+  `__drumsSetPadVolume(v)`, `__drumsCalibrationWindow` (s, a wide fixed hit window) and `__drumsMutePads`.
+
+### Split view
+
+- Kit hits go to the focused drum panel when it is on screen, else to the first drum panel on screen.
+- Each drum panel keeps its own difficulty (`drums_difficulty_panel<N>`), with a picker in the panel bar in
+  place of the phrase-level slider. `window.__drumsPanelResults()` lists every panel's score for a results
+  card; there is no single end card in split view.
+- One drum highway: a Drums arrangement is offered once in a panel's picker, on the Drum Highway; a Drums
+  part picked in another view moves to it, and a Drum Highway panel saved on Lead moves to the song's Drums.
+  In the main player a Drums arrangement opened in a guitar view is shown on the Drum Highway for that song.
+- A part that isn't drums (and no drum tab) plays nothing and says *Pick the Drums part* or *This song has
+  no drums*, instead of reading guitar notes as drums.
+
 ## Drum kits
 
 **Kit** in the settings panel (`drums_kit_v1`) picks the sound for pad hits and the auto notes; only the
@@ -156,12 +192,55 @@ chosen kit is loaded.
 - **Virtuosity (jazz)** — the same kind of kit (Virtuosity Drums, CC0).
 - **JCLive**, **FluidR3 GM**, **Sound Blaster Live!**, **Chaos** — WebAudioFont General MIDI kits, one
   sample per note.
+- **DRS (studio, multi-mic)** — optional: DRSKit 2.1 mixed from its 13 microphones (close, overheads, real
+  room), up to 8 velocity layers x 3 hits, semi-open hi-hat. Its samples are not in the repo (built from the
+  2.8 GB source with `tools/build_drumgizmo_kit.py drs`); the picker lists it once
+  `assets/sounds/kits/drs/kit.json` is there. The same script rebuilds Crocell from its 15 microphones.
+
+How they sound:
+
+- **Balance** — every piece is levelled by perceived loudness to a drum mix (kick 0, snare 0, toms −2, hats
+  −6 / −4, ride −7, crash −5 dB): `kit.json` note gains for the sampled kits, `GM_NOTE_DB` for the GM kits.
+- **Dynamics** — one velocity law for all kits (20 × 1.75 × log10(v / 127) dB: velocity 64 is −10 dB, 20 is
+  −28 dB). Sampled layers are levelled onto it (`tools/kit_loudness.py`) and blended across layer
+  boundaries, so tone changes with velocity without steps; GM kits get a darker low-pass on soft hits.
+- **Velocity curve** (`drums_vel_curve_v1`): Linear, Soft (light hits come out stronger) or Hard.
+- **Room** (`drums_room_v1`, default 35 %): a stereo room (convolution on a generated impulse response, RT60
+  ~0.7 s) plus a gentle low shelf and presence lift; the mono GM kits are also panned piece by piece from the
+  drummer's view. Only IIR filters sit on the dry path, so it adds no delay. Kits with their own room mics get
+  half of it.
+- Voice limit per piece (4 drums, 6 cymbals; the oldest fades out), natural cymbal decays, closed / pedal
+  hi-hat chokes the open one, and a note the kit has no sound for plays its lane's sound (e.g. hi-hat hits
+  some Alesis modules send as note 24). Sampled kits are playable once the first hit of every layer is
+  decoded; the other round-robins load in the background.
 
 Everything ships in `assets/sounds/` (about 12 MB, Ogg Vorbis for the sampled kits) and loads from core's
 plugin assets route, so nothing comes from a CDN and the kits work offline. The sampled kits are fetched and
 decoded when picked and play through plain `AudioBufferSourceNode`s for low latency. A missing kit folder
-falls back to JCLive. Sources, licences and the build script: `assets/sounds/README.md`, `NOTICE.md`,
+falls back to the default kit, then JCLive. Sources, licences and the build script: `assets/sounds/README.md`, `NOTICE.md`,
 `tools/build_sample_kit.py`.
+
+## Your kit
+
+- **Clone Hero kit map** — the active Clone Hero MIDI profile on the computer running feedBack
+  (`GET /api/plugins/drums/kit-mapping`; `CLONE_HERO_DIR`, `~/Documents/Clone Hero`, `~/Clone Hero` or
+  `~/Library/Application Support/Clone Hero`) is the default pad map until you Learn one, with its per-note
+  velocity thresholds. The mapping section says which map is in use.
+- **Auto-connect** prefers the drum kit (the profile's device, or a drum-module name) over another device it
+  picked by itself; a device you pick by hand, or None, is kept.
+- **Hi-hat pedal** (`drums_hh_pedal_v1`, on by default) — the pedal position the kit sends as CC4. Modules
+  that send separate closed (42) / open (46) notes are trusted, and a half-closed pedal turns an open hit
+  into the kit's semi-open sound (note 23, multi-mic kits); modules that send one note get closed /
+  semi-open / open from the pedal (≥ 85 % / 45–85 % / below). Closing the pedal chokes a ringing open hat,
+  with a pedal chick when the kit never sends note 44. The CC4 direction is learnt from the 42 / 46 values.
+- **MIDI monitor** (settings page) — records every raw message (notes, CC, aftertouch) with per-note velocity
+  min / median / max; **Save log** appends it to `<config>/drums/midi_log.jsonl` (`POST
+  /api/plugins/drums/midi-log`, this computer only).
+- **Direct MIDI input (Windows)** — the Windows MIDI Service can hide the kit from Web MIDI. `native_midi.py`
+  reads MIDI inputs through WinMM and `routes.py` streams them (`WS /ws/plugins/drums/midi`, this computer
+  only, the device open only while a page listens); they are registered with core's midi-input domain and
+  listed as "<name> · direct" when Web MIDI has no input of that name, with the driver's arrival times. On
+  macOS / Linux nothing is loaded or registered.
 
 ## Settings page
 
@@ -173,6 +252,7 @@ controls*, plus:
   hit was dropped (no drum view focused, channel filter) or why the device failed to open.
 - **Pad tester** — hit your pads: the lane each one counts as lights up and the kit sound plays. **Learn**
   works here too (open *Pad mapping*, click Learn, hit the pad).
+- **MIDI monitor** — see [Your kit](#your-kit).
 - **Best scores** — your best score per song and difficulty.
 - **Reset drum settings** — back to the defaults, keeping your MIDI input, pad mapping and scores.
 
@@ -228,10 +308,11 @@ Click "Reset Map" to return to standard GM mapping.
 
 ## Development
 
-Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node tests/engine.test.js`,
-`node tests/session.test.js`, `node tests/highway3d.test.js`, `node tests/kits.test.js`,
-`node tests/screen.test.js`. `tools/build_sample_kit.py` rebuilds the sampled kits (needs numpy, scipy,
-soundfile and ffmpeg).
+Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node --test tests/*.test.js`, or one
+file at a time (`node tests/engine.test.js`, ...). The routes and the WinMM reader have pytest tests:
+`python -m pytest tests` (needs fastapi, httpx and PyYAML; no MIDI hardware). `tools/build_sample_kit.py`
+and `tools/build_drumgizmo_kit.py` rebuild the sampled kits, `tools/kit_loudness.py` and
+`tools/apply_balance.py` level them (need numpy, scipy, soundfile and ffmpeg).
 
 ## License
 
