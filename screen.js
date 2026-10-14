@@ -1394,6 +1394,117 @@ function _midiSources() {
     return mi.listSources().map(s => ({ id: s.sourceId, name: s.label, key: s.logicalSourceKey }));
 }
 
+// ── Direct MIDI input (Windows) ──
+// The Windows MIDI Service can hide the kit from Chromium / Electron's Web
+// MIDI (its Unicode device query failed for an Alesis module while the ANSI
+// one worked). routes.py + native_midi.py read MIDI inputs through WinMM
+// and stream them over WS /ws/plugins/drums/midi; this registers them with
+// core's midi-input domain as the 'drums-direct' provider, listed as
+// "<name> · direct" when Web MIDI has no input of that name. Each message
+// carries the driver's arrival time, mapped onto performance.now() with
+// WebSocket pings (the round with the smallest round trip of the last 12),
+// so hits keep their timing. Off Windows the route reports
+// available: false and nothing is registered.
+const DIRECT_PROVIDER = 'drums-direct';
+let _directPromise = null;
+function _directMidiInit() {
+    if (_directPromise) return _directPromise;
+    _directPromise = (async () => {
+        const mi = _mi();
+        if (!mi || typeof mi.registerProvider !== 'function' || typeof fetch !== 'function' || typeof WebSocket === 'undefined') return false;
+        const list = await _directMidiList();
+        if (!list) return false;   // not Windows (or no route): nothing to add
+        const p = _directMidiProvider(mi);
+        mi.registerProvider(p);
+        return true;
+    })().catch((e) => { console.warn('[Drums] direct MIDI input unavailable:', e); return false; });
+    return _directPromise;
+}
+// [{id, name}] from routes.py, or null when direct input isn't available here.
+async function _directMidiList() {
+    try {
+        const r = await fetch('/api/plugins/drums/native-midi', { cache: 'no-store' });
+        if (!r.ok) return null;
+        const d = await r.json();
+        if (!d || !d.available || !Array.isArray(d.inputs)) return null;
+        return d.inputs.filter((x) => x && Number.isInteger(x.id) && typeof x.name === 'string');
+    } catch (_) { return null; }
+}
+// The provider object for midiInput.registerProvider (also used by tests).
+function _directMidiProvider(mi) {
+    const socks = new Map();   // sourceId -> { ws, set, rounds, off, timer, ready }
+    let sig = '';
+    let pollTimer = null;
+    const idOf = (sourceId) => String(sourceId).replace(/^native-/, '');
+    async function enumerate() {
+        const list = (await _directMidiList()) || [];
+        sig = list.map((x) => x.id + ':' + x.name).join('|');
+        // The kit switching on / off (Alesis modules power off by themselves): re-discover.
+        if (!pollTimer && typeof setInterval === 'function') {
+            pollTimer = setInterval(async () => {
+                if (typeof document !== 'undefined' && document.hidden) return;
+                const now = (await _directMidiList()) || [];
+                if (now.map((x) => x.id + ':' + x.name).join('|') !== sig) { try { mi.discover(); } catch (_) { /* ignore */ } }
+            }, 5000);
+            if (pollTimer && typeof pollTimer.unref === 'function') pollTimer.unref();   // node tests
+        }
+        // Inputs another provider (Web MIDI) already lists are left to it.
+        const others = new Set(mi.listSources().filter((x) => x.providerId !== DIRECT_PROVIDER)
+            .map((x) => String(x.label || '').toLowerCase()));
+        return list.filter((x) => !others.has(x.name.toLowerCase()))
+            .map((x) => ({ sourceId: 'native-' + x.id, label: x.name + ' · direct', availability: 'available' }));
+    }
+    function open(sourceId) {
+        let ent = socks.get(sourceId);
+        if (!ent) {
+            ent = { set: new Set(), rounds: [], off: NaN, ws: null, timer: null };
+            socks.set(sourceId, ent);
+            ent.ready = new Promise((resolve, reject) => {
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(proto + '//' + location.host + '/ws/plugins/drums/midi?id=' + encodeURIComponent(idOf(sourceId)));
+                ent.ws = ws;
+                const ping = () => { if (ws.readyState === 1) ws.send(JSON.stringify({ ping: performance.now() })); };
+                const pings = (n) => { for (let i = 0; i < n; i++) setTimeout(ping, i * 40); };
+                ws.onmessage = (ev) => {
+                    let m;
+                    try { m = JSON.parse(ev.data); } catch (_) { return; }
+                    if (m.error) { reject(new Error(m.error)); try { ws.close(); } catch (_) { /* gone */ } return; }
+                    if (m.open) { resolve(); pings(6); ent.timer = setInterval(() => pings(3), 10000); return; }
+                    if ('pong' in m) {
+                        const now = performance.now();
+                        ent.rounds.push({ rtt: now - m.pong, off: m.t - (m.pong + now) / 2 });
+                        if (ent.rounds.length > 12) ent.rounds.shift();
+                        ent.off = ent.rounds.reduce((a, b) => (b.rtt < a.rtt ? b : a)).off;
+                        return;
+                    }
+                    if (Array.isArray(m.d)) {
+                        const ts = Number.isFinite(ent.off) && Number.isFinite(m.t) ? m.t - ent.off : performance.now();
+                        const data = Uint8Array.from(m.d);
+                        for (const fn of ent.set) { try { fn(data, ts); } catch (err) { console.warn('[Drums] MIDI listener failed:', err); } }
+                    }
+                };
+                ws.onerror = () => reject(new Error('direct MIDI connection failed'));
+                ws.onclose = () => {
+                    if (ent.timer) clearInterval(ent.timer);
+                    if (socks.get(sourceId) === ent) socks.delete(sourceId);
+                };
+            });
+        }
+        return ent.ready.then(
+            () => ({ addListener(fn) { if (typeof fn === 'function') ent.set.add(fn); }, removeListener(fn) { ent.set.delete(fn); }, _direct: sourceId }),
+            (e) => { if (socks.get(sourceId) === ent) socks.delete(sourceId); throw e; });
+    }
+    function close(sourceId) {
+        const ent = socks.get(sourceId);
+        if (!ent) return;
+        socks.delete(sourceId);
+        ent.set.clear();
+        if (ent.timer) clearInterval(ent.timer);
+        try { ent.ws.close(); } catch (_) { /* gone */ }
+    }
+    return { providerId: DIRECT_PROVIDER, label: 'Direct MIDI (Windows)', participantId: 'drums.direct-midi', enumerate, open, close };
+}
+
 // In-flight guard around discover(): Wave C calls _midiInit() once per init();
 // N concurrent splitscreen instances would otherwise issue N discover() calls
 // (each a requestMIDIAccess via the provider) before the first resolves.
@@ -1413,6 +1524,7 @@ async function _midiInit() {
     if (_midiInitPromise) return _midiInitPromise;
     _midiInitPromise = (async () => {
         try {
+            await _directMidiInit();        // Windows: the kit through WinMM as well
             const r = await mi.discover();  // permission boundary (requestMIDIAccess)
             // Only latch ready on a successful discovery — a denied/unavailable
             // outcome must NOT latch, or reopening the panel never retries.
@@ -4675,7 +4787,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _hh, _hhReset, _hhArticulation, _hhLearn, _hhPedalMove, HH_SEMI_NOTE,
-        _midiMon, _midiMonStart, _midiMonSummary,
+        _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, DIRECT_PROVIDER,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
     };
 }

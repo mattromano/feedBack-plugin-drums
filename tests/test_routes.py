@@ -42,3 +42,43 @@ def test_midi_log_is_local_only_and_size_capped(tmp_path):
     assert r.status_code == 403
     with pytest.raises(ValueError):
         routes.append_midi_log(tmp_path, b" " * (routes.MIDI_LOG_MAX + 1))
+
+
+def test_native_midi_is_a_harmless_no_op_off_windows(tmp_path, monkeypatch):
+    monkeypatch.delenv("DRUMS_MIDI_TEST", raising=False)
+    c = _client(tmp_path)
+    r = c.get("/api/plugins/drums/native-midi")
+    assert r.status_code == 200
+    if not routes._load_native_midi({}).available():   # macOS / Linux
+        assert r.json() == {"available": False, "inputs": []}
+        with c.websocket_connect("/ws/plugins/drums/midi?id=0") as ws:
+            assert "error" in json.loads(ws.receive_text())
+    assert _client(tmp_path, host="10.0.0.2").get("/api/plugins/drums/native-midi").status_code == 403
+
+
+def test_native_midi_socket_streams_messages_with_times(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRUMS_MIDI_TEST", "1")
+    c = _client(tmp_path)
+    lst = c.get("/api/plugins/drums/native-midi").json()
+    assert lst["available"] and {"id": 999, "name": "Drums test kit"} in lst["inputs"]
+    with c.websocket_connect("/ws/plugins/drums/midi?id=999") as ws:
+        hello = json.loads(ws.receive_text())
+        assert hello["open"] and hello["id"] == 999
+        ws.send_text(json.dumps({"ping": 12.5}))
+        pong = json.loads(ws.receive_text())
+        assert pong["pong"] == 12.5 and pong["t"] > 0
+        sent = c.post("/api/plugins/drums/native-midi/inject", json={"id": 999, "data": [0x99, 38, 100]}).json()
+        msg = json.loads(ws.receive_text())
+        assert msg["d"] == [0x99, 38, 100]
+        assert abs(msg["t"] - sent["t"]) < 1000
+
+
+def test_setup_uses_load_sibling_when_core_provides_it(tmp_path):
+    loaded = []
+
+    def load_sibling(name):
+        loaded.append(name)
+        return routes._load_native_midi({})
+
+    _client(tmp_path, load_sibling=load_sibling)
+    assert loaded == ["native_midi"]

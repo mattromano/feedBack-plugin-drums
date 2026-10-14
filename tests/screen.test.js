@@ -447,3 +447,44 @@ test('MIDI monitor: records raw messages only while on, skipping clock / active 
     mod._midiOnMessage({ data: [0xB9, 4, 64], timeStamp: mod._midiMon.t0 + 12.34 });
     assert.deepEqual(mod._midiMon.log, [[12.3, 0xB9, 4, 64]]);
 });
+
+test('direct MIDI: nothing is registered when the route says it is not available (macOS / Linux)', async () => {
+    const mod = freshPlugin();
+    let registered = 0;
+    global.window.slopsmith = { midiInput: { version: 1, registerProvider: () => { registered++; }, listSources: () => [] } };
+    global.WebSocket = function () {};
+    global.fetch = async () => ({ ok: true, json: async () => ({ available: false, inputs: [] }) });
+    assert.equal(await mod._directMidiInit(), false);
+    assert.equal(registered, 0);
+    delete global.fetch; delete global.WebSocket;
+});
+
+test('direct MIDI: inputs Web MIDI already lists are left to it; messages carry their mapped arrival time', async () => {
+    const mod = freshPlugin();
+    const mi = { version: 1, listSources: () => [{ providerId: 'web-midi', label: 'Loupedeck' }], discover() {} };
+    global.fetch = async () => ({ ok: true, json: async () => ({ available: true, inputs: [{ id: 0, name: 'Loupedeck' }, { id: 2, name: 'Alesis Drum Module' }] }) });
+    let now = 1000;
+    global.performance = { now: () => now };
+    global.location = { protocol: 'http:', host: 'localhost:8000' };
+    const sockets = [];
+    global.WebSocket = function (url) { this.url = url; this.readyState = 1; this.sent = []; this.send = (m) => this.sent.push(JSON.parse(m)); this.close = () => { this.closed = true; }; sockets.push(this); };
+    const p = mod._directMidiProvider(mi);
+    assert.equal(p.providerId, mod.DIRECT_PROVIDER);
+    const list = await p.enumerate();
+    assert.deepEqual(list, [{ sourceId: 'native-2', label: 'Alesis Drum Module · direct', availability: 'available' }]);
+    const opening = p.open('native-2');
+    const ws = sockets[0];
+    assert.equal(ws.url, 'ws://localhost:8000/ws/plugins/drums/midi?id=2');
+    ws.onmessage({ data: JSON.stringify({ open: true, id: 2, t: 5 }) });
+    const handle = await opening;
+    const got = [];
+    handle.addListener((data, ts) => got.push([Array.from(data), ts]));
+    // a ping sent at page time 1000 answered at server time 50000, back at page time 1004 (rtt 4)
+    now = 1004;
+    ws.onmessage({ data: JSON.stringify({ pong: 1000, t: 50000 }) });
+    ws.onmessage({ data: JSON.stringify({ d: [0x99, 38, 90], t: 50100 }) });
+    assert.deepEqual(got, [[[0x99, 38, 90], 1102]], 'server 50100 = page 1102 (offset from the ping midpoint)');
+    p.close('native-2');
+    assert.ok(ws.closed);
+    delete global.fetch; delete global.WebSocket; delete global.location;
+});
