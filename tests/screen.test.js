@@ -488,3 +488,37 @@ test('direct MIDI: inputs Web MIDI already lists are left to it; messages carry 
     assert.ok(ws.closed);
     delete global.fetch; delete global.WebSocket; delete global.location;
 });
+
+test('auto notes: scheduled from the audio clock, forward only, cancelled on a seek', () => {
+    const mod = freshPlugin();
+    let wall = 0;
+    global.performance = { now: () => wall };
+    const audio = { paused: false, currentTime: 0, playbackRate: 1, addEventListener() {} };
+    global.document.getElementById = (id) => (id === 'audio' ? audio : null);
+    let chart = 0.98;
+    global.window.highway = { getTime: () => chart };   // core's interpolated chart clock
+    const played = [];
+    const ctx = { currentTime: 10, state: 'running' };
+    const player = { play: (kit, midi, vel, when) => { const src = { midi, when, stop() { this.stopped = true; } }; played.push(src); return src; } };
+    mod._testSynth({ ctx, autoGain: {}, synthGain: {}, kit: { manifest: { notes: {} } }, player });
+    const w = (t, midi) => ({ t, s: (midi / 24) | 0, f: midi % 24 });
+    const notes = [w(1.0, 36), w(1.05, 38), w(1.2, 36), w(1.5, 36)];
+    const auto = { kick: true, cymbals: false };
+    mod._autoSchedule(notes, [], auto, 1);            // t 0.98 -> schedules (0.98, 1.08]
+    assert.deepEqual(played.map((p) => [p.midi, +(p.when - 10).toFixed(3)]), [[36, 0.02]], 'kick 20 ms ahead; snare not auto');
+    wall = 16; chart = 0.996;
+    mod._autoSchedule(notes, [], auto, 1);            // (1.08, 1.096]: nothing new, no repeat
+    assert.equal(played.length, 1);
+    mod._autoSchedule(notes, [], auto, 2);            // another panel can't take over right away
+    wall = 32; chart = 1.15; ctx.currentTime = 10.17;
+    mod._autoSchedule(notes, [], auto, 1);
+    assert.deepEqual(played.map((p) => p.midi), [36, 36]);
+    assert.ok(Math.abs(played[1].when - (10.17 + 0.05)) < 1e-9, '1.2 kick 50 ms after now');
+    chart = 0.5; wall = 48;                            // seek back: pending notes are cancelled
+    mod._autoSchedule(notes, [], auto, 1);
+    assert.ok(played[1].stopped, 'the queued kick was stopped');
+    audio.paused = true;
+    mod._autoSchedule(notes, [], auto, 1);
+    assert.ok(!Number.isFinite(mod._autoSched.to), 'paused: schedule reset');
+    delete global.window.highway;
+});

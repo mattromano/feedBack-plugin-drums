@@ -1376,6 +1376,125 @@ function _autoNotesBetween(notes, chords, from, to, auto) {
     return out;
 }
 
+// ── Auto-note scheduler ──
+// Auto notes are timed from the song's audio clock, not the frame clock: a
+// frame's song time is up to a frame old and jittery (and includes the A/V
+// offset, which only moves the picture), which put the auto kick ~30 ms late
+// with +-15 ms wobble and replayed a note now and then. A note's song time ->
+// the stems AudioContext time when the stems plugin plays the song (exact:
+// its playhead comes from that context's clock) -> the drum context time
+// heard at the same moment (both contexts' getOutputTimestamp), so the two
+// are heard together even if their output latencies differ. Without stems:
+// core's interpolated chart clock (highway.getTime()). One schedule for all
+// drum panels, and it only moves forward (no note is scheduled twice); a
+// pause, seek or song change cancels the notes that haven't sounded yet.
+const AUTO_LOOKAHEAD = 0.1;   // song seconds scheduled ahead of the playhead
+const _autoSched = { key: null, owner: null, ownerWall: -1e9, to: NaN, last: NaN, offs: [], pending: [], hooked: null };
+
+function _autoCancel() {
+    const now = _audioCtx ? _audioCtx.currentTime : 0;
+    for (const p of _autoSched.pending) {
+        if (p.t0 > now) { try { p.src.stop(); } catch (_) { /* not started / gone */ } }
+    }
+    _autoSched.pending = [];
+    _autoSched.to = NaN;
+}
+
+// The stems plugin's AudioContext (its gain nodes live in it), or null.
+function _stemsCtx() {
+    try {
+        const st = window.stems && typeof window.stems.getState === 'function' ? window.stems.getState() : null;
+        for (const s of (st || [])) if (s && s.gain && s.gain.context) return s.gain.context;
+    } catch (_) { /* no stems */ }
+    return null;
+}
+
+// Drum context time minus stems context time for sounds heard at the same
+// moment (s). Median of recent frames (getOutputTimestamp is a little noisy).
+function _autoCtxOffset(sctx) {
+    let off = NaN;
+    try {
+        const od = _audioCtx.getOutputTimestamp(), os = sctx.getOutputTimestamp();
+        if (od && os && od.performanceTime > 0 && os.performanceTime > 0) {
+            off = (od.contextTime - os.contextTime) - (od.performanceTime - os.performanceTime) / 1000;
+        }
+    } catch (_) { /* older engine */ }
+    if (!Number.isFinite(off)) {
+        const lat = (c) => (+c.outputLatency || 0) + (+c.baseLatency || 0);
+        off = (_audioCtx.currentTime - sctx.currentTime) - (lat(_audioCtx) - lat(sctx));
+    }
+    const o = _autoSched.offs;
+    o.push(off);
+    if (o.length > 31) o.shift();
+    const sorted = o.slice().sort((a, b) => a - b);
+    return sorted[sorted.length >> 1];
+}
+
+// The song's audio playhead now (chart seconds): the audio element's time
+// when stems makes it precise, else core's interpolated chart clock.
+function _autoSongTime(a, sctx) {
+    if (!sctx) {
+        try {
+            const hw = window.highway;
+            const t = hw && typeof hw.getTime === 'function' ? +hw.getTime() : NaN;
+            if (Number.isFinite(t)) return t;
+        } catch (_) { /* no host */ }
+    }
+    return +a.currentTime;
+}
+
+// Called every frame by each drum panel with the chart it plays. owner: the
+// panel's id (only one panel drives the schedule at a time).
+function _autoSchedule(notes, chords, auto, owner) {
+    const S = _autoSched;
+    const wall = performance.now();
+    if (S.owner !== owner) {
+        if (wall - S.ownerWall < 300) return;   // another panel is scheduling
+        S.owner = owner;
+    }
+    S.ownerWall = wall;
+    let a = null;
+    try { a = document.getElementById('audio'); } catch (_) { /* no DOM */ }
+    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0;
+    if (!on || !a || a.paused) {
+        if (S.pending.length || Number.isFinite(S.to)) _autoCancel();
+        S.last = NaN;
+        return;
+    }
+    if (S.hooked !== a) {
+        // Pause / seek between frames: drop what's queued right away.
+        S.hooked = a;
+        try { a.addEventListener('pause', _autoCancel); a.addEventListener('seeking', _autoCancel); } catch (_) { /* ignore */ }
+    }
+    const sctx = _stemsCtx();
+    const sNow = sctx ? sctx.currentTime : NaN;
+    const t = _autoSongTime(a, sctx);
+    if (!Number.isFinite(t)) return;
+    const rate = Math.max(0.25, Math.min(2, +a.playbackRate || 1));
+    if (S.key !== notes) { _autoCancel(); S.key = notes; }
+    // A seek the events missed: the playhead went back or jumped ahead.
+    if (Number.isFinite(S.last) && (t < S.last - 0.03 || t > S.last + 0.5)) _autoCancel();
+    S.last = t;
+    const off = sctx ? _autoCtxOffset(sctx) : 0;
+    if (!Number.isFinite(S.to)) S.to = t;   // (re)start here: nothing already due is replayed
+    const to = t + AUTO_LOOKAHEAD * rate;
+    if (!(to > S.to)) return;
+    // After a stall, notes more than 20 ms overdue are skipped, not played late.
+    const due = _autoNotesBetween(notes, chords, Math.max(S.to, t - 0.02), to, auto);
+    S.to = to;
+    if (!due.length) return;
+    _synthEnsureCtx();
+    const now = _audioCtx.currentTime;
+    // Drum context time at which song time t is heard.
+    const base = sctx ? sNow + off : now;
+    S.pending = S.pending.filter((p) => p.t0 > now);
+    for (const n of due) {
+        const when = Math.max(now, base + (n.t - t) / rate);
+        const src = _synthPlayNote(n.midi, n.vel, when, _autoGain);
+        if (src) S.pending.push({ src, t0: when });
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Web MIDI input (module-level — one MIDI access per tab)
 // ═══════════════════════════════════════════════════════════════════════
@@ -2192,38 +2311,9 @@ function createFactory(forceView) {
     let _renderScale = 1;
     let _lastHwW = 0, _lastHwH = 0;
     let _auto = { kick: false, cymbals: false };   // auto lanes for the difficulty in use
-    // Auto-note sounds: song time up to which they're scheduled, and the last
-    // frame's (song time, wall ms) for the playback-rate estimate.
-    let _autoSchedTo = NaN, _autoPrevT = NaN, _autoPrevWall = NaN;
-
-    // Play the auto notes (kick / cymbals) so a muted drum stem doesn't leave
-    // holes. Scheduled ~60 ms ahead on the audio clock for tight timing; a
-    // pause, seek or song change resets the schedule (nothing is replayed).
-    const AUTO_LOOKAHEAD = 0.06;
-    function _scheduleAutoSounds(notes, chords, t) {
-        const wall = performance.now();
-        const prevT = _autoPrevT, prevWall = _autoPrevWall;
-        _autoPrevT = t; _autoPrevWall = wall;
-        if ((!_auto.kick && !_auto.cymbals) || !_audioCtx || !_autoGain || _cfg.autoVolume <= 0) {
-            _autoSchedTo = NaN;
-            return;
-        }
-        const dt = t - prevT, dw = (wall - prevWall) / 1000;
-        if (!Number.isFinite(dt) || dt <= 0 || dt > 0.5 || !(dw > 0)) {
-            // first frame, paused, seek or jump back: start from here
-            _autoSchedTo = t;
-            return;
-        }
-        const rate = Math.max(0.25, Math.min(2, dt / dw));
-        if (!Number.isFinite(_autoSchedTo) || _autoSchedTo < t - 0.1 || _autoSchedTo > t + 1) _autoSchedTo = t;
-        const to = t + AUTO_LOOKAHEAD * rate;
-        const due = _autoNotesBetween(notes, chords, _autoSchedTo, to, _auto);
-        _autoSchedTo = to;
-        if (!due.length) return;
-        _synthEnsureCtx();
-        const now = _audioCtx.currentTime;
-        for (const n of due) _synthPlayNote(n.midi, n.vel, now + Math.max(0, (n.t - t) / rate), _autoGain);
-    }
+    // Auto notes (kick / cymbals) are played so a muted drum stem doesn't
+    // leave holes: see _autoSchedule (module level, shared by all panels).
+    function _scheduleAutoSounds(notes, chords) { _autoSchedule(notes, chords, _auto, _instanceId); }
 
     function _now() { return performance.now(); }
 
@@ -3976,7 +4066,6 @@ function createFactory(forceView) {
         _diffUiKey = '';
         _lvlMemo = null;
         _has2xMemo = null;
-        _autoSchedTo = _autoPrevT = _autoPrevWall = NaN;
         _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
         _frameClock = null;
         _audioOff = NaN;
@@ -4181,13 +4270,11 @@ function createFactory(forceView) {
             _latestChords = drumChords;
             _latestTime = ft;
             if (isReady) {
-                _scheduleAutoSounds(drumNotes, drumChords, ft);
+                _scheduleAutoSounds(drumNotes, drumChords);
                 _syncAudioOffset(bundle);
                 _syncSession(bundle, drumNotes, drumChords, ft);
                 // The 3D view reads the session's events itself (flashes, sparks).
                 if (_view !== '3d') _drainSessionEvents();
-            } else {
-                _autoSchedTo = NaN;
             }
 
             if (_view === '3d') {
@@ -4786,6 +4873,12 @@ if (typeof module !== 'undefined' && module.exports) {
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
+        _autoSchedule, _autoSched, _autoCancel,
+        // Test seam: a fake audio context / buses / sampled kit + player.
+        _testSynth: (o) => {
+            _audioCtx = o.ctx; _synthGain = o.synthGain || null; _autoGain = o.autoGain || null;
+            _sampleKit = o.kit || null; _kitPlayer = o.player || null;
+        },
         _hh, _hhReset, _hhArticulation, _hhLearn, _hhPedalMove, HH_SEMI_NOTE,
         _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, DIRECT_PROVIDER,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
