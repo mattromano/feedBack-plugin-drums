@@ -5,6 +5,10 @@ GET /api/plugins/drums/kit-mapping
     remapping the kit in Clone Hero carries over). screen.js uses it as the default MIDI map when no
     Learn map is saved, with the profile's per-note velocity thresholds.
 
+GET /api/plugins/drums/kits
+    Which sampled kit folders under assets/sounds/kits have a kit.json: {"kits": ["crocell", ...]}.
+    screen.js lists optional kits (built locally, not in the repo) only when they are there.
+
 POST /api/plugins/drums/midi-log
     The settings screen's MIDI monitor: appends one recording (JSON: summary + raw messages) as a line
     to <config>/drums/midi_log.jsonl. Loopback clients only, 8 MB max.
@@ -25,6 +29,7 @@ import configparser
 import importlib.util
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -32,6 +37,17 @@ from fastapi import Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
+_KITS_DIR = _PLUGIN_DIR / "assets" / "sounds" / "kits"
+_KIT_DIR_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def installed_kits(kits_dir=_KITS_DIR):
+    """Sampled kit folders that have a kit.json (sorted)."""
+    try:
+        return sorted(d.name for d in kits_dir.iterdir()
+                      if d.is_dir() and _KIT_DIR_RE.fullmatch(d.name) and (d / "kit.json").is_file())
+    except OSError:
+        return []
 
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 MIDI_LOG_MAX = 8 * 1024 * 1024
@@ -262,6 +278,10 @@ def setup(app, context):
     except Exception as e:   # never block the plugin over the optional MIDI bridge
         if log:
             log.warning("direct MIDI input unavailable: %s", e)
+
+    @app.get("/api/plugins/drums/kits")
+    def drums_kits():
+        return {"kits": installed_kits()}
 
     @app.get("/api/plugins/drums/kit-mapping")
     def drums_kit_mapping(request: Request):

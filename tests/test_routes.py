@@ -152,3 +152,14 @@ def test_kit_mapping_route_keeps_file_paths_on_this_computer(tmp_path, monkeypat
     assert local["device"] == "CH 2" and "source" in local
     guest = _client(tmp_path, host="192.168.4.20").get("/api/plugins/drums/kit-mapping").json()
     assert guest["mapping"] == local["mapping"] and "source" not in guest
+
+
+def test_kits_route_lists_the_kit_folders_that_are_there(tmp_path):
+    kits = _client(tmp_path).get("/api/plugins/drums/kits").json()["kits"]
+    assert "crocell" in kits and "virtuosity" in kits
+    (tmp_path / "drs").mkdir()
+    (tmp_path / "half").mkdir()
+    (tmp_path / "drs" / "kit.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "Bad Name").mkdir()
+    (tmp_path / "Bad Name" / "kit.json").write_text("{}", encoding="utf-8")
+    assert routes.installed_kits(tmp_path) == ["drs"]

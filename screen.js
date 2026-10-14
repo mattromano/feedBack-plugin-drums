@@ -962,14 +962,16 @@ async function _synthInit() {
     }
 }
 
-// Optional kits (DRUM_KITS optional) are listed once their kit.json is there.
+// Optional kits (DRUM_KITS optional) are listed once their kit.json is
+// there (GET /api/plugins/drums/kits lists the kit folders present).
 let _optionalProbe = null;
 function _probeOptionalKits() {
     if (_optionalProbe || typeof fetch !== 'function') return _optionalProbe;
-    _optionalProbe = Promise.all(KIT_IDS.filter((id) => DRUM_KITS[id].optional).map((id) =>
-        fetch(_kitBaseUrl(DRUM_KITS[id].dir) + 'kit.json?v=' + ASSET_VERSION, { cache: 'no-store' })
-            .then((r) => { _optionalKits[id] = !!r.ok; }, () => { _optionalKits[id] = false; })))
-        .then(() => {
+    _optionalProbe = fetch('/api/plugins/drums/kits', { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null), () => null)
+        .then((d) => {
+            const have = new Set(d && Array.isArray(d.kits) ? d.kits : []);
+            for (const id of KIT_IDS) if (DRUM_KITS[id].optional) _optionalKits[id] = have.has(DRUM_KITS[id].dir);
             try { document.querySelectorAll('.drums-kit-select').forEach((sel) => { sel.innerHTML = _kitOptions(_cfg.kit); }); } catch (_) { /* no DOM */ }
         });
     return _optionalProbe;
