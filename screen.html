@@ -119,6 +119,17 @@
             <div class="dr-ctl"><input type="range" class="drums-vol-slider" data-dr="volume" min="0" max="100" aria-label="Drum sound volume">
                 <span data-dr="volumeText" style="font-size:.75rem;color:#9ca3af;width:2.5rem;text-align:right;"></span></div>
         </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Velocity curve</div>
+                <div class="dr-d">How hard you hit sets how loud and how bright each drum sounds. Soft: light hits come out stronger (if your pads read low). Hard: you have to hit harder for the full sound.</div></div>
+            <div class="dr-ctl"><select class="drums-velcurve-select" data-dr="velCurve" aria-label="Velocity curve"></select></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Room</div>
+                <div class="dr-d">Room ambience on the drum sounds: stereo space instead of a flat, dry kit. Adds no delay.</div></div>
+            <div class="dr-ctl"><input type="range" class="drums-room-slider" data-dr="room" min="0" max="100" aria-label="Room ambience">
+                <span data-dr="roomText" style="font-size:.75rem;color:#9ca3af;width:2.5rem;text-align:right;"></span></div>
+        </div>
     </section>
 
     <section class="dr-card" aria-labelledby="dr-h-kit">

@@ -108,6 +108,12 @@ const STORE_KEYS = {
     keyboard:       'drums_kbd',
     // Drum synth sound set (DRUM_KITS).
     kit:            'drums_kit_v1',
+    // Room: how much room ambience (stereo convolution reverb) the drum
+    // sounds get, 0..1. The dry sound is never delayed by it.
+    room:           'drums_room_v1',
+    // Velocity curve for pad hits (VEL_CURVES): how the kit's MIDI velocity
+    // maps to the hit strength the drum sounds use.
+    velCurve:       'drums_vel_curve_v1',
 };
 
 // Valid preset ids — kept here so _saveCfg can validate before persisting
@@ -126,6 +132,17 @@ const AUTO_LEVEL_IDS = ['off', 'easy', 'medium', 'hard', 'all'];
 const AUTO_LEVEL_NAMES = { off: 'Off', easy: 'Easy only', medium: 'Easy – Medium', hard: 'Easy – Hard', all: 'Every difficulty' };
 const _VALID_AUTO_LEVELS = new Set(AUTO_LEVEL_IDS);
 
+// Pad velocity curves: exponent on velocity/127. Soft: light hits come out
+// stronger (pads that read low); hard: it takes a harder hit for full sound.
+const VEL_CURVES = { soft: 0.65, linear: 1, hard: 1.5 };
+const VEL_CURVE_IDS = ['soft', 'linear', 'hard'];
+const VEL_CURVE_NAMES = { soft: 'Soft (light hits louder)', linear: 'Linear', hard: 'Hard (hit harder for full sound)' };
+const _VALID_VEL_CURVES = new Set(VEL_CURVE_IDS);
+function _curveVelocity(v, curve) {
+    const x = Math.max(1, Math.min(127, Number(v) || 1)) / 127;
+    return Math.max(1, Math.min(127, Math.round(127 * Math.pow(x, VEL_CURVES[curve] || 1))));
+}
+
 // Hit window presets for the engine (engine.js params.hitWindow).
 // Normal = YARG's default 140 ms window (±70 ms).
 const TIMING_PRESETS = {
@@ -143,8 +160,13 @@ const TIMING_IDS = ['relaxed', 'forgiving', 'normal', 'precision'];
 // round-robins in assets/sounds/kits/<dir>/ (kit.json + Ogg Vorbis, built
 // by tools/build_sample_kit.py, played by assets/kits.js). The others are
 // WebAudioFont General MIDI kits (one sample per note). Only the chosen
-// kit is loaded.
+// kit is loaded. `optional`: a kit whose samples are not in the repo (built
+// from its multi-GB source with tools/build_drumgizmo_kit.py, see
+// assets/sounds/README.md); it is listed once its folder is there. `room`:
+// how much of the generated room a kit recorded with its own room mics gets.
 const DRUM_KITS = {
+    drs:        { name: 'DRS (studio, multi-mic)', type: 'samples', dir: 'drs', optional: true, room: 0.5,
+        note: 'real kit from 13 mics with our own mix and a real room, up to 8 velocity layers x 3 hits' },
     crocell:    { name: 'Crocell (rock)', type: 'samples', dir: 'crocell', note: 'real sampled rock kit, velocity layers (default)' },
     virtuosity: { name: 'Virtuosity (jazz)', type: 'samples', dir: 'virtuosity', note: 'real sampled jazz kit, velocity layers' },
     jclive: { name: 'JCLive', sf: 'JCLive_sf2_file', note: 'tight, dry GM rock kit' },
@@ -152,7 +174,7 @@ const DRUM_KITS = {
     sblive: { name: 'Sound Blaster Live!', sf: 'SBLive_sf2', note: 'punchy, bright GM kit' },
     chaos:  { name: 'Chaos', sf: 'Chaos_sf2_file', note: 'lighter, softer GM kit' },
 };
-const KIT_IDS = ['crocell', 'virtuosity', 'jclive', 'fluid', 'sblive', 'chaos'];
+const KIT_IDS = ['drs', 'crocell', 'virtuosity', 'jclive', 'fluid', 'sblive', 'chaos'];
 const DEFAULT_KIT = 'crocell';
 
 // Safe localStorage reader — getItem can throw SecurityError in
@@ -245,6 +267,11 @@ const _cfg = {
         const raw = _readStore(STORE_KEYS.kit);
         return Object.prototype.hasOwnProperty.call(DRUM_KITS, raw) ? raw : DEFAULT_KIT;
     })(),
+    room:           _readNum(STORE_KEYS.room, 0.35, 0, 1),
+    velCurve:       (function () {
+        const raw = _readStore(STORE_KEYS.velCurve);
+        return _VALID_VEL_CURVES.has(raw) ? raw : 'linear';
+    })(),
     autoKick:       (function () {
         const raw = _readStore(STORE_KEYS.autoKick);
         return _VALID_AUTO_LEVELS.has(raw) ? raw : 'off';
@@ -295,9 +322,12 @@ function _saveCfg(key, val) {
     if (key === 'kit' && !Object.prototype.hasOwnProperty.call(DRUM_KITS, val)) {
         val = DEFAULT_KIT;
     }
-    if (key === 'autoVolume' || key === 'synthVolume') {
+    if (key === 'autoVolume' || key === 'synthVolume' || key === 'room') {
         const n = Number(val);
-        val = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : (key === 'autoVolume' ? 0.8 : 0.7);
+        val = Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : ({ autoVolume: 0.8, synthVolume: 0.7, room: 0.35 }[key]);
+    }
+    if (key === 'velCurve' && !_VALID_VEL_CURVES.has(val)) {
+        val = 'linear';
     }
     if (key === 'inputOffsetMs') {
         const n = Math.round(Number(val));
@@ -410,10 +440,13 @@ function _timingOptions(current) {
     for (const id of TIMING_IDS) names[id] = TIMING_PRESETS[id].name;
     return _optList(TIMING_IDS, names, current);
 }
+// Kits for the picker: optional kits only once their folder is there (or
+// when already picked).
 function _kitOptions(current) {
     const names = {};
-    for (const id of KIT_IDS) names[id] = DRUM_KITS[id].name;
-    return _optList(KIT_IDS, names, current);
+    const ids = KIT_IDS.filter((id) => !DRUM_KITS[id].optional || _optionalKits[id] === true || id === current);
+    for (const id of ids) names[id] = DRUM_KITS[id].name;
+    return _optList(ids, names, current);
 }
 
 const _SEL_CSS = 'background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:11px;color:#ccc;outline:none;';
@@ -452,6 +485,7 @@ let _autoGain = null;        // bus for auto-played notes (its own volume)
 let _synthLoading = false;
 let _playerScriptLoaded = false;
 const _drumPresets = {};           // midiNote -> preset
+const _optionalKits = {};          // optional kit id -> true (folder there) / false; unset = not checked yet
 
 // ═══════════════════════════════════════════════════════════════════════
 // MIDI / Drum Mapping
@@ -779,6 +813,40 @@ function _kitBaseUrl(dir) { return SOUNDS_BASE + 'kits/' + dir + '/'; }
 // and alternate tom3 (58) produce audio rather than scoring silently.
 const DRUM_MIDI_NOTES = [35, 36, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59];
 
+// A pad sound for each lane, used when the kit sends a note this kit has no
+// sound for (e.g. hi-hat hits some Alesis modules send as note 24).
+const LANE_SOUND_NOTE = { kick: 36, snare: 38, hihat: 42, tom1: 48, tom2: 45, tom3: 43, ride: 51, crash: 49 };
+function _hasSound(midi) {
+    return _sampleKit ? !!(_sampleKit.manifest && _sampleKit.manifest.notes[midi]) : !!_drumPresets[midi];
+}
+function _soundNote(midi) {
+    if (_hasSound(midi)) return midi;
+    const map = _cfg.customMapping;
+    let lane = map ? map[midi] : null;
+    if (!lane && _midiToLane[midi] != null) lane = DRUM_LANES[_midiToLane[midi]] && DRUM_LANES[_midiToLane[midi]].id;
+    return (lane && LANE_SOUND_NOTE[lane]) || midi;
+}
+
+// Per-piece level (dB) of the General MIDI kits, so the pieces sit in a
+// natural drum mix: measured loudness (K-weighted, loudest 400 ms in the
+// first 1.5 s, velocity 100) matched to a target drum mix (kick 0, snare 0,
+// toms -2, hats -6/-4, ride -7, crash -5 dB) with a muted-browser bench.
+// Sampled kits carry theirs in kit.json (note "gain").
+const GM_NOTE_DB = {
+    jclive: { 35: -4.8, 36: -4.7, 37: -6.8, 38: 4.7, 40: 1.2, 41: -5.8, 42: 1.2, 43: -5.5, 44: 2.9, 45: -5.1, 46: -3.4, 47: -5.5, 48: -5.0, 49: 0.7, 50: -3.7, 51: 0.7, 52: -11.3, 53: -7.4, 55: -9.6, 57: 1.9, 59: -3.6 },
+    fluid: { 35: -2.4, 36: -2.3, 37: -8.1, 38: 2.3, 40: 3.9, 41: -2.2, 42: -5.7, 43: -3.6, 44: -8.0, 45: 0.8, 46: -1.9, 47: 0.5, 48: 0.8, 49: -12.0, 50: 1.8, 51: -7.4, 52: -11.4, 53: -8.1, 55: -9.5, 57: -12.0, 59: -6.3 },
+    sblive: { 35: -2.8, 36: -2.5, 37: -2.2, 38: 2.5, 40: 3.5, 41: -3.7, 42: 5.8, 43: -3.1, 44: -0.8, 45: -2.5, 46: 1.5, 47: -2.2, 48: -1.3, 49: -9.5, 50: -0.9, 51: 2.1, 52: -7.5, 53: -2.1, 55: -3.2, 57: -9.3, 59: 2.6 },
+    chaos: { 35: -2.8, 36: -3.0, 37: 4.7, 38: 3.0, 40: 3.9, 41: -0.8, 42: 3.2, 43: -0.1, 44: -1.7, 45: -0.1, 46: -4.8, 47: 1.0, 48: 0.2, 49: -3.4, 50: 1.5, 51: 11.7, 52: 0.1, 53: 6.3, 55: 0.9, 57: 0.1, 59: 12.0 },
+};
+function _gmNoteGain(kitId, midi) {
+    const t = GM_NOTE_DB[kitId];
+    const db = t && Number.isFinite(t[midi]) ? t[midi] : 0;
+    return Math.pow(10, db / 20);
+}
+// How loudness follows velocity on every kit (same law as assets/kits.js
+// KIT_VEL_LAW): level = 20 * 1.75 * log10(v / 127) dB.
+const KIT_VEL_LAW = 1.75;
+
 function _drumWafVar(note, sf)  { return '_drum_' + note + '_0_' + sf; }
 function _drumWafUrl(note, sf)  { return SOUNDS_BASE + '128' + note + '_0_' + sf + '.js'; }
 
@@ -831,14 +899,185 @@ async function _synthInit() {
         _audioCtx = new AC({ latencyHint: 'interactive' });
         _synthGain = _audioCtx.createGain();
         _synthGain.gain.value = _cfg.synthVolume;
-        _synthGain.connect(_audioCtx.destination);
         _autoGain = _audioCtx.createGain();
         _autoGain.gain.value = _cfg.autoVolume;
-        _autoGain.connect(_audioCtx.destination);
+        const mix = _buildDrumBus(_audioCtx);
+        _synthGain.connect(mix);
+        _autoGain.connect(mix);
+        _probeOptionalKits();
         await _synthLoadDrumKit();
     } catch (e) {
         console.warn('[Drums] Synth init failed:', e);
     }
+}
+
+// Optional kits (DRUM_KITS optional) are listed once their kit.json is there.
+let _optionalProbe = null;
+function _probeOptionalKits() {
+    if (_optionalProbe || typeof fetch !== 'function') return _optionalProbe;
+    _optionalProbe = Promise.all(KIT_IDS.filter((id) => DRUM_KITS[id].optional).map((id) =>
+        fetch(_kitBaseUrl(DRUM_KITS[id].dir) + 'kit.json?v=' + ASSET_VERSION, { cache: 'no-store' })
+            .then((r) => { _optionalKits[id] = !!r.ok; }, () => { _optionalKits[id] = false; })))
+        .then(() => {
+            try { document.querySelectorAll('.drums-kit-select').forEach((sel) => { sel.innerHTML = _kitOptions(_cfg.kit); }); } catch (_) { /* no DOM */ }
+        });
+    return _optionalProbe;
+}
+
+// ── Drum bus: EQ + stereo room ──
+// pads / auto notes -> mix -> low shelf -> presence -> out
+//                        \-> room send -> convolver (generated stereo room IR) -> high-pass -/
+// Only IIR filters sit on the dry path (no DynamicsCompressor: Chromium's has
+// a fixed ~6 ms look-ahead), so the room adds space without adding delay.
+let _roomSend = null;
+// Kits recorded with their own room mics get less of the generated room, so
+// the Room setting sounds alike on every kit (kit.json "room", else DRUM_KITS).
+function _kitRoomScale() {
+    const m = _sampleKit && _sampleKit.manifest;
+    if (m && typeof m.room === 'number') return m.room;
+    if (m && /multi-mic/i.test(m.name || '')) return 0.5;
+    const k = DRUM_KITS[_cfg.kit];
+    return _sampleKit && k && typeof k.room === 'number' ? k.room : 1;
+}
+function _roomSendGain(room) { return Math.max(0, Math.min(1, room)) * 1.6 * _kitRoomScale(); }
+function _buildDrumBus(ctx) {
+    const mix = ctx.createGain();
+    const low = ctx.createBiquadFilter();
+    low.type = 'lowshelf'; low.frequency.value = 90; low.gain.value = 2.5;
+    const pres = ctx.createBiquadFilter();
+    pres.type = 'peaking'; pres.frequency.value = 3800; pres.Q.value = 0.9; pres.gain.value = 1.5;
+    mix.connect(low); low.connect(pres); pres.connect(ctx.destination);
+    try {
+        _roomSend = ctx.createGain();
+        _roomSend.gain.value = _roomSendGain(_cfg.room);
+        const conv = ctx.createConvolver();
+        conv.normalize = false;
+        conv.buffer = _makeRoomIR(ctx);
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass'; hp.frequency.value = 160;   // keep kick boom out of the room
+        mix.connect(_roomSend); _roomSend.connect(conv); conv.connect(hp); hp.connect(low);
+    } catch (e) {
+        console.warn('[Drums] room reverb unavailable:', e);
+        _roomSend = null;
+    }
+    return mix;
+}
+
+// A small live room as a stereo impulse response: a few early reflections
+// (different on each side, so the kit gets width and depth) and a dense
+// decaying tail (RT60 ~0.7 s) whose highs die away faster than its lows.
+// Deterministic (seeded noise), so every session sounds the same.
+function _makeRoomIR(ctx) {
+    const sr = ctx.sampleRate, len = Math.floor(sr * 1.1);
+    const buf = ctx.createBuffer(2, len, sr);
+    let seed = 0x2468ace1;
+    const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return ((seed >>> 0) / 4294967296) * 2 - 1; };
+    const rt60 = 0.7, pre = 0.012;
+    const early = [[0.011, 0.55, 0.25], [0.017, 0.2, 0.5], [0.023, 0.42, 0.3], [0.031, 0.25, 0.4], [0.038, 0.3, 0.18], [0.047, 0.15, 0.28]];
+    for (let ch = 0; ch < 2; ch++) {
+        const d = buf.getChannelData(ch);
+        let lp = 0;
+        for (let i = Math.floor(pre * sr); i < len; i++) {
+            const t = i / sr;
+            const env = Math.exp(-6.91 * (t - pre) / rt60);
+            // One-pole low-pass whose cutoff falls over time: dark tail, bright start.
+            const a = Math.min(0.95, 0.15 + 0.8 * (t / 1.1));
+            lp = lp * a + rnd() * (1 - a);
+            d[i] = lp * env * 0.9 * Math.min(1, (t - pre) / 0.02);
+        }
+        for (const [tt, gl, gr] of early) {
+            const i = Math.floor(tt * sr);
+            if (i < len) d[i] += ch === 0 ? gl : gr;
+        }
+    }
+    // Normalise the energy so the send level means the same at any sample rate.
+    let e = 0;
+    for (let ch = 0; ch < 2; ch++) { const d = buf.getChannelData(ch); for (let i = 0; i < len; i++) e += d[i] * d[i]; }
+    const k = 1 / Math.sqrt(e / 2 || 1);
+    for (let ch = 0; ch < 2; ch++) { const d = buf.getChannelData(ch); for (let i = 0; i < len; i++) d[i] *= k; }
+    return buf;
+}
+
+function _setRoom(v) {
+    _saveCfg('room', v);
+    if (_roomSend) _roomSend.gain.value = _roomSendGain(_cfg.room);
+    try {
+        document.querySelectorAll('.drums-room-slider').forEach((el) => { el.value = String(Math.round(_cfg.room * 100)); });
+    } catch (_) { /* no DOM */ }
+}
+
+// Where each piece sits in the stereo image (drummer's view: hi-hat left,
+// ride right, toms high to low left to right). Only for the General MIDI
+// kits, whose samples are mono; the multi-sampled kits are recorded in stereo.
+const DRUM_PAN = {
+    35: 0, 36: 0, 37: -0.05, 38: -0.05, 39: -0.1, 40: -0.05,
+    42: -0.45, 44: -0.45, 46: -0.45,
+    50: -0.3, 48: -0.15, 47: 0.05, 45: 0.2, 43: 0.38, 41: 0.5,
+    49: -0.55, 55: -0.3, 57: 0.55, 52: 0.65, 51: 0.5, 59: 0.5, 53: 0.45,
+};
+const _panNodes = new Map();   // dest bus -> Map(midi -> StereoPannerNode)
+function _panFor(dest, midi) {
+    const pan = DRUM_PAN[midi];
+    if (!pan || !_audioCtx || typeof _audioCtx.createStereoPanner !== 'function') return dest;
+    let m = _panNodes.get(dest);
+    if (!m) { m = new Map(); _panNodes.set(dest, m); }
+    let node = m.get(midi);
+    if (!node) {
+        node = _audioCtx.createStereoPanner();
+        node.pan.value = pan;
+        node.connect(dest);
+        m.set(midi, node);
+    }
+    return node;
+}
+
+// Cymbal-like GM notes (ring long; the 2D voice limit and GM durations).
+const _CYMBAL_NOTES = new Set([46, 49, 51, 52, 53, 55, 57, 59]);
+// How long a GM drum sound may ring (s; the player cuts it there, or at the
+// sample's own end). Cymbals were cut at 0.5 s before.
+function _gmDuration(midi) {
+    if (_CYMBAL_NOTES.has(midi)) return midi === 46 ? 2.2 : 4.5;
+    if (midi === 41 || midi === 43 || midi === 45 || midi === 47 || midi === 48 || midi === 50 || midi === 58) return 1.6;
+    return 1.0;
+}
+// Closed / pedal hi-hat cut a ringing open hi-hat (as the sampled kits' chokes).
+const GM_CHOKES = { 42: [46], 44: [46] };
+const _gmVoices = {};   // midi -> [{env, src, t0}]
+function _gmChokeNotes(notes, t) {
+    for (const c of notes) {
+        for (const v of (_gmVoices[c] || [])) {
+            if (v.t0 > t) continue;
+            try {
+                v.env.gain.cancelScheduledValues(t);
+                v.env.gain.setTargetAtTime(0, t, 0.012);
+                v.src.stop(t + 0.1);
+            } catch (_) { /* already stopped */ }
+        }
+        _gmVoices[c] = [];
+    }
+}
+
+// GM kits have one sample per piece, so a soft hit would only be quieter.
+// Softer hits go through a darker low-pass (5 shared filters per piece and
+// bus, IIR so no delay): soft sounds soft in tone, as a real drum does.
+const _lpNodes = new Map();   // dest bus -> Map('midi:band' -> BiquadFilterNode)
+function _gmTarget(dest, midi, x) {
+    const pan = _panFor(dest, midi);
+    const band = Math.min(5, Math.floor(x / 0.17));
+    if (band >= 5 || typeof _audioCtx.createBiquadFilter !== 'function') return pan;
+    let m = _lpNodes.get(dest);
+    if (!m) { m = new Map(); _lpNodes.set(dest, m); }
+    const key = midi + ':' + band;
+    let lp = m.get(key);
+    if (!lp) {
+        lp = _audioCtx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 2000 * Math.pow(2, band * 0.55);   // 2.0 / 2.9 / 4.3 / 6.3 / 9.2 kHz
+        lp.Q.value = 0.5;
+        lp.connect(pan);
+        m.set(key, lp);
+    }
+    return lp;
 }
 
 // The WebAudioFont player, loaded only when a GM kit is used.
@@ -866,12 +1105,27 @@ async function _synthLoadDrumKit() {
                 if (seq === _kitLoadSeq) {
                     _sampleKit = kit;
                     _dropSampleKitsExcept(kitId);
+                    if (_roomSend) _roomSend.gain.value = _roomSendGain(_cfg.room);
                 }
                 return;
             } catch (e) {
-                // Missing / broken kit folder: fall back to the GM kit so pads still sound.
-                console.warn('[Drums] Sampled kit ' + kitId + ' failed, using JCLive:', e);
+                // Missing / broken kit folder (e.g. an optional kit not built
+                // here): the default sampled kit, else a GM kit, so pads still sound.
                 if (seq !== _kitLoadSeq) return;
+                if (kitId !== DEFAULT_KIT && _kitIsSampled(DEFAULT_KIT)) {
+                    console.warn('[Drums] Sampled kit ' + kitId + ' failed, using ' + DEFAULT_KIT + ':', e);
+                    try {
+                        const kit = await _loadSampleKit(DEFAULT_KIT);
+                        if (seq === _kitLoadSeq) {
+                            _sampleKit = kit;
+                            _dropSampleKitsExcept(DEFAULT_KIT);
+                            if (_roomSend) _roomSend.gain.value = _roomSendGain(_cfg.room);
+                        }
+                        return;
+                    } catch (_) { /* fall through to the GM kit */ }
+                    if (seq !== _kitLoadSeq) return;
+                }
+                console.warn('[Drums] Sampled kit ' + kitId + ' failed, using JCLive:', e);
             }
         }
         if (!(await _ensureWafPlayer())) return;
@@ -879,6 +1133,7 @@ async function _synthLoadDrumKit() {
         if (seq === _kitLoadSeq) {
             _sampleKit = null;
             _dropSampleKitsExcept(null);
+            if (_roomSend) _roomSend.gain.value = _roomSendGain(_cfg.room);
         }
     } catch (e) {
         console.warn('[Drums] Kit load failed:', e);
@@ -919,17 +1174,28 @@ function _synthEnsureCtx() {
 
 // One drum sound at `when` (AudioContext time; 0 = now). dest: the output
 // bus (default: the pad bus _synthGain; _autoGain for auto-played notes).
+// Returns the AudioBufferSourceNode it started (so a scheduled note can be
+// cancelled), or null.
 function _synthPlayNote(midiNote, velocity, when, dest) {
-    if (!_audioCtx || !_synthGain) return;
+    if (!_audioCtx || !_synthGain) return null;
     dest = dest || _synthGain;
     if (_sampleKit && _kitPlayer) {
-        _kitPlayer.play(_sampleKit, midiNote, velocity, when, dest);
-        return;
+        return _kitPlayer.play(_sampleKit, midiNote, velocity, when, dest) || null;
     }
     const preset = _drumPresets[midiNote];
-    if (!preset || !_synthPlayer) return;
-    _synthPlayer.queueWaveTable(_audioCtx, dest, preset, when || 0, midiNote, when ? 0.6 : 0.5,
-        (velocity / 127) * (dest === _synthGain ? _cfg.synthVolume : 1));
+    if (!preset || !_synthPlayer) return null;
+    // The pad volume is the pad bus gain (it used to be applied here too).
+    const x = Math.max(1, Math.min(127, Number(velocity) || 1)) / 127;
+    const t = Math.max(when || 0, _audioCtx.currentTime);
+    if (GM_CHOKES[midiNote]) _gmChokeNotes(GM_CHOKES[midiNote], t);
+    const env = _synthPlayer.queueWaveTable(_audioCtx, _gmTarget(dest, midiNote, x), preset, when || 0, midiNote,
+        _gmDuration(midiNote), Math.pow(x, KIT_VEL_LAW) * _gmNoteGain(_cfg.kit, midiNote));
+    if (env && env.audioBufferSourceNode) {
+        const list = (_gmVoices[midiNote] = _gmVoices[midiNote] || []);
+        list.push({ env, src: env.audioBufferSourceNode, t0: t });
+        if (list.length > 8) list.shift();
+    }
+    return (env && env.audioBufferSourceNode) || null;
 }
 
 function _synthDrumHit(midiNote, velocity) {
@@ -938,7 +1204,7 @@ function _synthDrumHit(midiNote, velocity) {
     // ms after the stick and pull the player's timing.
     if (typeof window !== 'undefined' && window.__drumsMutePads) return;
     _synthEnsureCtx();
-    _synthPlayNote(midiNote, velocity, 0);
+    _synthPlayNote(_soundNote(midiNote), _curveVelocity(velocity, _cfg.velCurve), 0);
 }
 
 function _synthSetVolume(vol) {
@@ -952,6 +1218,7 @@ function _synthSetVolume(vol) {
 // Switch the synth's sound set. Loads only the picked kit (lazily, once).
 async function _synthSetKit(kitId) {
     _saveCfg('kit', kitId);
+    if (_roomSend) _roomSend.gain.value = _roomSendGain(_cfg.room);
     try { document.querySelectorAll('.drums-kit-select').forEach((sel) => { sel.value = _cfg.kit; }); } catch (_) { /* no DOM */ }
     if (_audioCtx) await _synthLoadDrumKit();
 }
@@ -2712,6 +2979,12 @@ function createFactory(forceView) {
                         value="${Math.round(_cfg.synthVolume * 100)}"
                         style="width:70px;accent-color:#ef4444;height:14px;">
                 </div>
+                <div style="display:flex;align-items:center;gap:4px;" title="Room ambience on the drum sounds (adds no delay)">
+                    <span style="font-size:10px;color:#666;">Room</span>
+                    <input type="range" class="drums-room-slider" min="0" max="100" aria-label="Room ambience"
+                        value="${Math.round(_cfg.room * 100)}"
+                        style="width:56px;accent-color:#60a0ff;height:14px;">
+                </div>
                 <div style="display:flex;align-items:center;gap:4px;">
                     <span style="font-size:10px;color:#666;">Ch</span>
                     <select class="drums-channel-select" style="background:#1a1a2e;border:1px solid #333;border-radius:6px;
@@ -2826,6 +3099,9 @@ function createFactory(forceView) {
         };
         panel.querySelector('.drums-vol-slider').oninput = function () {
             _synthSetVolume(parseInt(this.value) / 100);
+        };
+        panel.querySelector('.drums-room-slider').oninput = function () {
+            _setRoom(parseInt(this.value, 10) / 100);
         };
         panel.querySelector('.drums-channel-select').onchange = function () {
             _saveCfg('midiChannel', parseInt(this.value));
@@ -4029,11 +4305,14 @@ function _pageFill() {
     q('autoCymbals').innerHTML = _autoOptions(_cfg.autoCymbals);
     q('timing').innerHTML = _timingOptions(_cfg.timing);
     q('kit').innerHTML = _kitOptions(_cfg.kit);
+    _probeOptionalKits();
     q('channel').innerHTML = '<option value="-1">All channels</option>'
         + Array.from({ length: 16 }, (_, i) => `<option value="${i}">${i + 1}${i === 9 ? ' (drums)' : ''}</option>`).join('');
     q('channel').value = String(_cfg.midiChannel);
     q('proCymbals').checked = _cfg.proCymbals;
     q('volume').value = String(Math.round(_cfg.synthVolume * 100));
+    q('room').value = String(Math.round(_cfg.room * 100));
+    q('velCurve').innerHTML = _optList(VEL_CURVE_IDS, VEL_CURVE_NAMES, _cfg.velCurve);
     q('autoVolume').value = String(Math.round(_cfg.autoVolume * 100));
     q('view').value = _cfg.view;
     q('offset').value = String(_cfg.inputOffsetMs);
@@ -4045,6 +4324,7 @@ function _pageFill() {
     if (v) v.textContent = 'Drum Highway ' + ASSET_VERSION;
     _pageKitNote();
     _pagePercent('volumeText', _cfg.synthVolume);
+    _pagePercent('roomText', _cfg.room);
     _pagePercent('autoVolumeText', _cfg.autoVolume);
     _pageRenderPads();
     _pageRenderBest();
@@ -4068,6 +4348,8 @@ function _pageWire() {
     };
     q('test').onclick = () => { _synthPlayTest(); };
     q('volume').oninput = function () { _synthSetVolume(parseInt(this.value, 10) / 100); _pagePercent('volumeText', _cfg.synthVolume); };
+    q('room').oninput = function () { _setRoom(parseInt(this.value, 10) / 100); _pagePercent('roomText', _cfg.room); };
+    q('velCurve').onchange = function () { _saveCfg('velCurve', this.value); };
     q('autoVolume').oninput = function () { _synthInit(); _setAutoVolume(parseInt(this.value, 10) / 100); _pagePercent('autoVolumeText', _cfg.autoVolume); };
     q('midi').onchange = function () {
         _midiConnect(this.value);
@@ -4124,6 +4406,8 @@ function _resetDrumSettings() {
     _synthSetKit(DEFAULT_KIT);
     _synthSetVolume(0.7);
     _setAutoVolume(0.8);
+    _setRoom(0.35);
+    _saveCfg('velCurve', 'linear');
     _saveCfg('midiChannel', -1);
     _saveCfg('view', 'auto');
     _saveCfg('inputOffsetMs', 0);
@@ -4192,6 +4476,8 @@ if (typeof module !== 'undefined' && module.exports) {
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, PANEL_DIFF_PREFIX,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
+        VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
+        _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
     };
 }

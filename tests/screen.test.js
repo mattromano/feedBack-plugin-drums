@@ -350,3 +350,27 @@ test('split view: _setDifficulty hands a split panel its own difficulty, others 
     assert.equal(mod._cfg().difficulty, 'easy');
     assert.equal(mod.PANEL_DIFF_PREFIX, 'drums_difficulty_panel');
 });
+
+test('velocity curve: linear keeps velocity, soft lifts and hard lowers light hits, ends fixed', () => {
+    const mod = freshPlugin();
+    for (const v of [1, 40, 100, 127]) assert.equal(mod._curveVelocity(v, 'linear'), v);
+    assert.ok(mod._curveVelocity(40, 'soft') > 40);
+    assert.ok(mod._curveVelocity(40, 'hard') < 40);
+    assert.equal(mod._curveVelocity(127, 'soft'), 127);
+    assert.equal(mod._curveVelocity(127, 'hard'), 127);
+    assert.ok(mod._curveVelocity(1, 'hard') >= 1);
+    assert.equal(mod._cfg().velCurve, 'linear');
+    mod._saveCfg('velCurve', 'bogus');
+    assert.equal(mod._cfg().velCurve, 'linear');
+    assert.equal(mod._cfg().room, 0.35, 'Room default');
+    mod._saveCfg('room', 3);
+    assert.equal(mod._cfg().room, 1);
+});
+
+test('_soundNote: a note the kit has no sound for plays its lane sound (Alesis hi-hat on note 24)', () => {
+    const mod = freshPlugin();
+    mod._saveCfg('customMapping', { 24: 'hihat', 36: 'kick' });
+    assert.equal(mod._soundNote(24), 42);
+    assert.equal(mod._soundNote(99), 99, 'unmapped: unchanged');
+    assert.equal(mod.LANE_SOUND_NOTE.crash, 49);
+});
