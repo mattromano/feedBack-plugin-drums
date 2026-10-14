@@ -386,6 +386,16 @@ function _setAssist(key, val) {
     }
 }
 
+// Save the input offset (ms) and show it in every open settings panel and
+// the settings page (the timing meter's Apply, calibration tools).
+function _setInputOffset(ms) {
+    _saveCfg('inputOffsetMs', ms);
+    try {
+        document.querySelectorAll('.drums-offset-input').forEach((el) => { el.value = String(_cfg.inputOffsetMs); });
+    } catch (_) { /* no DOM */ }
+    return _cfg.inputOffsetMs;
+}
+
 // <option> lists for the settings selects (values are fixed ids; names are ours).
 function _optList(ids, names, current) {
     return ids.map(id => `<option value="${id}"${id === current ? ' selected' : ''}>${names[id]}</option>`).join('');
@@ -422,6 +432,10 @@ function _laneIsAuto(laneIdx, auto) {
 }
 
 function _timingParams() {
+    // Calibration songs (e.g. a sync lab) can ask for a wide fixed window, so even far-off hits
+    // (wrong A/V offset, playing by ear) are measured instead of missed.
+    const cw = typeof window !== 'undefined' ? +window.__drumsCalibrationWindow : NaN;
+    if (cw > 0) return { hitWindow: { maxWindow: cw, minWindow: cw, isDynamic: false } };
     const p = TIMING_PRESETS[_cfg.timing];
     return p && p.params ? JSON.parse(JSON.stringify(p.params)) : null;
 }
@@ -916,6 +930,9 @@ function _synthPlayNote(midiNote, velocity, when, dest) {
 
 function _synthDrumHit(midiNote, velocity) {
     if (!_audioCtx || !_synthGain) return;
+    // A calibration song can mute the pad sounds: through Web Audio they reach the ears tens of
+    // ms after the stick and pull the player's timing.
+    if (typeof window !== 'undefined' && window.__drumsMutePads) return;
     _synthEnsureCtx();
     _synthPlayNote(midiNote, velocity, 0);
 }
@@ -1183,9 +1200,10 @@ async function _midiConnect(key) {
         }
         if (res && res.handle) {
             _midiHandle = res.handle;
-            // The domain handle delivers raw MIDI data; adapt to the old
-            // MIDIMessageEvent shape so _midiOnMessage stays unchanged.
-            _midiListener = (data) => _midiOnMessage({ data });
+            // The domain handle delivers raw MIDI data, and (when the provider
+            // passes it) the message's arrival time on the performance.now()
+            // clock; adapt to the MIDIMessageEvent shape _midiOnMessage reads.
+            _midiListener = (data, timeStamp) => _midiOnMessage({ data, timeStamp });
             // Wire the listener only when at least one renderer is active. A
             // late open() from an async _midiInit that resolved post-destroy
             // would otherwise re-enable scoring/synth in the background.
@@ -1308,7 +1326,7 @@ function _midiOnMessage(e) {
     if (_cfg.midiChannel >= 0 && ch !== _cfg.midiChannel) return;
 
     if (cmd === 0x90 && velocity > 0) {
-        _activeInstance._handleDrumHit(note, velocity);
+        _activeInstance._handleDrumHit(note, velocity, e.timeStamp);
     }
     // Drums don't need note-off handling (one-shot hits)
 }
@@ -1672,11 +1690,57 @@ function createFactory(forceView) {
 
     function _now() { return performance.now(); }
 
-    // Song time for an input arriving now (between frames), minus the
-    // user's input offset.
-    function _inputTime() {
-        const t = _h ? _h.estimateTime(_clock, _now()) : _clock.time;
+    // This frame's render time. bundle.currentTime is sampled by core's
+    // 60 Hz timer, up to a frame before the draw and in uneven steps, so
+    // gems drawn straight from it judder (measured: per-frame step error sd
+    // 3.7 ms, p95 13 ms). Best: a frame-exact clock from the audio playhead
+    // (window.__hwtFrameTime, from highway tweaks, when present); else the
+    // sample extrapolated to now at the observed rate (session.js
+    // createFrameClock, like core's 3D highway).
+    let _frameClock = null;
+    function _frameTime(bundle) {
+        let ft = NaN;
+        try { if (typeof window.__hwtFrameTime === 'function') ft = +window.__hwtFrameTime(bundle); } catch (_) { ft = NaN; }
+        if (Number.isFinite(ft)) return ft;
+        const raw = +bundle.currentTime || 0;
+        if (!_h || typeof _h.createFrameClock !== 'function') return raw;
+        if (!_frameClock) _frameClock = _h.createFrameClock();
+        const t = _frameClock.tick(raw, _now(), bundle.isPlaying);
+        return Number.isFinite(t) ? t : raw;
+    }
+
+    // Song time of a hit, minus the user's input offset. ts: when the MIDI
+    // message arrived (performance.now() clock), when the provider says.
+    // Best: the audio playhead right now plus this highway's chart / A/V
+    // offset (window.__hwtRenderOffset, from highway tweaks, which makes the
+    // playhead precise), minus how long ago the message arrived, so the hit
+    // is timed when the pad was struck, not when this code got to run or
+    // when the last frame was drawn. Fallback: the frame clock extrapolated
+    // to now, minus the same arrival lag (keyboard input has no lag).
+    let _audioOff = NaN;   // render time - audio time, from the last frame
+    function _inputTime(ts) {
+        const nowW = _now();
+        const lag = Number.isFinite(ts) && ts > 0 && ts <= nowW + 5 ? Math.min(0.25, Math.max(0, nowW - ts) / 1000) : 0;
+        let t = NaN;
+        try {
+            const a = document.getElementById('audio');
+            if (a && !a.paused && Number.isFinite(_audioOff)) t = a.currentTime + _audioOff - lag;
+        } catch (_) { /* no DOM */ }
+        if (!Number.isFinite(t) || (Number.isFinite(_clock.time) && Math.abs(t - _clock.time) > 0.3)) {
+            t = (_h ? _h.estimateTime(_clock, nowW) : _clock.time) - lag;
+        }
         return t - (_cfg.inputOffsetMs || 0) / 1000;
+    }
+
+    // The highway's render offset (render time - audio time) for _inputTime,
+    // refreshed every frame. Split view panels run on their own timer, so
+    // each highway reports its own (window.__hwtRenderOffset).
+    function _syncAudioOffset(bundle) {
+        try {
+            const a = document.getElementById('audio');
+            const off = typeof window.__hwtRenderOffset === 'function' ? +window.__hwtRenderOffset(bundle) : NaN;
+            _audioOff = a && !a.paused && Number.isFinite(off) ? off : NaN;
+        } catch (_) { _audioOff = NaN; }
     }
 
     function _positionHud() {
@@ -1714,10 +1778,10 @@ function createFactory(forceView) {
             e.preventDefault();
             e.stopImmediatePropagation();
             if (e.repeat) return;
-            if (m.action === 'activate') { _session.activate(_inputTime()); return; }
+            if (m.action === 'activate') { _session.activate(_inputTime(e.timeStamp)); return; }
             _synthInit();
             _synthDrumHit(_V.synthMidiForPad(m.pad, m.cymbal), 100);
-            const r = _session.hit(_inputTime(), m.pad, { cymbal: m.cymbal });
+            const r = _session.hit(_inputTime(e.timeStamp), m.pad, { cymbal: m.cymbal });
             if (_view !== '3d' && r && r.type === 'overhit') {
                 const lane = _padLane2D(m.pad, m.cymbal);
                 if (lane >= 0) _wrongFlashes.push({ lane, wall: performance.now() });
@@ -1772,24 +1836,25 @@ function createFactory(forceView) {
         _lastHwW = _lastHwH = 0;
     }
 
-    function _draw3D(bundle, isReady) {
+    function _draw3D(bundle, isReady, t) {
         if (!_view3d) return;   // modules still loading
         const nextScale = bundle.renderScale || 1;
         if (nextScale !== _renderScale) { _renderScale = nextScale; _resize3D(); }
         else if (_highwayCanvas && (_highwayCanvas.width !== _lastHwW || _highwayCanvas.height !== _lastHwH)) _resize3D();
-        const t = +bundle.currentTime || 0;
         const wall = _now();
         if (!isReady || !_session) {
             _view3d.render({ time: t, session: null, wallNow: wall, message: 'Loading drums...' });
             _placeBadge(null);
+            _placeTimingBtn(null);
             return;
         }
         const meta = _session.meta;
         const hint = meta && meta.activation.length
             ? 'Hit the marked note at the end of the fill to activate'
             : (_cfg.keyboard ? 'Press Enter to activate star power' : null);
-        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge });
+        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _cfg.inputOffsetMs });
         _placeBadge(_view3d.difficultyRect);
+        _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
         if (hctx && window.highway && typeof window.highway.fireDrawHooks === 'function') {
             const sz = _view3d.size;
@@ -1807,6 +1872,16 @@ function createFactory(forceView) {
                 _auto = _autoAt(_diff ? _diff.id : _cfg.difficulty);
                 _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams() });
                 _chartRefs = null;
+                // Every judged hit as a 'drums:judgment' window event (song
+                // seconds, errMs + = late), for calibration / sync tools.
+                _session.setOnHit((hit) => {
+                    try {
+                        window.dispatchEvent(new CustomEvent('drums:judgment', { detail: {
+                            noteTime: hit.noteTime, time: hit.time, pad: hit.pad, errMs: (hit.time - hit.noteTime) * 1000,
+                            inputOffsetMs: _cfg.inputOffsetMs || 0, canvas: _highwayCanvas,
+                        } }));
+                    } catch (_) { /* listeners only */ }
+                });
             }
         }).catch((e) => console.warn('[Drums] scoring unavailable (engine/session failed to load):', e));
     }
@@ -1978,6 +2053,44 @@ function createFactory(forceView) {
         _refreshDifficultyUI();
     }
 
+    // The timing meter's "Apply" pill (3D HUD): a transparent button over it
+    // sets the input offset to the suggested value and restarts the meter.
+    let _timingBtn = null, _timingRectKey = '', _timingWant = null;
+    function _placeTimingBtn(rect, want) {
+        if (!rect || !_hwVisible || !_highwayCanvas || !_highwayCanvas.parentNode) {
+            if (_timingBtn && _timingRectKey !== '') { _timingBtn.style.display = 'none'; _timingRectKey = ''; }
+            return;
+        }
+        if (!_timingBtn) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'drums-timing-apply';
+            b.dataset.drumsInstance = String(_instanceId);
+            b.setAttribute('aria-label', 'Apply the suggested input offset');
+            b.style.cssText = 'position:absolute;z-index:3;display:none;margin:0;padding:0;border:0;'
+                + 'background:transparent;cursor:pointer;border-radius:999px;';
+            b.onclick = (e) => {
+                e.stopPropagation();
+                b.blur();
+                if (!Number.isFinite(_timingWant)) return;
+                _setInputOffset(_timingWant);
+                if (_session && _session.resetTiming) _session.resetTiming();
+            };
+            const after = _hudCanvas || _highwayCanvas;
+            after.parentNode.insertBefore(b, after.nextSibling);
+            _timingBtn = b;
+        }
+        _timingWant = want;
+        const x = Math.round(_highwayCanvas.offsetLeft + rect.x), y = Math.round(_highwayCanvas.offsetTop + rect.y);
+        const w = Math.round(rect.w), h = Math.round(rect.h);
+        const key = x + '|' + y + '|' + w + '|' + h;
+        if (key === _timingRectKey) return;
+        _timingRectKey = key;
+        const st = _timingBtn.style;
+        st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
+        st.display = '';
+    }
+
     // rect: the badge in canvas css px (from the 2D draw / 3D HUD), or null to hide.
     function _placeBadge(rect) {
         if (!_badgeBtn) return;
@@ -2094,7 +2207,9 @@ function createFactory(forceView) {
         _toggleDiffMenu(false);
         if (_diffMenu) { _diffMenu.remove(); _diffMenu = null; }
         if (_badgeBtn) { _badgeBtn.remove(); _badgeBtn = null; }
+        if (_timingBtn) { _timingBtn.remove(); _timingBtn = null; }
         _badgeRectKey = '';
+        _timingRectKey = '';
         if (_onDiffKey) { window.removeEventListener('keydown', _onDiffKey, true); _onDiffKey = null; }
     }
 
@@ -2157,7 +2272,7 @@ function createFactory(forceView) {
     // identity (new song / difficulty) and advance it to the playhead.
     // Empty chord lists compare as "none": the drum_tab path builds a fresh
     // [] every frame. A reload mid-song scores from the current time.
-    function _syncSession(bundle, notes, chords) {
+    function _syncSession(bundle, notes, chords, t) {
         if (!_session) return;
         const chordKey = (Array.isArray(chords) && chords.length) ? chords : null;
         if (!_chartRefs || _chartRefs[0] !== notes || _chartRefs[1] !== chordKey || _chartRefs[2] !== bundle.beats) {
@@ -2167,7 +2282,6 @@ function createFactory(forceView) {
             _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
             _resetScoring();
         }
-        const t = +bundle.currentTime || 0;
         _clock.prevTime = _clock.time;
         _clock.prevWall = _clock.wall;
         _clock.time = t;
@@ -2234,7 +2348,8 @@ function createFactory(forceView) {
 
     // ── MIDI event handler (called by _midiOnMessage via _activeInstance) ──
 
-    function _handleDrumHit(midiNote, velocity) {
+    // ts: when the MIDI message arrived (performance.now() clock), when known.
+    function _handleDrumHit(midiNote, velocity, ts) {
         if (midiNote < 0 || midiNote > 127) return;
 
         // Learn mode: assign this MIDI note to the pending lane.
@@ -2260,7 +2375,9 @@ function createFactory(forceView) {
             // presets only change how notes are drawn.)
             const m = _h.midiToPad(midiNote, _cfg.customMapping, _E.padFromMidi);
             if (m) {
-                const r = _session.hit(_inputTime(), m.pad, { cymbal: m.cymbal, velocity });
+                const ht = _inputTime(ts);
+                const r = _session.hit(ht, m.pad, { cymbal: m.cymbal, velocity });
+                if (window.__drumsHitTap) { try { window.__drumsHitTap({ t: ht, ts, now: _now(), pad: m.pad }); } catch (_) { /* debug only */ } }
                 if (_view !== '3d' && r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
             }
             return;
@@ -2692,10 +2809,7 @@ function createFactory(forceView) {
         panel.querySelector('.drums-difficulty-select').onchange = function () {
             _setDifficulty(this.value);
         };
-        panel.querySelector('.drums-offset-input').onchange = function () {
-            _saveCfg('inputOffsetMs', this.value);
-            this.value = String(_cfg.inputOffsetMs);
-        };
+        panel.querySelector('.drums-offset-input').onchange = function () { _setInputOffset(this.value); };
         panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
         panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
         panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
@@ -3254,6 +3368,8 @@ function createFactory(forceView) {
         _has2xMemo = null;
         _autoSchedTo = _autoPrevT = _autoPrevWall = NaN;
         _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
+        _frameClock = null;
+        _audioOff = NaN;
 
         _removeSettingsPanel();
         _removeSettingsGear();
@@ -3446,12 +3562,14 @@ function createFactory(forceView) {
                 drumNotes = lv.notes;
                 drumChords = lv.chords;
             }
+            const ft = _frameTime(bundle);
             _latestNotes = drumNotes;
             _latestChords = drumChords;
-            _latestTime = bundle.currentTime;
+            _latestTime = ft;
             if (isReady) {
-                _scheduleAutoSounds(drumNotes, drumChords, +bundle.currentTime || 0);
-                _syncSession(bundle, drumNotes, drumChords);
+                _scheduleAutoSounds(drumNotes, drumChords, ft);
+                _syncAudioOffset(bundle);
+                _syncSession(bundle, drumNotes, drumChords, ft);
                 // The 3D view reads the session's events itself (flashes, sparks).
                 if (_view !== '3d') _drainSessionEvents();
             } else {
@@ -3459,7 +3577,7 @@ function createFactory(forceView) {
             }
 
             if (_view === '3d') {
-                _draw3D(bundle, isReady);
+                _draw3D(bundle, isReady, ft);
                 return;
             }
 
@@ -3479,7 +3597,7 @@ function createFactory(forceView) {
                 return;
             }
 
-            _draw(drumNotes, drumChords, bundle.currentTime, bundle.beats);
+            _draw(drumNotes, drumChords, ft, bundle.beats);
         },
         resize(/* w, h */) {
             if (!_isReady) return;
@@ -3567,6 +3685,26 @@ window.feedBackViz_drums3d.contextType = 'webgl2';
 window.feedBackViz_drums3d.matchesArrangement = createFactory.matchesArrangement;
 window.feedBackViz_drums2d = function () { return createFactory('2d'); };
 window.feedBackViz_drums2d.matchesArrangement = createFactory.matchesArrangement;
+
+// ── Hooks for calibration / sync tools and the console ───────────────
+// A sync / calibration tool (e.g. a sync lab plugin) can set the input
+// offset and pad volume, read the settings, re-apply the hit window after
+// setting window.__drumsCalibrationWindow (s), mute the pad sounds with
+// window.__drumsMutePads, and listen to 'drums:judgment' window events.
+if (typeof window !== 'undefined') {
+    window.__drumsSetInputOffset = (ms) => _setInputOffset(ms);
+    window.__drumsGetConfig = () => Object.assign({}, _cfg);
+    window.__drumsRefreshParams = () => {
+        for (const i of _instances) { try { if (i._assistsChanged) i._assistsChanged(); } catch (_) { /* ignore */ } }
+    };
+    window.__drumsSetPadVolume = (v) => { _synthSetVolume(v); return _cfg.synthVolume; };
+    // Console / test hook: inject a MIDI message (optionally with its arrival time).
+    window.__drumsDebug = {
+        midi: (data, timeStamp) => _midiOnMessage({ data, timeStamp }),
+        audioCtx: () => _audioCtx,
+        diag: () => Object.assign({}, _midiDiag),
+    };
+}
 
 // ── End-of-song card ─────────────────────────────────────────────────
 // Final score (engine score + session bonuses), stars, accuracy, streak,
@@ -3837,11 +3975,7 @@ function _pageWire() {
         _saveCfg('view', this.value);
         document.querySelectorAll('.drums-view-select').forEach((sel) => { sel.value = _cfg.view; });
     };
-    q('offset').onchange = function () {
-        _saveCfg('inputOffsetMs', this.value);
-        this.value = String(_cfg.inputOffsetMs);
-        document.querySelectorAll('.drums-offset-input').forEach((el) => { el.value = String(_cfg.inputOffsetMs); });
-    };
+    q('offset').onchange = function () { _setInputOffset(this.value); };
     q('keyboard').onchange = function () {
         _saveCfg('keyboard', this.checked);
         document.querySelectorAll('.drums-chk-keys').forEach((el) => { el.checked = _cfg.keyboard; });

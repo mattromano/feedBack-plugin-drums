@@ -66,6 +66,13 @@
     // Seeks: a jump larger than this (seconds) rebuilds the engine from the new position.
     const SEEK_BACK = 0.25;
     const SEEK_FORWARD = 1.5;
+    // The engine runs this far (s) behind the frame clock, so a pad hit stamped with its MIDI
+    // arrival time (before the last frame, but delivered after it) is judged at its own time
+    // instead of being moved forward to the frame time (see createSession update()).
+    const INPUT_GRACE = 0.06;
+    // Early/late meter: how many recent hits it keeps, and the "on time" dead zone (ms).
+    const TIMING_SAMPLES = 24;
+    const TIMING_DEAD_MS = 10;
 
     function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
     function defaultNow() {
@@ -509,6 +516,60 @@
         return time + ahead * rate;
     }
 
+    /**
+     * A frame clock for one highway: bundle.currentTime is sampled by core's 60 Hz timer, up to a
+     * frame before the draw and in uneven steps, so gems drawn straight from it judder. tick(raw,
+     * perfNow, isPlaying) returns the render time for this frame: the newest sample extrapolated to
+     * now at the observed rate (capped at 100 ms), raw while paused / seeking. Same idea as core's
+     * 3D highway smoothNow().
+     */
+    function createFrameClock() {
+        let anchorT = NaN, anchorP = NaN, rate = 1;
+        return {
+            tick(raw, p, isPlaying) {
+                raw = +raw;
+                if (!Number.isFinite(raw)) return raw;
+                if (isPlaying === false || !Number.isFinite(anchorP)) {
+                    anchorT = raw; anchorP = p; rate = 1;
+                    return raw;
+                }
+                if (raw !== anchorT) {
+                    const dP = (p - anchorP) / 1000;
+                    if (dP > 0.001 && dP < 0.5) {
+                        const r = (raw - anchorT) / dP;
+                        rate = (r > 0.05 && r < 5) ? r : 1;   // seek / loop: start over
+                    } else if (dP >= 0.5) rate = 1;
+                    anchorT = raw; anchorP = p;
+                    return raw;
+                }
+                const dt = (p - anchorP) / 1000;
+                if (dt <= 0 || dt > 0.1) return raw;
+                return anchorT + rate * dt;
+            },
+            reset() { anchorT = NaN; anchorP = NaN; rate = 1; },
+        };
+    }
+
+    /**
+     * The early/late meter from recent hit offsets (ms, + = late): median, a word for it and the
+     * input offset that would centre the hits (suggest, once there are 6 hits off by >= 10 ms).
+     */
+    function timingSummary(offsets, currentOffsetMs) {
+        const offs = Array.isArray(offsets) ? offsets.filter(Number.isFinite) : [];
+        const cur = Number.isFinite(currentOffsetMs) ? currentOffsetMs : 0;
+        if (!offs.length) return { count: 0, median: null, word: null, late: null, suggest: null, ok: false };
+        const srt = offs.slice().sort((a, b) => a - b), mid = srt.length >> 1;
+        const med = srt.length % 2 ? srt[mid] : (srt[mid - 1] + srt[mid]) / 2;
+        const onTime = Math.abs(med) < TIMING_DEAD_MS;
+        const word = onTime ? 'ON TIME' : (med > 0 ? '+' : '') + Math.round(med) + ' ms ' + (med < 0 ? 'EARLY' : 'LATE');
+        const enough = offs.length >= 6;
+        return {
+            count: offs.length, median: med, word, late: onTime ? null : med > 0,
+            suggest: enough && !onTime ? clamp(Math.round(cur + med), -250, 250) : null,
+            ok: enough && onTime,
+        };
+    }
+
     /** True when the playhead jumped (seek, loop restart) and the engine must be rebuilt. */
     function isSeek(prevTime, time) {
         if (!Number.isFinite(prevTime) || !Number.isFinite(time)) return false;
@@ -621,7 +682,7 @@
             }
             const solos = ((s.meta && s.meta.solos) || []).map(r => ({ start: r.start, end: r.end, h: 0, n: 0, done: false }));
             return { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, dynamics: 0, rollSet: rolls, run: null,
-                runs: [], solos, soloDone: [], feed: [] };
+                offsets: s.bonus ? s.bonus.offsets : [], runs: [], solos, soloDone: [], feed: [] };
         }
         function bonusFeed(text, color) {
             const b = s.bonus;
@@ -633,6 +694,9 @@
             const b = s.bonus;
             const mult = e.multiplier || 1;
             const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
+            // Early/late meter: hit time minus note time (ms, + = late), last TIMING_SAMPLES hits.
+            b.offsets.push(Math.round((e.time - nt) * 1000));
+            if (b.offsets.length > TIMING_SAMPLES) b.offsets.shift();
             let pts = 0;
             if (Math.abs(e.time - nt) <= 0.025) { pts += 10 * mult; b.timing += 10 * mult; b.perfect++; }
             if (b.rollSet.has(noteKey(nt, e.pad))) {
@@ -719,6 +783,9 @@
             eng.on('hit', e => {
                 push({ type: 'hit', pad: e.pad, cymbal: e.cymbal, id: e.id, sp: eng.isStarPowerNote(e.id), bonus: !!e.bonus, time: e.time });
                 bonusHit(e);
+                if (s.onHit) {
+                    try { s.onHit({ time: e.time, noteTime: Number.isFinite(e.noteTime) ? e.noteTime : e.time, pad: e.pad }); } catch (_) { /* listener only */ }
+                }
             });
             eng.on('miss', e => {
                 push({ type: 'miss', pad: e.pad, cymbal: e.cymbal, id: e.id, time: e.time });
@@ -746,6 +813,7 @@
                 s.beats = normalizeBeats(s.rawBeats);
                 s.lastTime = null;
                 s.events.length = 0;
+                s.bonus = null;   // a new chart: the early/late meter starts over too
                 build(undefined);
                 return api;
             },
@@ -804,7 +872,12 @@
                 // First frame after a load that starts mid-song (view switched while playing,
                 // renderer installed late): score from here instead of missing everything before.
                 else if (s.gems.length && time > s.gems[0].t - SEEK_BACK) build(time);
-                s.engine.update(time);
+                // The engine trails the frame clock by INPUT_GRACE: pad hits carry their MIDI
+                // arrival time (back-dated to the strike), and the engine moves any input older
+                // than its own time forward to it (YARG QueueInput). Advanced to the frame time,
+                // every hit delivered just after a frame was late by up to a frame (measured
+                // +9 ms median). Misses become final INPUT_GRACE later.
+                s.engine.update(time - INPUT_GRACE);
                 bonusTick(time);
                 s.lastTime = time;
             },
@@ -828,6 +901,10 @@
                 return out;
             },
             getState() { return s.engine ? s.engine.getState() : null; },
+            /** Per-hit timing listener ({time, noteTime, pad}, song seconds) or null. */
+            setOnHit(fn) { s.onHit = typeof fn === 'function' ? fn : null; return api; },
+            /** Forget the early/late samples (after the input offset changed). */
+            resetTiming() { if (s.bonus) s.bonus.offsets = []; return api; },
             /** The chart note behind an event id: {t, midi, pad, cymbal}, or null. */
             noteInfo(id) {
                 const n = s.decoded && Number.isInteger(id) ? s.decoded.notes[id] : null;
@@ -843,6 +920,7 @@
                 const live = t == null ? null : b.solos.find(x => t >= x.start - 0.5 && t < x.end + 0.3);
                 return { total: b.total, timing: b.timing, rolls: b.rolls, solo: b.solo, perfect: b.perfect, dynamics: b.dynamics,
                     feed: b.feed.slice(), rollActive: !!(b.run && b.run.n >= 3), runs: b.runs.slice(), solos: b.soloDone.slice(),
+                    offsets: b.offsets.slice(),
                     soloLive: live ? { h: live.h, n: live.n, active: t >= live.start && t < live.end } : null };
             },
             get engine() { return s.engine; },
@@ -858,14 +936,14 @@
     }
 
     return {
-        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, SEEK_BACK, SEEK_FORWARD,
+        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, SEEK_BACK, SEEK_FORWARD, INPUT_GRACE,
         collectWireNotes, classifyNote, buildGems, visibleRange, normalizeBeats,
         AUTO_LEVELS, normalizeAutoLevel, autoAppliesAt, autoFor, isAutoNote,
         parseDrumTabMeta,
         DIFFICULTIES, LOWER_LEVELS, DEFAULT_DIFFICULTY, DIFFICULTY_LABELS, DIFFICULTY_NAMES, DIFFICULTY_COLORS,
         normalizeDifficulty, hasKick2x, stripKick2x, difficultyOptions,
         resolveDifficulty, nextDifficulty, difficultyLabel, difficultyBadge, difficultyChart, isDifficultyKey,
-        midiToPad, isTypingTarget, estimateTime, isSeek,
+        midiToPad, isTypingTarget, estimateTime, isSeek, createFrameClock, timingSummary, TIMING_DEAD_MS,
         formatScore, formatAccuracy, multiplierColor, starProgress, hudModel,
         createSession,
     };

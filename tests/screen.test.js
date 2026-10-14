@@ -297,3 +297,16 @@ test('Learn: the next pad hit is assigned to the waiting lane', () => {
     assert.equal(cfg.customMapping[60], 'snare');
     assert.equal(mod._midiToLaneIdx(60), snare);
 });
+
+test('calibration hooks: wide hit window, input offset setter, config snapshot', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._timingParams(), null, 'Normal preset: engine defaults');
+    global.window.__drumsCalibrationWindow = 0.4;
+    assert.deepEqual(mod._timingParams(), { hitWindow: { maxWindow: 0.4, minWindow: 0.4, isDynamic: false } });
+    delete global.window.__drumsCalibrationWindow;
+    global.document.querySelectorAll = () => [];
+    assert.equal(global.window.__drumsSetInputOffset(37.4), 37);
+    assert.equal(mod._cfg().inputOffsetMs, 37);
+    assert.equal(global.window.__drumsSetInputOffset(900), 250, 'clamped');
+    assert.equal(global.window.__drumsGetConfig().inputOffsetMs, 250);
+});

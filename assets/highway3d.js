@@ -27,7 +27,7 @@
 })(typeof self !== 'undefined' ? self : this, function (S) {
     'use strict';
     if (!S) throw new Error('highway3d.js needs session.js (window.DrumsSession)');
-    const { PAD, LANE_NAMES, LANE_COLORS, COLORS, visibleRange, difficultyBadge, formatScore, hudModel, multiplierColor } = S;
+    const { PAD, LANE_NAMES, LANE_COLORS, COLORS, visibleRange, difficultyBadge, formatScore, hudModel, multiplierColor, timingSummary } = S;
 
     // Track geometry (world units). The strikeline is at z = 0 and notes approach from -z.
     const TRACK = Object.freeze({
@@ -181,9 +181,11 @@
     /**
      * createView(THREE, canvas, {hudCanvas, context}) -> view.
      *   view.resize(cssW, cssH, pixelRatio)
-     *   view.render({time, session, wallNow, lookahead, loading, message, hint, difficulty})
+     *   view.render({time, session, wallNow, lookahead, loading, message, hint, difficulty, inputOffsetMs})
      *     difficulty: difficultyBadge() output, drawn as a pill in the HUD; view.difficultyRect is
      *     its css-px rect after the frame (screen.js overlays a clickable button there)
+     *     inputOffsetMs: the player's input offset, for the early/late meter's suggestion; the
+     *     meter's Apply pill is at view.timingRect, for the offset view.timingSuggest
      *   view.dispose()
      */
     function createView(T, canvas, opts) {
@@ -496,6 +498,7 @@
         let toast = null; // {text, color, born}
         let cssW = 1, cssH = 1, dpr = 1;
         let diffRect = null;    // css-px rect of the HUD difficulty badge (last frame), or null
+        let timingRect = null, timingSuggest = null;   // the timing meter's Apply pill + its input offset
 
         function laneOf(pad) { return pad >= 1 && pad <= 4 ? pad - 1 : -1; }
         function padColor(pad, cymbal) {
@@ -751,6 +754,74 @@
                 ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = align;
                 diffRect = { x: px, y: py, w: pw, h: ph };
+            }
+
+            // Early/late meter (score column, under the difficulty badge): the last hits as ticks
+            // on a +-100 ms bar (blue early, orange late), their median, and the input offset that
+            // would centre them (Apply pill; screen.js puts a button over timingRect).
+            timingRect = null; timingSuggest = null;
+            if (timingSummary && frame.session) {
+                const offs = bonus && bonus.offsets ? bonus.offsets : [];
+                const EARLY = '#66c7ff', LATE = '#ff9a40', OKC = '#e5e7eb', RANGE = 100;
+                const cur = Number.isFinite(frame.inputOffsetMs) ? frame.inputOffsetMs : 0;
+                const sum = timingSummary(offs, cur);
+                const ty = starY + (d && d.text ? 44 + 21 + 22 : 44 + 4) * scale;
+                const bw = 190 * scale, bh = 10 * scale;
+                const bx = align === 'right' ? lx - bw : lx;
+                ctx.shadowBlur = 0;
+                ctx.textAlign = 'left';
+                ctx.font = `700 ${11 * scale}px ${FONT}`;
+                if (!sum.count) {
+                    ctx.fillStyle = '#7a84a6';
+                    ctx.fillText('TIMING · waiting for hits', bx, ty);
+                } else {
+                    const col = (ms) => (Math.abs(ms) < S.TIMING_DEAD_MS ? OKC : (ms < 0 ? EARLY : LATE));
+                    ctx.fillStyle = '#7a84a6';
+                    ctx.fillText('TIMING', bx, ty);
+                    ctx.font = `800 ${13 * scale}px ${FONT}`;
+                    ctx.fillStyle = col(sum.median);
+                    ctx.fillText(sum.word, bx + 56 * scale, ty);
+                    const by = ty + 6 * scale;
+                    ctx.fillStyle = 'rgba(10,14,30,0.85)';
+                    ctx.fillRect(bx, by, bw, bh);
+                    ctx.fillStyle = 'rgba(160,170,200,0.5)';
+                    ctx.fillRect(bx + bw / 2 - 0.5, by, 1, bh);
+                    const px = (ms) => bx + bw / 2 + (bw / 2) * clamp(ms / RANGE, -1, 1);
+                    offs.forEach((ms, i) => {
+                        ctx.globalAlpha = 0.25 + 0.75 * (i + 1) / offs.length;
+                        ctx.fillStyle = col(ms);
+                        ctx.fillRect(px(ms) - 1, by + 1, 2, bh - 2);
+                    });
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = col(sum.median);
+                    ctx.fillRect(px(sum.median) - 1.5, by - 2 * scale, 3, bh + 4 * scale);
+                    ctx.font = `600 ${10 * scale}px ${FONT}`;
+                    ctx.fillStyle = EARLY; ctx.fillText('early', bx, by + bh + 11 * scale);
+                    ctx.fillStyle = LATE; ctx.textAlign = 'right'; ctx.fillText('late', bx + bw, by + bh + 11 * scale);
+                    ctx.textAlign = 'left';
+                    const hy = by + bh + 27 * scale;
+                    ctx.font = `600 ${11 * scale}px ${FONT}`;
+                    if (sum.suggest !== null) {
+                        const txt = 'input offset ' + cur + ' → ' + sum.suggest + ' ms';
+                        ctx.fillStyle = '#c3cbe6';
+                        ctx.fillText(txt, bx, hy);
+                        const tw = ctx.measureText(txt).width;
+                        const pw = 46 * scale, ph = 17 * scale, ppx = bx + tw + 8 * scale, ppy = hy - 12.5 * scale;
+                        ctx.fillStyle = 'rgba(30,40,70,0.95)';
+                        _pill(ctx, ppx, ppy, pw, ph); ctx.fill();
+                        ctx.strokeStyle = '#7f8cc0'; ctx.lineWidth = 1; ctx.stroke();
+                        ctx.fillStyle = '#f1f5f9'; ctx.textAlign = 'center';
+                        ctx.font = `700 ${10 * scale}px ${FONT}`;
+                        ctx.fillText('Apply', ppx + pw / 2, ppy + ph / 2 + 3.5 * scale);
+                        ctx.textAlign = 'left';
+                        timingRect = { x: ppx, y: ppy, w: pw, h: ph };
+                        timingSuggest = sum.suggest;
+                    } else if (sum.ok) {
+                        ctx.fillStyle = '#7a84a6';
+                        ctx.fillText('input offset ' + cur + ' ms looks right', bx, hy);
+                    }
+                }
+                ctx.textAlign = align;
             }
 
             // Multiplier badge + streak.
@@ -1109,6 +1180,8 @@
             get size() { return { w: cssW, h: cssH, dpr }; },
             get lastWall() { return wallLast; },
             get difficultyRect() { return diffRect; },
+            get timingRect() { return timingRect; },
+            get timingSuggest() { return timingSuggest; },
         };
     }
 

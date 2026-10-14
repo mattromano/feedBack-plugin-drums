@@ -672,3 +672,71 @@ test('session: setParams widens the hit window', () => {
     m.setParams({ hitWindow: { maxWindow: 0.26, minWindow: 0.26 } });
     m.update(1.09); assert.equal(m.hit(1.09, H.PAD.RED).type, 'hit');
 });
+
+// ── timing: input grace, early/late meter, frame clock ─────────────────────
+
+test('session: a hit timestamped before the last frame keeps its own time (no clamp to the frame)', () => {
+    const s = H.createSession(E);
+    s.load(chart());
+    const seen = [];
+    s.setOnHit((h) => seen.push(h));
+    s.update(0.9);
+    s.update(1.016);           // the frame after the note at t=1 was drawn...
+    s.hit(1.004, 1);           // ...then a pad hit struck at 1.004 arrives (MIDI timestamp)
+    assert.equal(seen.length, 1);
+    assert.ok(Math.abs(seen[0].time - 1.004) < 1e-9, 'judged at the strike, not moved to the frame time 1.016');
+    assert.equal(seen[0].noteTime, 1);
+    s.update(1.5);             // misses are still found, a little later
+    s.update(1.6);
+    assert.ok(s.drainEvents().some((e) => e.type === 'miss'));
+});
+
+test('session: the early/late meter keeps the last hits (ms, + = late) and resetTiming clears it', () => {
+    const notes = [];
+    for (let i = 0; i < 30; i++) notes.push(w(1 + i * 0.5, 38));
+    const s = H.createSession(E).load({ notes });
+    s.update(0.5);
+    for (let i = 0; i < 30; i++) {
+        const t = 1 + i * 0.5;
+        s.update(t + 0.02);
+        s.hit(t + 0.02, H.PAD.RED);   // 20 ms late every time
+    }
+    const offs = s.getBonus().offsets;
+    assert.equal(offs.length, 24, 'last 24 hits');
+    assert.ok(offs.every((ms) => ms === 20));
+    s.resetTiming();
+    assert.deepEqual(s.getBonus().offsets, []);
+});
+
+test('timingSummary: median, wording and the suggested input offset', () => {
+    assert.equal(H.timingSummary([], 0).count, 0);
+    assert.equal(H.timingSummary(null, 0).suggest, null);
+    const late = H.timingSummary([30, 32, 28, 31, 29, 30], 10);
+    assert.equal(late.median, 30);
+    assert.equal(late.word, '+30 ms LATE');
+    assert.equal(late.late, true);
+    assert.equal(late.suggest, 40, 'raise the offset by the median');
+    const early = H.timingSummary([-20, -22, -18], 0);
+    assert.equal(early.word, '-20 ms EARLY');
+    assert.equal(early.suggest, null, 'fewer than 6 hits: no suggestion yet');
+    const ok = H.timingSummary([3, -4, 5, 0, 2, -1], 15);
+    assert.equal(ok.word, 'ON TIME');
+    assert.equal(ok.ok, true);
+    assert.equal(ok.suggest, null);
+    assert.equal(H.timingSummary([300, 300, 300, 300, 300, 300], 0).suggest, 250, 'clamped to the setting range');
+});
+
+test('createFrameClock: extrapolates between 60 Hz samples, raw while paused or after a seek', () => {
+    const c = H.createFrameClock();
+    assert.equal(c.tick(1.0, 1000, true), 1.0, 'first sample');
+    assert.equal(c.tick(1.016, 1016, true), 1.016, 'new sample: as is (rate 1 measured)');
+    assert.ok(Math.abs(c.tick(1.016, 1024, true) - 1.024) < 1e-9, 'same sample, 8 ms later: extrapolated');
+    assert.ok(Math.abs(c.tick(1.016, 1030, true) - 1.030) < 1e-9);
+    assert.equal(c.tick(1.016, 1200, true), 1.016, 'stalled > 100 ms: raw');
+    assert.equal(c.tick(1.032, 1210, false), 1.032, 'paused: raw');
+    assert.equal(c.tick(1.032, 1220, false), 1.032);
+    assert.equal(c.tick(5.0, 1236, true), 5.0, 'seek: raw');
+    assert.equal(c.tick(5.0, 1240, true), 5.0 + 0.004, 'rate reset to 1 after the jump');
+    c.reset();
+    assert.equal(c.tick(2.0, 5000, true), 2.0);
+});
