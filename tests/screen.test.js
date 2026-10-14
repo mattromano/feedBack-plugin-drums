@@ -117,9 +117,19 @@ test('_midiResolveSaved matches by stored key first, falls back to legacy bare i
     assert.equal(mod._midiResolveSaved('nope', sources), null);
 });
 
-test('matchesArrangement trusts has_drum_tab regardless of arrangement name', () => {
+test('matchesArrangement leaves a guitar/bass part on a full-band pack to the guitar views', () => {
+    // Auto is first-match-wins and `drums` sorts before `highway_3d`; the drum
+    // view refuses non-drum parts, so claiming Lead here would show
+    // "Pick the Drums part" instead of the guitar highway.
     const mod = freshPlugin();
-    assert.equal(mod.matchesArrangement({ has_drum_tab: true, arrangement: 'Lead' }), true);
+    assert.equal(mod.matchesArrangement({ has_drum_tab: true, arrangement: 'Lead' }), false);
+    assert.equal(mod.matchesArrangement({ has_drum_tab: true, arrangement: 'Bass' }), false);
+});
+
+test('matchesArrangement claims a drum-tab-only pack and the Drums part of a full-band pack', () => {
+    const mod = freshPlugin();
+    assert.equal(mod.matchesArrangement({ has_drum_tab: true, arrangement: '' }), true);
+    assert.equal(mod.matchesArrangement({ has_drum_tab: true, arrangement: 'Drums' }), true);
 });
 
 test('matchesArrangement matches drum-pattern arrangement names', () => {

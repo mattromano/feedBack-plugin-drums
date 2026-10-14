@@ -4527,13 +4527,20 @@ createFactory.matchesArrangement = function (songInfo) {
     // guitar arrangement the user picked. The drum tab lives off to the
     // side of the arrangements list, so name-pattern matching alone
     // would miss it (a sloppak with a `Lead` arrangement + a drum_tab
-    // is still drummable).
-    if (songInfo.has_drum_tab) return true;
+    // is still drummable). But Auto is first-match-wins and `drums` sorts
+    // before `highway_3d`, and the drum view refuses non-drum parts, so on a
+    // full-band pack leave Lead/Rhythm/Bass to the guitar views (the same
+    // guard as the bundled drum_highway_3d); a drummer picks the Drums part
+    // or this view from the picker.
     if (songInfo.arrangement && DRUMS_PATTERNS.test(songInfo.arrangement)) return true;
     if (Array.isArray(songInfo.arrangements)) {
         const idx = songInfo.arrangement_index;
         const arr = songInfo.arrangements.find(a => a.index === idx);
         if (arr && DRUMS_PATTERNS.test(arr.name)) return true;
+    }
+    if (songInfo.has_drum_tab) {
+        return !songInfo.has_notation
+            && !/\b(?:lead|rhythm|bass|combo|guitar)\b/i.test(songInfo.arrangement || '');
     }
     return false;
 };
