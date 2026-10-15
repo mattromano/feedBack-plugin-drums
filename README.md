@@ -50,9 +50,12 @@ in the style of the classic drum games:
   pad targets in the lane colours sit on the strikeline.
 - **Gems** — snare and toms are bevelled rounded-rectangle blocks, cymbals (hi-hat, ride, crash) are raised
   domes, kicks are flat orange bars (double kicks magenta with a white stripe). Accents are bigger and
-  brighter, ghost notes smaller and translucent; missed notes go grey and slide past the strikeline.
-- **Feedback** — a hit flashes its target and throws sparks; a miss or a hit on an empty lane flashes the
-  lane red. Beat and measure lines scroll with the chart; drum solos tint the track violet.
+  brighter, ghost notes smaller and translucent.
+- **Feedback** — hit gems turn green and missed gems red, carry on past the strikeline and fade out over
+  0.4 s. A hit flashes its target and lane (green on time, cyan early, amber late) and throws sparks that
+  grow with the streak; a miss or a hit on an empty lane flashes the lane red. Each hit pops its points,
+  every 10 in a row rings out, 25 / 50 / 100 streaks burst, and a broken streak washes the screen red.
+  Beat and measure lines scroll with the chart; drum solos tint the track violet.
 - **Star power** — phrase notes are silver-white; with half a meter the fills are marked green and the note
   that ends the fill gets a spinning ring. While active the track edges glow blue and the multiplier doubles.
 - **HUD** — streak and multiplier left of the track; star power meter, score, stars, accuracy and the

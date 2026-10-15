@@ -737,6 +737,7 @@
             const so = soloOf(nt);
             if (so && !so.done) { so.h++; so.n++; }
             b.total += pts;
+            return pts;
         }
         function bonusMiss(e) {
             const b = s.bonus;
@@ -808,9 +809,17 @@
             }
             const eng = Engine.create(chart, eopts);
             s.bonus = newBonus();   // a new engine starts its score over, and so do the bonuses
+            let scoreAtHit = 0;   // engine score after the previous hit (a hit's points for the view's pop)
             eng.on('hit', e => {
-                push({ type: 'hit', pad: e.pad, cymbal: e.cymbal, id: e.id, sp: eng.isStarPowerNote(e.id), bonus: !!e.bonus, time: e.time });
-                bonusHit(e);
+                const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
+                const ev = { type: 'hit', pad: e.pad, cymbal: e.cymbal, id: e.id, sp: eng.isStarPowerNote(e.id), bonus: !!e.bonus, time: e.time,
+                    combo: e.combo | 0, offsetMs: Math.round((e.time - nt) * 1000) || 0, points: 0 };
+                push(ev);
+                const extra = bonusHit(e);
+                // Visual only: what this hit added (engine score since the last hit + its bonuses).
+                const sc = Number.isFinite(e.score) ? e.score : scoreAtHit;
+                ev.points = Math.max(0, sc - scoreAtHit) + extra;
+                scoreAtHit = sc;
                 if (s.onHit) {
                     try { s.onHit({ time: e.time, noteTime: Number.isFinite(e.noteTime) ? e.noteTime : e.time, pad: e.pad }); } catch (_) { /* listener only */ }
                 }

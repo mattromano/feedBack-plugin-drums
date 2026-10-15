@@ -3,6 +3,16 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.5.3
+
+- **3D view hit / miss effects from the stock feedBack 3D drum highway** (behaviour ported, code written fresh):
+  hit gems turn green and missed gems red, keep travelling past the strikeline and fade out over 0.4 s
+  instead of vanishing; pooled spark bursts that grow with the streak (spark colour by timing: green on time,
+  cyan early, amber late); a green lane flash on a hit and a red one on a miss / overhit; score pops,
+  a combo ring every 10, milestone bursts at 25 / 50 / 100 and a red wash when a streak of 3+ breaks.
+  Visual only: judgement and scoring are unchanged. Session hit events now also carry `combo`, `offsetMs`
+  and `points` for the view. Asset version bumped.
+
 ## 4.5.2
 
 - Ship the DRS (DrumGizmo DRSKit 2.1, 13-mic stereo mix) and the 15-mic CrocellKit 1.1 rebuild as sampled kits; both were only built locally before. CC BY 4.0, credited in NOTICE.md. Asset version bumped so browsers drop the old Crocell samples.

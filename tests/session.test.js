@@ -820,3 +820,20 @@ test('starPowerHint: fills say how they activate; nothing while not ready', () =
     assert.equal(H.starPowerHint(null, { starPower: { canActivate: false } }, ''), null);
     assert.equal(H.starPowerHint(null, null, ''), null);
 });
+
+test('session: hit events carry the combo, the timing offset and the points they scored (for the 3D hit FX)', () => {
+    const s = H.createSession(E);
+    s.load(chart());
+    s.update(1); s.hit(0.99, 0); s.hit(1.02, 1);
+    const hits = s.drainEvents().filter(e => e.type === 'hit');
+    assert.equal(hits.length, 2);
+    assert.deepEqual(hits.map(e => e.combo), [1, 2]);
+    assert.deepEqual(hits.map(e => e.offsetMs), [-10, 20]);
+    assert.ok(hits.every(e => e.points > 0), 'each hit scored');
+    const st = s.getState();
+    assert.equal(hits[0].points + hits[1].points, st.score + s.getBonus().total, 'the pops add up to the score');
+    s.update(0.2);   // a seek rebuilds the engine: points count from zero again
+    s.update(1); s.hit(1, 1);
+    const again = s.drainEvents().filter(e => e.type === 'hit');
+    assert.equal(again[0].points, s.getState().score + s.getBonus().total);
+});

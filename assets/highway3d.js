@@ -5,7 +5,11 @@
  * pad lanes (red, yellow, blue, green) plus a full-width kick bar, a strikeline with pad targets,
  * rounded-rectangle gems for pads/toms, raised domed gems for cymbals, star power and drum-fill
  * highlighting, hit sparks and a 2D HUD (score, multiplier, streak, star power meter, stars,
- * accuracy). It contains no ported game logic and no artwork from those games; scoring comes from
+ * accuracy). Hit / miss feedback follows the stock feedBack 3D drum highway (behaviour only, written
+ * fresh): judged gems carry on past the strikeline tinted green (hit) or red (miss) and fade out over
+ * HIT_FX.behind seconds, hits throw pooled spark bursts that grow with the streak, lanes flash green
+ * (red on a miss / overhit), and the HUD adds score pops, combo rings, milestone bursts and a
+ * streak-break wash. It contains no ported game logic and no artwork from those games; scoring comes from
  * session.js / engine.js through their public APIs.
  *
  * Exported on window.DrumsHighway3D (browser) and module.exports (Node tests):
@@ -48,6 +52,58 @@
     function defaultNow() {
         return (typeof performance !== 'undefined' && performance && typeof performance.now === 'function')
             ? performance.now() : Date.now();
+    }
+
+    // ── Hit / miss feedback ─────────────────────────────────────────────────
+
+    // Visual only: nothing here touches judgement or scoring (engine.js / session.js).
+    const HIT_FX = Object.freeze({
+        behind: 0.4,            // s a judged gem keeps travelling past the strikeline while it fades
+        hitTint: 0x22c55e,      // gem tint once hit
+        missTint: 0xef4444,     // gem tint once missed
+        flashMs: 300,           // lane flash decay
+        flashPeak: 0.6,         // lane flash opacity at the strike
+        onTime: 0x22ff88,       // lane flash / spark colour by timing
+        early: 0x35d6ff,
+        late: 0xffb84d,
+        wrong: 0xff4444,        // miss / overhit lane flash
+        onTimeMs: 25,           // |offset| within this counts as on time (the perfect-timing bonus window)
+        streakFull: 16,         // streak at which spark bursts reach full size
+        popMs: 800, ringMs: 600, burstMs: 900, breakMs: 350,
+    });
+
+    /** Opacity of a judged gem `since` s past the strikeline: 1 until the line, smooth fade to 0 at HIT_FX.behind. */
+    function trailAlpha(since) {
+        if (!(since > 0)) return 1;
+        if (since >= HIT_FX.behind) return 0;
+        const p = since / HIT_FX.behind;
+        return 1 - p * p * (3 - 2 * p);
+    }
+
+    /**
+     * Track z of a gem `since` s past the strikeline at `speed` units/s (negative = still approaching).
+     * Past the line the gem keeps its speed at first, then eases out so it reaches the back of the
+     * visible track (TRACK.behind) as it finishes fading: the camera only sees ~0.1 s of track behind
+     * the strikeline at chart speed.
+     */
+    function trailZ(since, speed) {
+        if (!(since > 0)) return since * speed;
+        const zEnd = TRACK.behind;
+        const k = Math.max(1, speed * HIT_FX.behind / zEnd);
+        const p = Math.min(1, since / HIT_FX.behind);
+        return zEnd * (1 - Math.pow(1 - p, k));
+    }
+
+    /** Lane flash / spark colour for a hit `offsetMs` from its note (+ = late). */
+    function timingHex(offsetMs) {
+        if (!Number.isFinite(offsetMs) || Math.abs(offsetMs) <= HIT_FX.onTimeMs) return HIT_FX.onTime;
+        return offsetMs < 0 ? HIT_FX.early : HIT_FX.late;
+    }
+
+    /** Sparks in a hit burst: grows with the streak (pads 14 -> 26, kick 26 -> 42). */
+    function sparkCount(kick, combo) {
+        const f = Math.min(1, Math.max(0, combo | 0) / HIT_FX.streakFull);
+        return kick ? 26 + Math.round(16 * f) : 14 + Math.round(12 * f);
     }
 
     // ── Keyboard fallback ───────────────────────────────────────────────────
@@ -108,6 +164,47 @@
         const tex = new T.CanvasTexture(c);
         tex.colorSpace = T.SRGBColorSpace;
         return tex;
+    }
+
+    // Soft lane-flash texture: a gaussian across the lane (u), fading out toward both ends (v).
+    function _gaussTexture(T) {
+        const w = 128, h = 64;
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        const g = c.getContext('2d');
+        const gx = g.createLinearGradient(0, 0, w, 0);
+        for (let i = 0; i <= 10; i++) {
+            const d = (i / 10 - 0.5) / 0.28;
+            gx.addColorStop(i / 10, `rgba(255,255,255,${Math.exp(-0.5 * d * d).toFixed(3)})`);
+        }
+        g.fillStyle = gx;
+        g.fillRect(0, 0, w, h);
+        g.globalCompositeOperation = 'destination-in';
+        const gy = g.createLinearGradient(0, 0, 0, h);
+        gy.addColorStop(0, 'rgba(255,255,255,0)');
+        gy.addColorStop(0.3, 'rgba(255,255,255,1)');
+        gy.addColorStop(0.7, 'rgba(255,255,255,1)');
+        gy.addColorStop(1, 'rgba(255,255,255,0)');
+        g.fillStyle = gy;
+        g.fillRect(0, 0, w, h);
+        const tex = new T.CanvasTexture(c);
+        tex.colorSpace = T.SRGBColorSpace;
+        return tex;
+    }
+
+    // Per-instance opacity for an InstancedMesh material: reads the mesh geometry's `instAlpha`
+    // instanced attribute (the fading trail of judged gems). Built once per material.
+    function _instanceAlpha(mat) {
+        mat.transparent = true;
+        mat.depthWrite = false;
+        mat.onBeforeCompile = (sh) => {
+            sh.vertexShader = 'attribute float instAlpha;\nvarying float vInstAlpha;\n'
+                + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvInstAlpha = instAlpha;');
+            sh.fragmentShader = 'varying float vInstAlpha;\n'
+                + sh.fragmentShader.replace('#include <color_fragment>', '#include <color_fragment>\n\tdiffuseColor.a *= vInstAlpha;');
+        };
+        mat.customProgramCacheKey = () => 'drums-inst-alpha';
+        return mat;
     }
 
     function _trackTexture(T) {
@@ -187,6 +284,8 @@
      *     inputOffsetMs: the player's input offset, for the early/late meter's suggestion; the
      *     meter's Apply pill is at view.timingRect, for the offset view.timingSuggest
      *   view.dispose()
+     *   view.fxSnapshot(): the hit FX of the last frame ({trail: [{state, kind, alpha, z}], sparksLive,
+     *     sparksBorn, flash, flashHit, pops, popPool, bursts, ring, breakWash}) for tests and debugging
      */
     function createView(T, canvas, opts) {
         opts = opts || {};
@@ -227,6 +326,7 @@
         const glowTex = own(_radialTexture(T, 128, [[0, 'rgba(255,255,255,1)'], [0.25, 'rgba(255,255,255,0.55)'], [1, 'rgba(255,255,255,0)']]));
         const softTex = own(_radialTexture(T, 64, [[0, 'rgba(255,255,255,1)'], [0.4, 'rgba(255,255,255,0.35)'], [1, 'rgba(255,255,255,0)']]));
         const ringTex = own(_radialTexture(T, 128, [[0, 'rgba(255,255,255,0)'], [0.62, 'rgba(255,255,255,0)'], [0.78, 'rgba(255,255,255,1)'], [0.9, 'rgba(255,255,255,0.25)'], [1, 'rgba(255,255,255,0)']]));
+        const gaussTex = own(_gaussTexture(T));
         const trackTex = own(_trackTexture(T));
         trackTex.repeat.set(1, zSpan / 2);
 
@@ -314,25 +414,34 @@
         }
         const kickTarget = { press: -1e9 };
 
-        // Lane tint overlays (press = lane colour, miss/overhit = red) near the strikeline.
+        // Lane tint overlays (a press lights its lane in the lane colour) near the strikeline.
         const tintGeo = own(new T.PlaneGeometry(TRACK.laneWidth * 0.98, 4.2));
         const laneTints = [];
         for (let i = 0; i < TRACK.lanes; i++) {
-            const m = own(new T.MeshBasicMaterial({ color: COLORS.miss, transparent: true, opacity: 0,
+            const m = own(new T.MeshBasicMaterial({ color: LANE_COLORS[LANE_NAMES[i]], transparent: true, opacity: 0,
                 blending: T.AdditiveBlending, depthWrite: false }));
             const mesh = new T.Mesh(tintGeo, m);
             mesh.rotation.x = -Math.PI / 2;
             mesh.position.set(laneX(i), 0.006, -1.6);
             scene.add(mesh);
-            laneTints.push({ mesh, mat: m, red: -1e9, press: -1e9, color: new T.Color(LANE_COLORS[LANE_NAMES[i]]) });
+            laneTints.push({ mesh, mat: m, press: -1e9 });
         }
-        const kickTintMat = own(new T.MeshBasicMaterial({ color: COLORS.miss, transparent: true, opacity: 0,
-            blending: T.AdditiveBlending, depthWrite: false }));
-        const kickTint = new T.Mesh(own(new T.PlaneGeometry(W4, 1.0)), kickTintMat);
-        kickTint.rotation.x = -Math.PI / 2;
-        kickTint.position.set(0, 0.007, -0.1);
-        scene.add(kickTint);
-        const kickTintState = { red: -1e9 };
+        // Lane flashes at the strikeline: green (by timing) on a hit, red on a miss / overhit. One
+        // pooled additive quad per lane plus a full-width one for the kick; colour set per event.
+        const laneFlashes = [];
+        const flashGeo4 = own(new T.PlaneGeometry(TRACK.laneWidth * 0.95, 1.6));
+        for (let i = 0; i <= TRACK.lanes; i++) {
+            const kick = i === TRACK.lanes;
+            const m = own(new T.MeshBasicMaterial({ map: gaussTex, color: HIT_FX.onTime, transparent: true, opacity: 0,
+                blending: T.AdditiveBlending, depthWrite: false }));
+            const mesh = new T.Mesh(kick ? own(new T.PlaneGeometry(W4 * 0.92, 1.0)) : flashGeo4, m);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(kick ? 0 : laneX(i), kick ? 0.007 : 0.03, 0);
+            mesh.renderOrder = 7;
+            scene.add(mesh);
+            laneFlashes.push({ mesh, mat: m, wall: -1e9, hit: false, k: 0 });
+        }
+        const flashOf = (pad) => laneFlashes[pad >= 1 && pad <= 4 ? pad - 1 : TRACK.lanes];
 
         // ── Beat / measure lines ──
         const MAX_BEATS = 96;
@@ -441,11 +550,46 @@
         };
         // Ensure instanceColor buffers exist.
         const _c = new T.Color(1, 1, 1);
-        for (const k of Object.keys(meshes)) {
-            const m = meshes[k];
+        function initColors(m) {
             for (let i = 0; i < m.instanceMatrix.count; i++) m.setColorAt(i, _c);
             m.instanceColor.setUsage(T.DynamicDrawUsage);
         }
+        for (const k of Object.keys(meshes)) initColors(meshes[k]);
+
+        // Judged gems past the strikeline (the fading trail): pre-built hit (green) and miss (red)
+        // tint materials plus a shared cap material, all with per-instance opacity. Each mesh has its
+        // own geometry copy for its instAlpha buffer.
+        const MAX_TRAIL = 96;
+        const trailHitMat = own(_instanceAlpha(new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0.15,
+            emissive: HIT_FX.hitTint, emissiveIntensity: 0.45 })));
+        const trailMissMat = own(_instanceAlpha(new T.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.1,
+            emissive: HIT_FX.missTint, emissiveIntensity: 0.4 })));
+        const trailCapMat = own(_instanceAlpha(new T.MeshBasicMaterial({ color: 0xffffff })));
+        const trailList = [];
+        function trailInst(geo, mat, n) {
+            const g2 = own(geo.clone());
+            const alpha = new Float32Array(n).fill(1);
+            const attr = new T.InstancedBufferAttribute(alpha, 1);
+            attr.setUsage(T.DynamicDrawUsage);
+            g2.setAttribute('instAlpha', attr);
+            const mesh = inst(g2, mat, n);
+            initColors(mesh);
+            const rec = { mesh, alpha, attr, z: new Float32Array(n), cap: n, n: 0 };
+            trailList.push(rec);
+            return rec;
+        }
+        function trailSet(mat) {
+            return { pad: trailInst(padGeo, mat, MAX_TRAIL), dome: trailInst(domeGeo, mat, MAX_TRAIL),
+                cymRing: trailInst(cymRingGeo, mat, MAX_TRAIL), kick: trailInst(kickGeo, mat, 32) };
+        }
+        const trail = {
+            hit: trailSet(trailHitMat),
+            miss: trailSet(trailMissMat),
+            padCap: trailInst(padCapGeo, trailCapMat, MAX_TRAIL),
+            padRim: trailInst(padRimGeo, trailCapMat, MAX_TRAIL),
+            bell: trailInst(bellGeo, trailCapMat, MAX_TRAIL),
+            stripe: trailInst(stripeGeo, trailCapMat, 32),
+        };
 
         // ── Hit flashes + sparks ──
         const MAX_FLASH = 24;
@@ -482,7 +626,29 @@
         sparks.frustumCulled = false;
         scene.add(sparks);
         let sparkNext = 0;
+        let sparksLive = 0, sparksBorn = 0;   // live sparks last frame, size of the last burst
         const rand = _seededRandom(0x5eed);
+
+        // ── Score FX (HUD overlay): pooled "+points" pops, combo ring every 10, milestone bursts
+        // (25 / 50 / every 100) and a red wash when a streak of 3+ breaks.
+        const POP_N = 12, BURST_N = 2, BURST_P = 36;
+        const pops = [];
+        for (let i = 0; i < POP_N; i++) pops.push({ born: -1e9, x: 0, text: '', sp: false });
+        let popNext = 0;
+        const bursts = [];
+        for (let i = 0; i < BURST_N; i++) {
+            const b = { born: -1e9, vx: new Float32Array(BURST_P), vy: new Float32Array(BURST_P) };
+            for (let j = 0; j < BURST_P; j++) {
+                const a = (j / BURST_P) * Math.PI * 2, sp = 2 + (j % 5) * 0.8;
+                b.vx[j] = Math.cos(a) * sp;
+                b.vy[j] = Math.sin(a) * sp - 1.2;
+            }
+            bursts.push(b);
+        }
+        let burstNext = 0;
+        let ringBorn = -1e9, ringHot = false, breakBorn = -1e9;
+        let popFont = '', popFontScale = -1;   // cached pop font (rebuilt when the HUD scale changes)
+        const projV = new T.Vector3();
 
         // ── State ──
         const dummy = new T.Object3D();
@@ -490,8 +656,9 @@
         const gemColor = new T.Color();
         const tmp2 = new T.Color();
         const white = new T.Color(1, 1, 1);
-        const missedColor = new T.Color(COLORS.missedGem);
         const spColor = new T.Color(COLORS.starPowerGem);
+        const hitTint = new T.Color(HIT_FX.hitTint);
+        const missTint = new T.Color(HIT_FX.missTint);
         let wallLast = 0;
         let spActiveSince = -1e9;
         let spEndedAt = -1e9;
@@ -506,7 +673,7 @@
             return LANE_COLORS[LANE_NAMES[pad - 1]];
         }
 
-        function spawnFlash(pad, colorHex, wall, strong) {
+        function spawnFlash(pad, colorHex, wall, strong, sparkHex, n) {
             const f = flashes[flashNext];
             flashNext = (flashNext + 1) % MAX_FLASH;
             f.born = wall;
@@ -515,8 +682,8 @@
             f.strong = !!strong;
             f.ringMat.color.setHex(colorHex);
             f.glowM.color.setHex(colorHex);
-            const n = f.kick ? 34 : 18;
-            const c = tmpColor.setHex(colorHex);
+            sparksBorn = n;
+            const c = tmpColor.setHex(sparkHex);
             for (let k = 0; k < n; k++) {
                 const i = sparkNext;
                 sparkNext = (sparkNext + 1) % MAX_SPARKS;
@@ -548,14 +715,36 @@
                         else kickTarget.press = w;
                         break;
                     case 'hit': {
+                        const kick = ev.pad === PAD.KICK;
                         const col = ev.sp ? COLORS.starPowerGem : padColor(ev.pad, ev.cymbal);
-                        spawnFlash(ev.pad, col, w, ev.bonus);
+                        if (ev.auto) { spawnFlash(ev.pad, col, w, false, col, sparkCount(kick, 0)); break; }
+                        // Sparks by timing (the kick keeps its own colour), more of them on a streak.
+                        const th = timingHex(ev.offsetMs);
+                        spawnFlash(ev.pad, col, w, ev.bonus, kick ? COLORS.kick : th, sparkCount(kick, ev.combo));
+                        const fl = flashOf(ev.pad);
+                        fl.wall = w; fl.hit = true; fl.mat.color.setHex(th);
+                        const pop = pops[popNext];
+                        popNext = (popNext + 1) % POP_N;
+                        pop.born = w;
+                        pop.x = lane >= 0 ? laneX(lane) : 0;
+                        pop.sp = !!ev.sp;
+                        pop.text = '+' + formatScore(ev.points > 0 ? ev.points : 0);
+                        const combo = ev.combo | 0;
+                        if (combo > 0 && combo % 10 === 0) { ringBorn = w; ringHot = combo >= 30; }
+                        if (combo === 25 || combo === 50 || (combo > 0 && combo % 100 === 0)) {
+                            bursts[burstNext].born = w;
+                            burstNext = (burstNext + 1) % BURST_N;
+                        }
                         break;
                     }
                     case 'miss':
-                    case 'overhit':
-                        if (lane >= 0) laneTints[lane].red = w;
-                        else kickTintState.red = w;
+                    case 'overhit': {
+                        const fl = flashOf(ev.pad);
+                        fl.wall = w; fl.hit = false; fl.mat.color.setHex(HIT_FX.wrong);
+                        break;
+                    }
+                    case 'combo-break':
+                        if ((ev.combo | 0) >= 3) breakBorn = w;
                         break;
                     case 'sp-activate':
                         spActiveSince = w;
@@ -595,6 +784,53 @@
             const v = new T.Vector3(x, y, z).project(camera);
             return { x: (v.x + 1) / 2 * cssW, y: (1 - v.y) / 2 * cssH };
         }
+        // Allocation-free projection into projV (css px in projV.x / projV.y); false when off-screen depth.
+        function projectTo(x, y, z) {
+            projV.set(x, y, z).project(camera);
+            const ok = projV.z >= -1 && projV.z <= 1;
+            projV.x = (projV.x + 1) / 2 * cssW;
+            projV.y = (1 - projV.y) / 2 * cssH;
+            return ok;
+        }
+
+        // A judged gem past (or, hit early, still before) the strikeline: tinted, fading, no shadow.
+        function placeTrail(rec, x, y, z, sx, sy, sz, color, alpha) {
+            if (rec.n >= rec.cap) return;
+            place(rec.mesh, rec.n, x, y, z, sx, sy, sz, color);
+            rec.alpha[rec.n] = alpha;
+            rec.z[rec.n] = z;
+            rec.n++;
+        }
+        function drawTrailGem(g, hit, alpha, z, since, cnt) {
+            const set = hit ? trail.hit : trail.miss;
+            const tint = hit ? hitTint : missTint;
+            const a = g.ghost ? alpha * 0.5 : alpha;
+            const p = since > 0 ? Math.min(1, since / HIT_FX.behind) : 0;
+            if (g.kind === 'kick' || g.kind === 'kick2x') {
+                const sy = g.kick2x ? 1.35 : 1;
+                placeTrail(set.kick, 0, 0, z, 1, sy * (g.accent ? 1.2 : 1), g.accent ? 1.25 : 1, tint, a);
+                if (g.kick2x) placeTrail(trail.stripe, 0, 0.02, z, 1, sy, 1, tmp2.copy(tint).lerp(white, 0.7), a);
+                if (hit && cnt.glow < MAX_GEMS) place(meshes.glow, cnt.glow++, 0, 0, z, W4 + 0.6 + p, 1, 0.9 + p, tmp2.copy(tint).multiplyScalar(0.55 * a));
+                return;
+            }
+            const x = laneX(g.lane);
+            const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1));
+            if (g.kind === 'cymbal') {
+                placeTrail(set.dome, x, 0, z, s, s, s, tint, a);
+                placeTrail(set.cymRing, x, 0, z, s, s, s, tint, a);
+                if (!g.ghost) placeTrail(trail.bell, x, 0, z, s, s, s, tmp2.copy(tint).lerp(white, 0.55), a);
+            } else {
+                placeTrail(set.pad, x, 0, z, s, s, s, tint, a);
+                if (!g.ghost) {
+                    placeTrail(trail.padCap, x, 0, z, s, s, s, tmp2.copy(tint).lerp(white, 0.08), a);
+                    placeTrail(trail.padRim, x, 0, z, s, s, s, tmp2.copy(tint).multiplyScalar(0.22), a);
+                }
+            }
+            if (hit && cnt.glow < MAX_GEMS) {
+                const gs = (g.ghost ? 0.9 : (g.accent ? 1.75 : 1.35)) * (1 + 0.5 * p);
+                place(meshes.glow, cnt.glow++, x, 0, z, gs, 1, g.kind === 'cymbal' ? gs : gs * 0.6, tmp2.copy(tint).multiplyScalar(0.7 * a));
+            }
+        }
 
         function layoutCamera() {
             const aspect = cssW / Math.max(1, cssH);
@@ -632,6 +868,74 @@
             ctx.lineTo(x + r, y + h);
             ctx.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);
             ctx.closePath();
+        }
+
+        // Score FX: streak-break wash, combo ring, milestone bursts and "+points" pops.
+        function drawScoreFx(ctx, wall, scale) {
+            const Wc = cssW, Hc = cssH;
+            const breakAge = wall - breakBorn;
+            if (breakAge >= 0 && breakAge < HIT_FX.breakMs) {
+                ctx.globalAlpha = 0.10 * (1 - breakAge / HIT_FX.breakMs);
+                ctx.fillStyle = '#ef4444';
+                ctx.fillRect(0, 0, Wc, Hc);
+                ctx.globalAlpha = 1;
+            }
+            const ringAge = wall - ringBorn;
+            let anyBurst = false;
+            for (let i = 0; i < BURST_N; i++) { const a = wall - bursts[i].born; if (a >= 0 && a < HIT_FX.burstMs) anyBurst = true; }
+            if ((ringAge >= 0 && ringAge < HIT_FX.ringMs) || anyBurst) {
+                if (projectTo(0, 0.3, 0)) {
+                    const cx = projV.x, cy = projV.y;
+                    ctx.shadowBlur = 0;
+                    if (ringAge >= 0 && ringAge < HIT_FX.ringMs) {
+                        const p = ringAge / HIT_FX.ringMs, ease = 1 - (1 - p) * (1 - p);
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, 20 + ease * Math.min(Wc, Hc) * 0.28, 0, Math.PI * 2);
+                        ctx.strokeStyle = ringHot ? '#fde047' : '#86efac';
+                        ctx.globalAlpha = 0.6 * (1 - p);
+                        ctx.lineWidth = 3;
+                        ctx.stroke();
+                    }
+                    for (let i = 0; i < BURST_N; i++) {
+                        const b = bursts[i];
+                        const age = wall - b.born;
+                        if (!(age >= 0 && age < HIT_FX.burstMs)) continue;
+                        ctx.globalAlpha = 1 - age / HIT_FX.burstMs;
+                        const f = age / (1000 / 60);   // steps of a 60 Hz frame, falling a little each step
+                        const fall = 0.04 * f * (f + 1);
+                        for (let j = 0; j < BURST_P; j++) {
+                            ctx.fillStyle = (j & 1) ? '#fde047' : '#86efac';
+                            ctx.fillRect(cx + b.vx[j] * f * scale - 2, cy + (b.vy[j] * f + fall) * scale - 2, 4, 4);
+                        }
+                    }
+                    ctx.globalAlpha = 1;
+                }
+            }
+            let fontSet = false;
+            for (let i = 0; i < POP_N; i++) {
+                const pop = pops[i];
+                const age = wall - pop.born;
+                if (!(age >= 0 && age < HIT_FX.popMs)) continue;
+                if (!projectTo(pop.x, 0.9, 0)) continue;
+                if (!fontSet) {
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    if (scale !== popFontScale) { popFontScale = scale; popFont = `bold ${15 * scale}px ${FONT}`; }
+                    ctx.font = popFont;
+                    ctx.lineWidth = 4;
+                    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+                    ctx.shadowBlur = 0;
+                    fontSet = true;
+                }
+                const p = age / HIT_FX.popMs;
+                const y = projV.y - p * 30 * scale;
+                ctx.globalAlpha = p < 0.4 ? 1 : 1 - (p - 0.4) / 0.6;
+                ctx.strokeText(pop.text, projV.x, y);
+                ctx.fillStyle = pop.sp ? '#8fe6ff' : '#86efac';
+                ctx.fillText(pop.text, projV.x, y);
+            }
+            ctx.globalAlpha = 1;
+            ctx.textBaseline = 'alphabetic';
         }
 
         function drawHud(frame, state, wall) {
@@ -904,6 +1208,8 @@
                 ctx.fillText(sl.n ? sl.h + ' / ' + sl.n + ' notes' : 'get ready', Wc / 2, cy + 30 * scale);
             }
 
+            drawScoreFx(ctx, wall, scale);
+
             // Centre toasts.
             let msg = null;
             if (frame.message) msg = { text: frame.message, color: '#c8d0ee', alpha: 1 };
@@ -1016,22 +1322,29 @@
             // Gems.
             const cnt = { pad: 0, padGhost: 0, padCap: 0, padRim: 0, shadow: 0, dome: 0, domeGhost: 0, bell: 0, cymRing: 0, cymRingGhost: 0,
                 kick: 0, stripe: 0, glow: 0, activator: 0 };
+            for (let i = 0; i < trailList.length; i++) trailList[i].n = 0;
             const gems = session ? session.gems : [];
             if (gems.length) {
-                const [g0, g1] = visibleRange(gems, t - TRACK.behind / speed, t + look);
+                const [g0, g1] = visibleRange(gems, t - Math.max(HIT_FX.behind, TRACK.behind / speed), t + look);
                 // Draw far -> near so additive glows layer sensibly.
                 for (let i = g1 - 1; i >= g0; i--) {
                     const g = gems[i];
                     // Auto notes are played for you: gone once they reach the strikeline.
                     if (g.auto && g.t <= t) continue;
+                    const since = t - g.t;
                     const st = eng ? eng.noteState(g.id) : null;
-                    if (st === 'hit') continue;
-                    const missed = st === 'miss';
-                    const isSp = !!(eng && !missed && eng.isStarPowerNote(g.id));
-                    const z = -(g.t - t) * speed;
-                    const base = missed ? missedColor : (isSp ? spColor : tmpColor.setHex(g.color));
+                    const z = trailZ(since, speed);
+                    // Judged gems carry on past the strikeline, tinted, and fade out (HIT_FX.behind).
+                    if (st === 'hit' || st === 'miss') {
+                        const a = trailAlpha(since);
+                        if (a > 0) drawTrailGem(g, st === 'hit', a, z, since, cnt);
+                        continue;
+                    }
+                    if (since >= HIT_FX.behind) continue;
+                    const isSp = !!(eng && eng.isStarPowerNote(g.id));
+                    const base = isSp ? spColor : tmpColor.setHex(g.color);
                     const col = gemColor.copy(base);
-                    if (g.accent && !missed) col.lerp(white, 0.1);
+                    if (g.accent) col.lerp(white, 0.1);
                     if (g.auto) col.multiplyScalar(0.38);
                     const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1));
                     if (g.kind === 'kick' || g.kind === 'kick2x') {
@@ -1040,7 +1353,7 @@
                             place(meshes.kick, cnt.kick++, 0, 0, z, 1, sy * (g.accent ? 1.2 : 1), g.accent ? 1.25 : 1, col);
                             if (g.kick2x && cnt.stripe < 128) place(meshes.stripe, cnt.stripe++, 0, 0.02, z, 1, sy, 1, white);
                         }
-                        if (!missed && !g.auto && cnt.glow < MAX_GEMS) place(meshes.glow, cnt.glow++, 0, 0, z, W4 + 0.6, 1, 0.9, tmp2.copy(col).multiplyScalar(0.55));
+                        if (!g.auto && cnt.glow < MAX_GEMS) place(meshes.glow, cnt.glow++, 0, 0, z, W4 + 0.6, 1, 0.9, tmp2.copy(col).multiplyScalar(0.55));
                     } else {
                         const x = laneX(g.lane);
                         if (g.kind === 'cymbal') {
@@ -1058,12 +1371,12 @@
                                 place(meshes.padRim, cnt.padRim++, x, 0, z, s, s, s, tmp2.copy(col).multiplyScalar(0.22));
                             }
                         }
-                        if (!missed && !g.auto) {
+                        if (!g.auto && cnt.glow < MAX_GEMS) {
                             const gs = (g.ghost ? 0.9 : (g.accent ? 1.75 : 1.35));
                             place(meshes.glow, cnt.glow++, x, 0, z, gs, 1, g.kind === 'cymbal' ? gs : gs * 0.6,
                                 tmp2.copy(col).multiplyScalar(g.ghost ? 0.3 : (g.accent ? 0.9 : 0.6)));
                         }
-                        if (canActivate && !spActive && !missed && eng && eng.isActivatorNote(g.id) && cnt.activator < 16) {
+                        if (canActivate && !spActive && eng && eng.isActivatorNote(g.id) && cnt.activator < 16) {
                             dummy.position.set(x, 0.42, z);
                             dummy.rotation.set(0, wall / 400, 0);
                             const ps = 1 + 0.12 * spPulse;
@@ -1082,6 +1395,15 @@
                 m.instanceMatrix.needsUpdate = true;
                 if (m.instanceColor) m.instanceColor.needsUpdate = true;
             }
+            for (let i = 0; i < trailList.length; i++) {
+                const r = trailList[i];
+                r.mesh.count = r.n;
+                r.mesh.visible = r.n > 0;
+                if (!r.n) continue;
+                r.mesh.instanceMatrix.needsUpdate = true;
+                if (r.mesh.instanceColor) r.mesh.instanceColor.needsUpdate = true;
+                r.attr.needsUpdate = true;
+            }
 
             // Strikeline targets.
             for (let i = 0; i < TRACK.lanes; i++) {
@@ -1092,15 +1414,19 @@
                 tg.ringMat.color.copy(tg.color).lerp(white, 0.5 * k);
                 tg.discMat.color.setHex(COLORS.track).lerp(tg.color, 0.16 + 0.66 * k);
                 const lt = laneTints[i];
-                const red = clamp(1 - (wall - lt.red) / 380, 0, 1);
-                const press = clamp(1 - (wall - lt.press) / 160, 0, 1);
-                if (red > 0) { lt.mat.color.setHex(COLORS.miss); lt.mat.opacity = 0.45 * red; }
-                else { lt.mat.color.copy(lt.color); lt.mat.opacity = 0.16 * press; }
+                lt.mat.opacity = 0.16 * clamp(1 - (wall - lt.press) / 160, 0, 1);
             }
             const kk = clamp(1 - (wall - kickTarget.press) / 160, 0, 1);
             kickLineMat.color.setHex(COLORS.kick).lerp(white, 0.45 * kk);
             kickGlowMat.opacity = 0.22 + 0.5 * kk;
-            kickTintMat.opacity = 0.5 * clamp(1 - (wall - kickTintState.red) / 380, 0, 1);
+            // Lane flashes (green by timing on a hit, red on a miss / overhit).
+            for (let i = 0; i < laneFlashes.length; i++) {
+                const fl = laneFlashes[i];
+                const age = wall - fl.wall;
+                fl.k = age >= 0 ? clamp(1 - age / HIT_FX.flashMs, 0, 1) : 0;
+                fl.mat.opacity = HIT_FX.flashPeak * fl.k;
+                fl.mesh.visible = fl.k > 0;
+            }
 
             // Flashes.
             for (const f of flashes) {
@@ -1127,6 +1453,7 @@
             }
 
             // Sparks.
+            sparksLive = 0;
             for (let i = 0; i < MAX_SPARKS; i++) {
                 const age = (wall - sparkBorn[i]) / 1000;
                 const life = sparkLife[i];
@@ -1136,6 +1463,7 @@
                     continue;
                 }
                 const k = 1 - age / life;
+                sparksLive++;
                 sparkPos[i * 3] = sparkOrigin[i * 3] + sparkVel[i * 3] * age;
                 sparkPos[i * 3 + 1] = sparkOrigin[i * 3 + 1] + sparkVel[i * 3 + 1] * age - 9.0 * age * age;
                 sparkPos[i * 3 + 2] = sparkOrigin[i * 3 + 2] + sparkVel[i * 3 + 2] * age;
@@ -1168,14 +1496,33 @@
         function dispose() {
             for (const d of disposables) { try { d.dispose(); } catch (_) { /* ignore */ } }
             for (const k of Object.keys(meshes)) { try { meshes[k].dispose(); } catch (_) { /* ignore */ } }
+            for (const r of trailList) { try { r.mesh.dispose(); } catch (_) { /* ignore */ } }
             try { beatLines.dispose(); measureLines.dispose(); } catch (_) { /* ignore */ }
             try { renderer.renderLists.dispose(); renderer.dispose(); } catch (_) { /* ignore */ }
             _resetPixelStore(gl);   // the canvas (and its context) is reused by the next renderer
             if (hctx && hud) { try { hctx.setTransform(1, 0, 0, 1, 0, 0); hctx.clearRect(0, 0, hud.width, hud.height); } catch (_) { /* ignore */ } }
         }
 
+        function fxSnapshot() {
+            const out = [];
+            for (const state of ['hit', 'miss']) {
+                for (const kind of ['pad', 'dome', 'kick']) {
+                    const r = trail[state][kind];
+                    for (let i = 0; i < r.n; i++) out.push({ state, kind, alpha: r.alpha[i], z: r.z[i] });
+                }
+            }
+            const live = (born, ms) => { const a = wallLast - born; return a >= 0 && a < ms; };
+            return {
+                trail: out, sparksLive, sparksBorn,
+                flash: laneFlashes.map(f => f.k), flashHit: laneFlashes.map(f => f.k > 0 && f.hit),
+                pops: pops.filter(p => live(p.born, HIT_FX.popMs)).length, popPool: POP_N,
+                bursts: bursts.filter(b => live(b.born, HIT_FX.burstMs)).length,
+                ring: live(ringBorn, HIT_FX.ringMs), breakWash: live(breakBorn, HIT_FX.breakMs),
+            };
+        }
+
         return {
-            render, resize, dispose, project,
+            render, resize, dispose, project, fxSnapshot,
             get hudContext() { return hctx; },
             get size() { return { w: cssW, h: cssH, dpr }; },
             get lastWall() { return wallLast; },
@@ -1186,8 +1533,8 @@
     }
 
     return {
-        TRACK, PAD_SYNTH_MIDI,
-        keyToPad, synthMidiForPad,
+        TRACK, PAD_SYNTH_MIDI, HIT_FX,
+        keyToPad, synthMidiForPad, trailAlpha, trailZ, timingHex, sparkCount,
         createView,
     };
 });

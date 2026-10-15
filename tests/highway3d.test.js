@@ -99,3 +99,126 @@ test('screen.js _resolveView: 3D when WebGL2 is available unless 2D is chosen', 
     mod._saveCfg('view', 'vr');
     assert.equal(mod._cfg().view, 'auto', 'unknown views are not saved');
 });
+
+// ── hit / miss FX (the scene runs on a stub three.js: no WebGL in Node) ─────
+
+// An auto-vivifying stand-in for three.js objects: any property is another stub, calls and `new`
+// return stubs, assignments stick, and arithmetic sees 0.
+function stub() {
+    const store = Object.create(null);
+    const p = new Proxy(function () {}, {
+        get(_, k) {
+            if (k in store) return store[k];
+            if (k === Symbol.toPrimitive) return () => 0;
+            if (k === 'then' || typeof k === 'symbol') return undefined;
+            return (store[k] = stub());
+        },
+        set(_, k, v) { store[k] = v; return true; },
+        apply() { return p; },
+        construct() { return stub(); },
+    });
+    return p;
+}
+
+function sceneHarness(notes, opts) {
+    const prevDoc = global.document;
+    global.document = { createElement: () => stub(), addEventListener: () => {} };
+    let wall = 0;
+    const s = S.createSession(E, { now: () => wall });
+    s.load({ notes, chords: [], beats: [] });
+    const view = H.createView(stub(), stub(), Object.assign({ context: stub() }, opts || {}));
+    view.resize(1280, 720, 1);
+    let t = 0;
+    const to = (t1) => {
+        for (; t < t1 - 1e-9; t = Math.min(t1, t + 1 / 60)) {
+            wall = t * 1000; s.update(t); view.render({ time: t, session: s, wallNow: wall });
+        }
+        wall = t1 * 1000; s.update(t1); view.render({ time: t1, session: s, wallNow: wall });
+        t = t1;
+        return view.fxSnapshot();
+    };
+    const done = () => { view.dispose(); global.document = prevDoc; };
+    return { s, view, to, done, hit: (time, pad) => { wall = time * 1000; return s.hit(time, pad); } };
+}
+
+test('trailAlpha / trailZ: judged gems keep moving past the strikeline and fade out over HIT_FX.behind', () => {
+    assert.equal(H.HIT_FX.behind, 0.4);
+    assert.equal(H.trailAlpha(-0.3), 1, 'still approaching');
+    assert.equal(H.trailAlpha(0), 1);
+    const a1 = H.trailAlpha(0.1), a2 = H.trailAlpha(0.2), a3 = H.trailAlpha(0.35);
+    assert.ok(1 > a1 && a1 > a2 && a2 > a3 && a3 > 0, 'fades monotonically');
+    assert.equal(H.trailAlpha(0.4), 0);
+    assert.equal(H.trailAlpha(1), 0);
+    const speed = H.TRACK.length / H.TRACK.defaultLookahead;
+    assert.equal(H.trailZ(-0.5, speed), -0.5 * speed, 'approaching gems scroll at track speed');
+    let prev = 0;
+    for (let k = 1; k <= 8; k++) {
+        const z = H.trailZ(k * 0.05, speed);
+        assert.ok(z > prev, 'keeps travelling toward the back of the highway');
+        assert.ok(z <= H.TRACK.behind + 1e-9, 'and stays on the visible track');
+        prev = z;
+    }
+    assert.ok(Math.abs(H.trailZ(0.4, speed) - H.TRACK.behind) < 1e-9, 'leaves out the back as it fades out');
+    // continuous speed across the strikeline
+    const v0 = H.trailZ(0.001, speed) / 0.001;
+    assert.ok(Math.abs(v0 - speed) / speed < 0.05, 'no jump in speed at the strikeline');
+});
+
+test('3D view: a hit gem is still drawn 0.2 s later, tinted, with reduced opacity, and gone after the window', () => {
+    const h = sceneHarness([{ t: 1, s: 1, f: 14 }, { t: 2, s: 1, f: 14 }]);
+    try {
+        let snap = h.to(0.98);
+        assert.equal(snap.trail.length, 0, 'nothing judged yet');
+        assert.equal(h.hit(1.0, 1).type, 'hit');
+        snap = h.to(1.0);
+        assert.equal(snap.trail.length, 1);
+        assert.equal(snap.trail[0].state, 'hit');
+        assert.ok(snap.sparksLive > 0, 'hit sparks');
+        assert.ok(snap.flash[0] > 0 && snap.flashHit[0], 'green lane flash on the red lane');
+        snap = h.to(1.2);
+        assert.equal(snap.trail.length, 1, 'still drawn past the strikeline');
+        const g = snap.trail[0];
+        assert.equal(g.state, 'hit');
+        assert.ok(g.alpha > 0 && g.alpha < 1, 'with reduced opacity: ' + g.alpha);
+        assert.ok(g.z > 0, 'behind the strikeline (toward the camera)');
+        assert.ok(h.to(1.3).trail[0].alpha < g.alpha, 'fading');
+        assert.equal(h.to(1.45).trail.length, 0, 'gone after the window');
+        assert.equal(h.to(1.5).flash[0], 0, 'the lane flash is over');
+        // the note at t=2 is never played: it turns red, carries on and fades too
+        snap = h.to(2.25);
+        assert.equal(snap.trail.length, 1);
+        assert.equal(snap.trail[0].state, 'miss');
+        assert.ok(snap.trail[0].alpha > 0 && snap.trail[0].alpha < 1);
+        assert.ok(snap.flash[0] > 0 && !snap.flashHit[0], 'red lane flash');
+        assert.equal(h.to(2.5).trail.length, 0);
+    } finally { h.done(); }
+});
+
+test('3D view: spark bursts grow with the streak, combo rings / milestone bursts / score pops come from a fixed pool', () => {
+    const notes = [];
+    for (let i = 0; i < 30; i++) notes.push({ t: 1 + i * 0.25, s: 1, f: 14 });
+    const hudCanvas = stub();
+    const h = sceneHarness(notes, { hudCanvas });
+    try {
+        h.to(0.99);
+        h.hit(1.0, 1);
+        const one = h.to(1.0);
+        const first = one.sparksBorn;
+        assert.equal(one.pops, 1, 'a score pop');
+        assert.ok(!one.ring && !one.bursts);
+        let snap = null;
+        for (let i = 1; i < 25; i++) {
+            h.to(1 + i * 0.25 - 0.01); h.hit(1 + i * 0.25, 1);
+            snap = h.to(1 + i * 0.25);
+            if (i === 9) assert.ok(snap.ring, 'combo ring at a 10 streak');
+            if (i === 12) assert.ok(!snap.ring, 'the ring is short-lived');
+        }
+        assert.equal(h.s.getState().combo, 25);
+        assert.ok(snap.sparksBorn > first, 'a 25 streak throws a bigger burst than the first hit');
+        assert.ok(snap.pops > 0 && snap.pops <= snap.popPool, 'score pops are pooled');
+        assert.equal(snap.bursts, 1, 'the 25 streak milestone burst');
+        // break the streak: a red wash
+        const br = h.to(1 + 26 * 0.25);
+        assert.ok(br.breakWash, 'streak-break wash');
+    } finally { h.done(); }
+});
