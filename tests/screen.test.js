@@ -662,3 +662,110 @@ test('_drumTabFor: a Drums arrangement with notes wins over the sloppak drum tab
     assert.equal(mod._drumTabFor({ songInfo: drums, notes: [] }), null);
     assert.equal(mod._drumTabFor({ drumTab: { hits: 'x' } }), null);
 });
+
+// ── review fixes: velocity, script retry, input offset, star power pad ────
+
+test('_engineVelocity: MIDI 1..127 -> 0..1, so velocity 1 is the softest hit (not full strength)', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._engineVelocity(127), 1);
+    assert.ok(Math.abs(mod._engineVelocity(1) - 1 / 127) < 1e-12);
+    assert.ok(mod._engineVelocity(1) < 0.35, 'below the engine ghost threshold');
+    assert.equal(mod._engineVelocity(64), 64 / 127);
+    assert.equal(mod._engineVelocity(200), 1);
+    assert.equal(mod._engineVelocity(undefined), undefined, 'no velocity -> no dynamics judgement');
+});
+
+// A tiny DOM for the script loader: <script> elements in <head>, found by src.
+function fakeScriptDom() {
+    const head = [];
+    const doc = {
+        addEventListener: () => {},
+        querySelectorAll: (sel) => {
+            const m = /^script\[src="(.*)"\]$/.exec(sel);
+            return m ? head.filter(s => s.src === m[1]) : [];
+        },
+        querySelector: (sel) => doc.querySelectorAll(sel)[0] || null,
+        createElement: () => {
+            const el = { src: '', onload: null, onerror: null };
+            el.remove = () => { const i = head.indexOf(el); if (i >= 0) head.splice(i, 1); };
+            return el;
+        },
+        head: { appendChild: (el) => { head.push(el); } },
+    };
+    return { doc, head };
+}
+
+test('_loadScoring: a failed script load can be retried (the dead <script> element is removed)', async () => {
+    const { doc, head } = fakeScriptDom();
+    global.window = {};
+    global.localStorage = { getItem: () => null, setItem: () => {} };
+    global.document = doc;
+    const file = path.join(__dirname, '..', 'screen.js');
+    delete require.cache[require.resolve(file)];
+    const mod = require(file);
+
+    // First try: engine.js loads, session.js fails (network error).
+    const p1 = mod._loadScoring();
+    assert.equal(head.length, 2);
+    window.DrumsEngine = { fake: 'engine' };
+    head[0].onload();
+    head[1].onerror();
+    await assert.rejects(p1, /Failed to load/);
+    assert.equal(head.length, 1, 'the failed session.js element is gone');
+
+    // Retry: session.js is requested again (not resolved on the stale tag).
+    const p2 = mod._loadScoring();
+    assert.equal(head.length, 2);
+    assert.match(head[1].src, /session\.js/);
+    window.DrumsSession = { fake: 'session' };
+    head[1].onload();
+    const r = await p2;
+    assert.equal(r.E, window.DrumsEngine);
+    assert.equal(r.H, window.DrumsSession);
+});
+
+test('_loadScoring: a script that loads but never registers is dropped so a retry reloads it', async () => {
+    const { doc, head } = fakeScriptDom();
+    global.window = {};
+    global.localStorage = { getItem: () => null, setItem: () => {} };
+    global.document = doc;
+    const file = path.join(__dirname, '..', 'screen.js');
+    delete require.cache[require.resolve(file)];
+    const mod = require(file);
+    const p1 = mod._loadScoring();
+    head[0].onload(); head[1].onload();            // e.g. an HTML error page served as JS
+    await assert.rejects(p1, /did not register/);
+    assert.equal(head.length, 0);
+    const p2 = mod._loadScoring();
+    assert.equal(head.length, 2, 'both files requested again');
+    window.DrumsEngine = {}; window.DrumsSession = {};
+    head[0].onload(); head[1].onload();
+    await p2;
+});
+
+test('_setInputOffset saves, clamps and hands the offset to every live view', () => {
+    const mod = freshPlugin();
+    const seen = [];
+    mod._instances.add({ _inputOffsetChanged: () => seen.push(mod._cfg().inputOffsetMs) });
+    assert.equal(mod._setInputOffset(23), 23);
+    assert.equal(mod._setInputOffset('-400'), -250);
+    assert.deepEqual(seen, [23, -250]);
+    mod._instances.clear();
+});
+
+test('star power pad: drums_sp_pad_v1, off by default, any MIDI note 0..127', () => {
+    const mod = freshPlugin();
+    assert.equal(mod.STORE_KEYS.spPad, 'drums_sp_pad_v1');
+    assert.equal(mod._cfg().spPad, -1);
+    assert.equal(mod._spPadName(), '');
+    mod._saveCfg('spPad', '44');
+    assert.equal(mod._cfg().spPad, 44);
+    assert.equal(mod._spPadName(), 'hi-hat pedal');
+    mod._saveCfg('spPad', 99);
+    assert.equal(mod._spPadName(), 'MIDI note 99');
+    mod._saveCfg('spPad', 300);
+    assert.equal(mod._cfg().spPad, -1);
+    mod._saveCfg('spPad', 'x');
+    assert.equal(mod._cfg().spPad, -1);
+    assert.equal(mod.SP_PAD_CHOICES[0][0], -1);
+});

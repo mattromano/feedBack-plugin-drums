@@ -106,8 +106,11 @@ Scoring is a JavaScript port of YARG.Core's drums engine (`assets/engine.js`, LG
 - **Bonuses** (shown in the score) — +10 x multiplier for a hit within 25 ms, extra points for snare / tom
   rolls, and a drum-solo bonus (100 per note hit, doubled for a perfect solo) with a live percentage during
   a solo.
-- **Offset** (ms) — subtracted from the time of every hit; raise it if your hits register late (audio or
-  MIDI latency). The 3D HUD's timing meter suggests a value (see [Timing](#timing)).
+- **Offset** (ms) — subtracted from the time of every hit and from the scoring clock alike; raise it if
+  your hits register late (audio or MIDI latency). The 3D HUD's timing meter suggests a value (see
+  [Timing](#timing)).
+- **Star power pad** — on charts with star power phrases but no fills, star power is activated with Enter
+  or this pad (off by default; the pad then doesn't score as a note).
 - Seeking (or a loop jumping back) restarts scoring from the new position; skipped notes aren't misses.
 
 The scoring files load on first use from core's plugin assets route (`/api/plugins/drums/assets/`). Until

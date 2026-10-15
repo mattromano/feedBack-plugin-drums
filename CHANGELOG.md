@@ -3,6 +3,24 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [4.5.1] - Unreleased
+
+Review fixes from the upstream scoring PR (`feature/drums-scoring`, a523ce1), ported onto the 4.5.0 build.
+
+### Fixed
+- **Input offset moves the engine's clock too.** The scoring session owns the offset (`createSession`
+  `inputOffsetMs`, `setInputOffset`) and subtracts it from `update()`, `hit()` and `activate()` alike.
+  Before, only the hits were shifted, so with a positive offset a late-registered hit found its note
+  already missed. Changing the offset (settings, Apply, `__drumsSetInputOffset`) reaches live sessions
+  and restarts the timing meter.
+- **MIDI velocity reaches the engine as velocity / 127.** The engine reads values <= 1 as already
+  normalised, so velocity 1 counted as full strength for the accent / ghost bonus.
+- **Star power on charts with phrases but no fills**: Enter works with keyboard drumming off too, and an
+  optional **Star power pad** (settings, `drums_sp_pad_v1`: hi-hat pedal, ride bell, splash or china)
+  activates it from the kit. The HUD hint says how.
+- A scoring script that failed to load (or loaded without registering) has its `<script>` element
+  removed, so the next init loads it again.
+
 ## [4.5.0] - Unreleased
 
 Ported from the drums plugin of the earlier Slopsmith 0.2.9 setup (5.9 - 5.18.3).

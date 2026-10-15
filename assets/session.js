@@ -73,6 +73,8 @@
     // Early/late meter: how many recent hits it keeps, and the "on time" dead zone (ms).
     const TIMING_SAMPLES = 24;
     const TIMING_DEAD_MS = 10;
+    // Input offset range (ms), same as the settings panel.
+    const INPUT_OFFSET_MIN = -250, INPUT_OFFSET_MAX = 250;
 
     function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
     function defaultNow() {
@@ -640,12 +642,35 @@
         };
     }
 
+    /**
+     * Star power hint for the HUD: how the player activates star power when it is ready, or null.
+     * With fills in the chart the fill-end note activates it; without fills (manual activation) the
+     * Enter key or the configured star power pad does. spPadName: that pad's name, or ''.
+     */
+    function starPowerHint(meta, state, spPadName) {
+        const sp = state && state.starPower;
+        if (!sp || !sp.canActivate || sp.active) return null;
+        if (meta && Array.isArray(meta.activation) && meta.activation.length) return 'Hit the marked note at the end of the fill to activate';
+        return 'Press Enter' + (spPadName ? ' or hit ' + spPadName : '') + ' to activate star power';
+    }
+
     // ── Session: the engine for one chart ───────────────────────────────────
 
+    function normalizeInputOffset(ms) {
+        const n = Math.round(Number(ms));
+        return Number.isFinite(n) ? clamp(n, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX) : 0;
+    }
+
     /**
-     * createSession(DrumsEngine, {now}) -> session. load() a chart (wire notes + beats), optionally
-     * setMeta() the drums block, then update(time) every frame and hit()/activate() on input.
-     * drainEvents() hands queued visual events ({type, pad, cymbal, sp, wall}) to the view.
+     * createSession(DrumsEngine, {now, inputOffsetMs, ...}) -> session. load() a chart (wire notes
+     * + beats), optionally setMeta() the drums block, then update(time) every frame and
+     * hit()/activate() on input. drainEvents() hands queued visual events ({type, pad, cymbal, sp,
+     * wall}) to the view.
+     *
+     * Times passed to update(), hit() and activate() are on the highway's clock (what the player
+     * sees). The session subtracts the input offset from all of them alike, so with a positive
+     * offset a hit that registers late is compared against an engine that has not yet moved past
+     * its note.
      */
     function createSession(Engine, opts) {
         opts = opts || {};
@@ -653,12 +678,15 @@
         const MAX_EVENTS = 256;
         const s = {
             decoded: null, gems: [], beats: [], rawBeats: null, meta: null, engine: null,
-            lastTime: null, events: [], builds: 0,
+            lastTime: null, lastFrame: null, events: [], builds: 0,
             proWanted: opts.proDrums !== false,   // the player's "Pro cymbals" setting
             auto: normalizeAuto(opts.auto),       // {kick, cymbals}: lanes played for the player
             params: opts.params || null,          // engine params override (hit window)
             bonus: null,                          // Rock Band-style extras on top of the engine score
+            offset: normalizeInputOffset(opts.inputOffsetMs) / 1000,   // input offset (s)
         };
+        // Highway time -> player time (the input offset applied).
+        const playerTime = (t) => +t - s.offset;
 
         // ── Bonus score (on top of the engine's score) ──
         //  - timing: +10 x multiplier for a hit within 25 ms of the note;
@@ -695,7 +723,7 @@
             const mult = e.multiplier || 1;
             const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
             // Early/late meter: hit time minus note time (ms, + = late), last TIMING_SAMPLES hits.
-            b.offsets.push(Math.round((e.time - nt) * 1000));
+            b.offsets.push(Math.round((e.time - nt) * 1000) || 0);   // || 0: no -0
             if (b.offsets.length > TIMING_SAMPLES) b.offsets.shift();
             let pts = 0;
             if (Math.abs(e.time - nt) <= 0.025) { pts += 10 * mult; b.timing += 10 * mult; b.perfect++; }
@@ -856,14 +884,17 @@
                 }
                 return api;
             },
-            update(time) {
-                time = +time;
-                if (!Number.isFinite(time) || !s.engine) return;
+            /** Advance to the highway time of this frame (the input offset is applied here too). */
+            update(frameTime) {
+                frameTime = +frameTime;
+                if (!Number.isFinite(frameTime) || !s.engine) return;
+                const time = playerTime(frameTime);
                 if (s.lastTime != null) {
                     if (isSeek(s.lastTime, time)) build(time);
-                    else if (time > s.lastTime && (s.auto.kick || s.auto.cymbals)) {
-                        // Auto notes crossing the strikeline this frame flash as if played.
-                        for (let i = firstAfter(s.gems, s.lastTime); i < s.gems.length && s.gems[i].t <= time; i++) {
+                    else if (s.lastFrame != null && frameTime > s.lastFrame && (s.auto.kick || s.auto.cymbals)) {
+                        // Auto notes crossing the strikeline this frame flash as if played
+                        // (on the highway clock: that is when the player sees them arrive).
+                        for (let i = firstAfter(s.gems, s.lastFrame); i < s.gems.length && s.gems[i].t <= frameTime; i++) {
                             const g = s.gems[i];
                             if (g.auto) push({ type: 'hit', pad: g.pad, cymbal: g.cymbal, id: g.id, sp: false, auto: true, time: g.t });
                         }
@@ -880,20 +911,36 @@
                 s.engine.update(time - INPUT_GRACE);
                 bonusTick(time);
                 s.lastTime = time;
+                s.lastFrame = frameTime;
             },
+            /** A pad hit struck at highway time `time`. o: {cymbal, velocity (0..1)}. */
             hit(time, pad, o) {
                 o = o || {};
                 push({ type: 'press', pad: pad | 0, cymbal: !!o.cymbal });
                 // Pads the game plays for you: no score, no overhit.
                 if (isAutoNote(pad | 0, !!o.cymbal, s.auto)) return { type: 'ignored', reason: 'auto' };
                 if (!s.engine || !Number.isFinite(+time)) return { type: 'ignored', reason: 'no-chart' };
-                if (s.lastTime != null && isSeek(s.lastTime, +time)) return { type: 'ignored', reason: 'seek' };
-                return s.engine.hit(+time, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
+                const t = playerTime(time);
+                if (s.lastTime != null && isSeek(s.lastTime, t)) return { type: 'ignored', reason: 'seek' };
+                return s.engine.hit(t, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
             },
+            /**
+             * Activate star power at highway time `time` (the Enter key / star power pad). Only
+             * works on charts without fills (with fills, the fill-end note activates it).
+             */
             activate(time) {
-                if (!s.engine) return false;
-                return s.engine.activateStarPower(time);
+                if (!s.engine || !Number.isFinite(+time)) return false;
+                return s.engine.activateStarPower(playerTime(time));
             },
+            /** Input offset in ms (subtracted from every time above; + = hits register earlier). */
+            setInputOffset(ms) {
+                const v = normalizeInputOffset(ms) / 1000;
+                if (v === s.offset) return api;
+                s.offset = v;
+                if (s.bonus) s.bonus.offsets = [];   // the meter measured the old offset
+                return api;
+            },
+            get inputOffsetMs() { return Math.round(s.offset * 1000); },
             drainEvents() {
                 if (!s.events.length) return [];
                 const out = s.events.slice();
@@ -901,7 +948,7 @@
                 return out;
             },
             getState() { return s.engine ? s.engine.getState() : null; },
-            /** Per-hit timing listener ({time, noteTime, pad}, song seconds) or null. */
+            /** Per-hit timing listener ({time, noteTime, pad}: player seconds) or null. */
             setOnHit(fn) { s.onHit = typeof fn === 'function' ? fn : null; return api; },
             /** Forget the early/late samples (after the input offset changed). */
             resetTiming() { if (s.bonus) s.bonus.offsets = []; return api; },
@@ -944,7 +991,8 @@
         normalizeDifficulty, hasKick2x, stripKick2x, difficultyOptions,
         resolveDifficulty, nextDifficulty, difficultyLabel, difficultyBadge, difficultyChart, isDifficultyKey,
         midiToPad, isTypingTarget, estimateTime, isSeek, createFrameClock, timingSummary, TIMING_DEAD_MS,
-        formatScore, formatAccuracy, multiplierColor, starProgress, hudModel,
+        formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, starPowerHint,
+        normalizeInputOffset, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX,
         createSession,
     };
 });

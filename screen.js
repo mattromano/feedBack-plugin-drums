@@ -106,6 +106,9 @@ const STORE_KEYS = {
     // Subtracted from the song time of every scored hit, in ms (positive =
     // your hits register earlier; for audio / MIDI latency).
     inputOffsetMs:  'drums_input_offset_ms',
+    // MIDI note of the pad that activates star power on charts without
+    // drum fills (-1 = none; the Enter key always works).
+    spPad:          'drums_sp_pad_v1',
     // View: 'auto' (3D when WebGL2 is available, else 2D) | '3d' | '2d'.
     view:           'drums_view_v1',
     // Keyboard drumming (B F J K L U I O, Enter = star power), both views.
@@ -260,6 +263,7 @@ const _cfg = {
     })(),
     autoVolume:     _readNum(STORE_KEYS.autoVolume, 0.8, 0, 1),
     inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, -250, 250)),
+    spPad:          Math.round(_readNum(STORE_KEYS.spPad, -1, -1, 127)),
     difficulty:     (function () {
         const raw = _readStore(STORE_KEYS.difficulty);
         return _VALID_DIFFICULTIES.has(raw) ? raw : 'expert';
@@ -343,6 +347,10 @@ function _saveCfg(key, val) {
     if (key === 'inputOffsetMs') {
         const n = Math.round(Number(val));
         val = Number.isFinite(n) ? Math.max(-250, Math.min(250, n)) : 0;
+    }
+    if (key === 'spPad') {
+        const n = Math.round(Number(val));
+        val = Number.isFinite(n) && n >= 0 && n <= 127 ? n : -1;
     }
     _cfg[key] = val;
     const storeKey = STORE_KEYS[key];
@@ -431,14 +439,59 @@ function _setAssist(key, val) {
     }
 }
 
-// Save the input offset (ms) and show it in every open settings panel and
-// the settings page (the timing meter's Apply, calibration tools).
+// Save the input offset (ms), show it in every open settings panel and the
+// settings page, and hand it to every live scoring session (the session
+// applies it to the frame clock and the hits alike). Callers: the settings
+// fields, the timing meter's Apply, calibration tools.
 function _setInputOffset(ms) {
     _saveCfg('inputOffsetMs', ms);
     try {
         document.querySelectorAll('.drums-offset-input').forEach((el) => { el.value = String(_cfg.inputOffsetMs); });
     } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+    }
     return _cfg.inputOffsetMs;
+}
+
+// Pads offered for star power activation: notes the engine does not score
+// (hat pedal) or seldom-charted extras. Any other note can be stored too.
+const SP_PAD_CHOICES = [
+    [-1, 'Off (Enter key only)'],
+    [44, 'Hi-hat pedal (44)'],
+    [53, 'Ride bell (53)'],
+    [55, 'Splash (55)'],
+    [52, 'China (52)'],
+];
+
+// Save the star power pad (MIDI note, -1 = none).
+function _setSpPad(note) {
+    _saveCfg('spPad', note);
+    try {
+        document.querySelectorAll('.drums-sp-pad').forEach((sel) => { sel.innerHTML = _spPadOptions(_cfg.spPad); });
+    } catch (_) { /* no DOM */ }
+}
+
+function _spPadOptions(current) {
+    const list = SP_PAD_CHOICES.slice();
+    if (current >= 0 && !list.some(([n]) => n === current)) list.push([current, 'MIDI note ' + current]);
+    return list.map(([n, name]) => `<option value="${n}"${n === current ? ' selected' : ''}>${name}</option>`).join('');
+}
+
+// Short name of the star power pad for the HUD hint ('' = none).
+function _spPadName() {
+    if (_cfg.spPad < 0) return '';
+    const c = SP_PAD_CHOICES.find(([n]) => n === _cfg.spPad);
+    return c ? c[1].replace(/\s*\(\d+\)$/, '').toLowerCase() : 'MIDI note ' + _cfg.spPad;
+}
+
+// MIDI velocity (1..127) -> the engine's 0..1. The engine also accepts raw
+// MIDI values, but reads anything <= 1 as already normalised, so velocity 1
+// (the softest ghost note) would count as full strength.
+function _engineVelocity(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.max(0, Math.min(1, n / 127));
 }
 
 // <option> lists for the settings selects (values are fixed ids; names are ours).
@@ -747,15 +800,26 @@ function _rgbStr(r, g, b, a) {
 // Script loader
 // ═══════════════════════════════════════════════════════════════════════
 
+// A failed load removes its <script> element, so a later call for the same
+// URL loads it again instead of resolving at once on the dead tag.
 function _loadScript(url) {
     return new Promise((resolve, reject) => {
         if (document.querySelector(`script[src="${url}"]`)) { resolve(); return; }
         const s = document.createElement('script');
         s.src = url;
         s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load ' + url));
+        s.onerror = () => {
+            try { s.remove(); } catch (_) { /* already gone */ }
+            reject(new Error('Failed to load ' + url));
+        };
         document.head.appendChild(s);
     });
+}
+
+// Remove the <script> element for `url` (a load that "succeeded" without
+// registering its global, e.g. an error page served as JS).
+function _dropScript(url) {
+    try { document.querySelectorAll(`script[src="${url}"]`).forEach((el) => el.remove()); } catch (_) { /* no DOM */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -767,7 +831,7 @@ function _loadScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.5.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.5.1';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -777,14 +841,17 @@ function _loadScoring() {
         return Promise.resolve({ E: window.DrumsEngine, H: window.DrumsSession });
     }
     if (_scoringPromise) return _scoringPromise;
-    const want = (name, global) => (window[global]
-        ? Promise.resolve()
-        : _loadScript(PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION));
-    _scoringPromise = Promise.all([want('engine.js', 'DrumsEngine'), want('session.js', 'DrumsSession')]).then(() => {
+    const files = [['engine.js', 'DrumsEngine'], ['session.js', 'DrumsSession']];
+    const url = (name) => PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION;
+    const want = (name, global) => (window[global] ? Promise.resolve() : _loadScript(url(name)));
+    _scoringPromise = Promise.all(files.map(([name, global]) => want(name, global))).then(() => {
         if (!window.DrumsEngine || !window.DrumsSession) throw new Error('drums scoring modules did not register');
         return { E: window.DrumsEngine, H: window.DrumsSession };
     }).catch((e) => {
         _scoringPromise = null;   // allow a retry on the next init
+        // ...and drop the tags of files that did not register, or the retry
+        // would resolve at once on them.
+        for (const [name, global] of files) if (!window[global]) _dropScript(url(name));
         throw e;
     });
     return _scoringPromise;
@@ -804,7 +871,13 @@ function _loadViewScript() {
             if (!window.DrumsHighway3D) throw new Error('highway3d.js did not register');
             return window.DrumsHighway3D;
         })
-        .catch((e) => { _viewScriptPromise = null; throw e; });
+        .catch((e) => {
+            _viewScriptPromise = null;
+            // Same as _loadScoring: a tag that loaded without registering
+            // would make the retry resolve at once on it.
+            if (!window.DrumsHighway3D) _dropScript(PLUGIN_ASSETS + 'highway3d.js?v=' + ASSET_VERSION);
+            throw e;
+        });
     return _viewScriptPromise;
 }
 
@@ -2435,7 +2508,7 @@ function createFactory(forceView) {
         if (!Number.isFinite(t) || (Number.isFinite(_clock.time) && Math.abs(t - _clock.time) > 0.3)) {
             t = (_h ? _h.estimateTime(_clock, nowW) : _clock.time) - lag;
         }
-        return t - (_cfg.inputOffsetMs || 0) / 1000;
+        return t;   // highway time: the scoring session applies the input offset
     }
 
     // The highway's render offset (render time - audio time) for _inputTime,
@@ -2557,7 +2630,7 @@ function createFactory(forceView) {
         const meta = _session.meta;
         const hint = meta && meta.activation.length
             ? 'Hit the marked note at the end of the fill to activate'
-            : (_cfg.keyboard ? 'Press Enter to activate star power' : null);
+            : 'Press Enter' + (_spPadName() ? ' or hit ' + _spPadName() : '') + ' to activate star power';
         _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _cfg.inputOffsetMs });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
@@ -2576,7 +2649,8 @@ function createFactory(forceView) {
             _h = H;
             if (!_session) {
                 _auto = _autoAt(_diff ? _diff.id : _myDiff());
-                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams() });
+                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams(),
+                    inputOffsetMs: _cfg.inputOffsetMs });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
@@ -2672,6 +2746,10 @@ function createFactory(forceView) {
             _resetScoring();
         }
         if (_session) _session.setAuto(_auto);
+    }
+
+    function _inputOffsetChanged() {
+        if (_session) _session.setInputOffset(_cfg.inputOffsetMs);
     }
 
     function _assistsChanged() {
@@ -2842,8 +2920,7 @@ function createFactory(forceView) {
                 e.stopPropagation();
                 b.blur();
                 if (!Number.isFinite(_timingWant)) return;
-                _setInputOffset(_timingWant);
-                if (_session && _session.resetTiming) _session.resetTiming();
+                _setInputOffset(_timingWant);   // the session restarts the meter
             };
             const after = _hudCanvas || _highwayCanvas;
             after.parentNode.insertBefore(b, after.nextSibling);
@@ -2980,6 +3057,32 @@ function createFactory(forceView) {
         _badgeRectKey = '';
         _timingRectKey = '';
         if (_onDiffKey) { window.removeEventListener('keydown', _onDiffKey, true); _onDiffKey = null; }
+        if (_onSpKey) { window.removeEventListener('keydown', _onSpKey, true); _onSpKey = null; }
+    }
+
+    // Enter = activate star power on charts without fills (with fills the
+    // fill-end note activates it), also with keyboard drumming off. Only when
+    // it can activate right now, so Enter keeps its usual meaning otherwise.
+    // (With keyboard drumming on, _onKeyDown catches Enter first.)
+    let _onSpKey = null;
+    function _wireStarPowerKey() {
+        if (_onSpKey) return;
+        _onSpKey = (e) => {
+            if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h || !_session) return;
+            if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.key !== 'Enter') return;
+            if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+            const H = _h;
+            if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
+            const ae = document.activeElement;
+            if (ae && /^(BUTTON|A)$/.test(String(ae.tagName || '').toUpperCase())) return;
+            const eng = _session.engine;
+            const st = _session.getState();
+            if (!eng || !eng.manualActivation || !st || !st.starPower || !st.starPower.canActivate || st.starPower.active) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            _session.activate(_inputTime(e.timeStamp));
+        };
+        window.addEventListener('keydown', _onSpKey, true);
     }
 
     // D = harder, Shift+D = easier (focused, visible panel only; not while typing).
@@ -3142,13 +3245,19 @@ function createFactory(forceView) {
         }
 
         if (_session && _h && _E) {
+            // The star power pad (settings) activates star power instead of
+            // scoring (charts without fills; with fills the fill-end note does).
+            if (_cfg.spPad >= 0 && midiNote === _cfg.spPad) {
+                _session.activate(_inputTime(ts));
+                return;
+            }
             // The engine scores: a Learn/custom mapping entry wins, else GM.
             // (The 3D view always uses the 4-lane pro layout; the 2D lane
             // presets only change how notes are drawn.)
             const m = _h.midiToPad(midiNote, _baseMapping(), _E.padFromMidi);
             if (m) {
                 const ht = _inputTime(ts);
-                const r = _session.hit(ht, m.pad, { cymbal: m.cymbal, velocity });
+                const r = _session.hit(ht, m.pad, { cymbal: m.cymbal, velocity: _engineVelocity(velocity) });
                 if (window.__drumsHitTap) { try { window.__drumsHitTap({ t: ht, ts, now: _now(), pad: m.pad }); } catch (_) { /* debug only */ } }
                 if (_view !== '3d' && r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
             }
@@ -3477,6 +3586,11 @@ function createFactory(forceView) {
                     <input type="number" class="drums-offset-input" min="-250" max="250" step="5"
                         value="${_cfg.inputOffsetMs}" style="${_SEL_CSS}width:58px;"> ms
                 </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="On charts without drum fills, star power is activated with the Enter key or this pad (it then does not score as a note).">
+                    SP pad
+                    <select class="drums-sp-pad" aria-label="Star power pad" style="${_SEL_CSS}width:132px;">${_spPadOptions(_cfg.spPad)}</select>
+                </label>
                 <span class="drums-difficulty-note" style="font-size:10px;color:#a8946a;">${_difficultyNote()}</span>
             </div>
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
@@ -3592,6 +3706,7 @@ function createFactory(forceView) {
             _setDifficulty(this.value, instance);
         };
         panel.querySelector('.drums-offset-input').onchange = function () { _setInputOffset(this.value); };
+        panel.querySelector('.drums-sp-pad').onchange = function () { _setSpPad(this.value); };
         panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
         panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
         panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
@@ -4074,7 +4189,8 @@ function createFactory(forceView) {
             ctx.lineWidth = 1;
             ctx.strokeRect(x + 5.5, y + 8.5, spW - 11, 7);
         }
-        // live drum solo
+        // Lines under the HUD: live drum solo, then the star power hint.
+        let ly = y + h + 6;
         const solo = bonus && bonus.soloLive && bonus.soloLive.active ? bonus.soloLive : null;
         if (solo) {
             const pct = solo.n ? Math.round(100 * solo.h / solo.n) : 100;
@@ -4083,10 +4199,21 @@ function createFactory(forceView) {
             const sw = ctx.measureText(text).width + 18;
             const sx = (W - sw) / 2;
             ctx.fillStyle = 'rgba(60,30,110,0.85)';
-            _roundRect(ctx, sx, y + h + 6, sw, 20, 6);
+            _roundRect(ctx, sx, ly, sw, 20, 6);
             ctx.fill();
             ctx.fillStyle = '#e6dbff';
-            ctx.fillText(text, W / 2, y + h + 16);
+            ctx.fillText(text, W / 2, ly + 10);
+            ly += 26;
+        }
+        const hint = _h.starPowerHint ? _h.starPowerHint(_session.meta, st, _spPadName()) : null;
+        if (hint) {
+            ctx.font = 'bold 11px sans-serif';
+            const hw = ctx.measureText(hint).width + 18;
+            ctx.fillStyle = 'rgba(20,50,80,0.85)';
+            _roundRect(ctx, (W - hw) / 2, ly, hw, 20, 6);
+            ctx.fill();
+            ctx.fillStyle = '#bff3ff';
+            ctx.fillText(hint, W / 2, ly + 10);
         }
         ctx.restore();
         return left;
@@ -4266,6 +4393,7 @@ function createFactory(forceView) {
             _wireBus();
             _ensureBadge();
             _wireDifficultyKey();
+            _wireStarPowerKey();
             _wireKeyboard();
 
             const ss = window.slopsmithSplitscreen;
@@ -4479,6 +4607,7 @@ function createFactory(forceView) {
         },
         _proCymbalsChanged,
         _assistsChanged,
+        _inputOffsetChanged,
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         _engineState() { return _session ? _session.getState() : null; },
@@ -4977,6 +5106,7 @@ function _pageFill() {
     q('autoVolume').value = String(Math.round(_cfg.autoVolume * 100));
     q('view').value = _cfg.view;
     q('offset').value = String(_cfg.inputOffsetMs);
+    if (q('spPad')) q('spPad').innerHTML = _spPadOptions(_cfg.spPad);
     q('keyboard').checked = _cfg.keyboard;
     q('lanes').value = _cfg.lanePreset;
     q('labels').checked = _cfg.showLaneLabels;
@@ -5041,6 +5171,7 @@ function _pageWire() {
         document.querySelectorAll('.drums-view-select').forEach((sel) => { sel.value = _cfg.view; });
     };
     q('offset').onchange = function () { _setInputOffset(this.value); };
+    if (q('spPad')) q('spPad').onchange = function () { _setSpPad(this.value); };
     q('keyboard').onchange = function () {
         _saveCfg('keyboard', this.checked);
         document.querySelectorAll('.drums-chk-keys').forEach((el) => { el.checked = _cfg.keyboard; });
@@ -5083,7 +5214,8 @@ function _resetDrumSettings() {
     _saveCfg('hhPedal', 'auto');
     _saveCfg('midiChannel', -1);
     _saveCfg('view', 'auto');
-    _saveCfg('inputOffsetMs', 0);
+    _setInputOffset(0);
+    _setSpPad(-1);
     _saveCfg('keyboard', true);
     _saveCfg('lanePreset', 'phase_shift_8');
     _applyLanePreset(_cfg.lanePreset);
@@ -5162,6 +5294,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _hh, _hhReset, _hhArticulation, _hhLearn, _hhPedalMove, HH_SEMI_NOTE,
         _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, DIRECT_PROVIDER,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
+        _engineVelocity, _loadScoring, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
     };
 }
 

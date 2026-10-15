@@ -740,3 +740,83 @@ test('createFrameClock: extrapolates between 60 Hz samples, raw while paused or 
     c.reset();
     assert.equal(c.tick(2.0, 5000, true), 2.0);
 });
+
+// ── input offset owned by the session, velocity, manual star power (review fixes) ──
+
+test('session: a positive input offset delays the engine too, so a late-registered hit still counts', () => {
+    // Note at t=1.0. The player's hits register 200 ms late (input offset +200 ms):
+    // the pad is struck on the beat but the hit arrives at highway time 1.2.
+    const s = H.createSession(E, { inputOffsetMs: 200 });
+    s.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    s.update(0.9);
+    s.update(1.25);            // the frame drawn before the late hit arrives
+    const r = s.hit(1.2, H.PAD.RED);
+    assert.equal(r.type, 'hit', 'the engine has not moved past the note yet');
+    assert.ok(Math.abs(r.offset) < 0.001, 'judged on time once the offset is applied');
+    s.update(2);
+    assert.equal(s.getState().notesMissed, 0);
+    assert.equal(s.inputOffsetMs, 200);
+
+    // An engine advanced on the raw frame time (the old behaviour: offset 0 for the frame
+    // clock) has already missed the note when the same late hit arrives.
+    const s0 = H.createSession(E);
+    s0.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    s0.update(0.9); s0.update(1.25);
+    assert.notEqual(s0.hit(1.2 - 0.2, H.PAD.RED).type, 'hit');
+    assert.equal(s0.getState().notesMissed, 1);
+});
+
+test('session: setInputOffset applies to later frames and hits, and restarts the timing meter', () => {
+    const s = H.createSession(E);
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    s.update(0.95); s.hit(1.03, H.PAD.RED);   // 30 ms late
+    assert.deepEqual(s.getBonus().offsets, [30]);
+    s.setInputOffset(30);
+    assert.deepEqual(s.getBonus().offsets, [], 'samples measured with the old offset are dropped');
+    s.update(1.95); s.hit(2.03, H.PAD.RED);
+    assert.deepEqual(s.getBonus().offsets, [0]);
+    s.setInputOffset('junk');
+    assert.equal(s.inputOffsetMs, 0);
+    s.setInputOffset(999);
+    assert.equal(s.inputOffsetMs, 250, 'clamped like the settings field');
+});
+
+test('session: MIDI velocity normalised to 0..1 decides the dynamics bonus (soft hit on an accent gets none)', () => {
+    const play = (vel) => {
+        const s = H.createSession(E);
+        s.load({ notes: [w(1, 38, { ac: true })], chords: [], beats: [] });
+        s.update(0.95);
+        const r = s.hit(1.0, H.PAD.RED, { velocity: vel });
+        s.update(1.5);
+        return { r, st: s.getState() };
+    };
+    const soft = play(1 / 127);   // screen.js passes velocity / 127
+    assert.equal(soft.r.type, 'hit');
+    assert.equal(soft.r.bonus, false, 'velocity 1 is the softest hit, not full strength');
+    const hard = play(127 / 127);
+    assert.equal(hard.r.bonus, true);
+    assert.ok(hard.st.score > soft.st.score);
+});
+
+test('session: activate() uses the input offset and works on a chart without fills', () => {
+    const s = H.createSession(E, { inputOffsetMs: 40 });
+    s.load(chart());
+    s.setMeta(tabMeta({ star_power: [{ start_time: 1, end_time: 2 }, { start_time: 3, end_time: 4 }] }));
+    playPerfect(s, 0, 5);
+    const st = s.getState();
+    assert.equal(st.starPower.canActivate, true);
+    assert.equal(s.engine.manualActivation, true, 'no fills: manual activation');
+    assert.equal(H.starPowerHint(s.meta, st, 'hi-hat pedal'), 'Press Enter or hit hi-hat pedal to activate star power');
+    assert.equal(s.activate(5.05), true);
+    assert.equal(s.getState().starPower.active, true);
+    assert.equal(H.starPowerHint(s.meta, s.getState(), ''), null, 'no hint while active');
+    assert.equal(s.activate(NaN), false);
+});
+
+test('starPowerHint: fills say how they activate; nothing while not ready', () => {
+    const ready = { starPower: { canActivate: true, active: false } };
+    assert.equal(H.starPowerHint({ activation: [{ start: 1, end: 2 }] }, ready, ''), 'Hit the marked note at the end of the fill to activate');
+    assert.equal(H.starPowerHint(null, ready, ''), 'Press Enter to activate star power');
+    assert.equal(H.starPowerHint(null, { starPower: { canActivate: false } }, ''), null);
+    assert.equal(H.starPowerHint(null, null, ''), null);
+});
