@@ -3,6 +3,10 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.5.2
+
+- Ship the DRS (DrumGizmo DRSKit 2.1, 13-mic stereo mix) and the 15-mic CrocellKit 1.1 rebuild as sampled kits; both were only built locally before. CC BY 4.0, credited in NOTICE.md. Asset version bumped so browsers drop the old Crocell samples.
+
 ## [4.5.1] - Unreleased
 
 Review fixes from the upstream scoring PR (`feature/drums-scoring`, a523ce1), ported onto the 4.5.0 build.
