@@ -50,12 +50,23 @@ Scoring is a JavaScript port of YARG.Core's drums engine (`assets/engine.js`, LG
   either one hits that colour's notes.
 - **Star power** — notes in a star power phrase are drawn silver-white; hitting every note of a phrase fills
   a quarter of the meter. With half a meter, the chart's **fills** are marked green: the hit that ends the
-  fill activates star power.
+  fill activates star power. A chart with star power phrases but no fills activates it by hand: press
+  **Enter** (drum view focused) or hit the **SP pad** chosen in the settings (`drums_sp_pad_v1`: off,
+  hi-hat pedal 44, ride bell 53, splash 55 or china 52; that pad then activates star power instead of
+  scoring as a note). The HUD says which when star power is ready.
 - **Bonuses** (shown in the score) — +10 x multiplier for a hit within 25 ms, extra points for snare / tom
   rolls, and a drum-solo bonus (100 per note hit, doubled for a perfect solo) with a live percentage during
   a solo.
-- **Offset** (ms) — subtracted from the time of every hit; raise it if your hits register late (audio or
-  MIDI latency). Hits between frames are placed using the playback rate, not quantised to the frame rate.
+- **Offset** (ms) — subtracted from the time of every hit and from the engine's clock; raise it if your
+  hits register late (audio or MIDI latency). The default is 0. The **timing meter** under the score
+  shows the last 24 hits early (blue) / late (orange) on a ±100 ms bar and, after 6 hits that are off by
+  10 ms or more, the offset that would centre them: click **Apply** to use it.
+- **Hit timing** — the view runs a smoothed clock (interpolated between the player's audio samples), a pad
+  hit is timed when its MIDI message arrived (when the MIDI provider passes the message's timestamp)
+  rather than at the last frame, and the engine trails the frame clock by 60 ms so a hit struck just
+  before a frame keeps its own time.
+- **Results card** — when the song ends (single view, Score on): total score with the bonuses, best score
+  per song and difficulty, stars, accuracy, notes hit, best streak and where the points came from.
 - Seeking (or a loop jumping back) restarts scoring from the new position; skipped notes aren't misses.
 
 The scoring files load on first use from core's plugin assets route (`/api/plugins/drums/assets/`). Until
@@ -82,7 +93,12 @@ They are part of the song's drum tab (`drum_tab.json`, feedpak 1.20.0 "drum game
 ranges, and `levels.easy|medium|hard` with their own `hits` and a `generated` marker. feedBack's Rock Band /
 Clone Hero / YARG chart importer writes them, and core streams them to the plugin with the tab
 (`bundle.drumTab`). A tab without them — an older tab, a core that doesn't stream them yet, or drums encoded
-as guitar notes — plays **Expert only, without star power**; everything else works the same.
+as guitar notes — plays **Expert, without star power** (plus **Expert+** when the chart has double-kick
+notes: a legacy chart's GM 35 kicks count); everything else works the same.
+
+On a part that isn't drums (no drum tab and an arrangement not named Drums / Percussion, e.g. a
+splitscreen panel left on the Drum Highway on a song without drums) the view says so and plays / scores
+nothing.
 
 ### Assists
 
@@ -90,7 +106,8 @@ as guitar notes — plays **Expert only, without star power**; everything else w
   `Easy – Medium`, `Easy – Hard` or `Every difficulty` — the assist is on at that difficulty and the ones
   below it. Those notes are left out of scoring, marked as played when they reach the now line, and pad hits
   on them are ignored. Cymbals = the chart's hi-hat, ride and crash notes. They are **played on the drum
-  sound** (scheduled ~60 ms ahead on the audio clock) so muting the drum stem leaves no holes, at their own
+  sound** (scheduled 100 ms ahead on the audio clock, mapped to the stems plugin's audio context when it is
+  there; a pause or seek cancels what hasn't played) so muting the drum stem leaves no holes, at their own
   **Auto vol** (`drums_auto_volume_v1`, default 80%), so pads can stay silent when the kit module makes the
   sound.
 - **Timing** (`drums_timing_v1`): Relaxed ±130 ms, Forgiving ±100 ms, Normal ±70 ms (YARG's default),
@@ -143,6 +160,7 @@ Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node tests/
 ## License
 
 MIT, except `assets/engine.js` and `tests/engine.test.js`: they are ports of
-[YARG.Core](https://github.com/YARC-Official/YARG.Core) and stay under the **LGPL-3.0**
-(`LICENSE.LGPL-3.0`, with the GPL-3.0 it builds on in `LICENSE.GPL-3.0`). The engine is a separate,
+[YARG.Core](https://github.com/YARC-Official/YARG.Core) and are licensed under the **LGPL-3.0**
+(`LICENSE.LGPL-3.0`, with the GPL-3.0 it builds on in `LICENSE.GPL-3.0`; LGPL-3.0 section 2(b) also allows
+conveying a modified copy under the GPL-3.0). The engine is a separate,
 replaceable file that the MIT code only calls through its public API. Details in [NOTICE.md](NOTICE.md).

@@ -17,8 +17,9 @@ builds on the GNU GPL v3.0, whose text is in [`LICENSE.GPL-3.0`](LICENSE.GPL-3.0
 loaded at runtime. `screen.js` and `assets/session.js` only use it through its public API
 (`window.DrumsEngine` / `require('./engine.js')`), so they remain separate MIT works that use the Library
 as described in LGPL-3.0 section 4 ("Combined Works"). You may replace `assets/engine.js` with a modified
-version. If you distribute changes to `assets/engine.js`, they must stay under LGPL-3.0 and their source
-must stay available. Combining an LGPL-3.0 file with MIT code this way is permitted by both licenses, and
+version. A modified `assets/engine.js` that you distribute is conveyed under LGPL-3.0 or, as LGPL-3.0
+section 2(b) allows, under the GPL-3.0 (without the LGPL's additional permissions), with its source
+available either way. Combining an LGPL-3.0 file with MIT code this way is permitted by both licenses, and
 both are compatible with feedBack's AGPL-3.0.
 
 The header of `assets/engine.js` lists every behaviour that deviates from YARG ("Deviations from YARG").

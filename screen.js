@@ -20,9 +20,10 @@
 // Under splitscreen (N panels, N simultaneous drum instances):
 //   - each panel hosts its own overlay canvas, scoring, settings
 //     panel + gear docked inside the panel's bar
-//   - MIDI input is a browser singleton; the currently-focused
-//     panel (clicked most recently) is the sole recipient of
-//     drum-pad note-on events
+//   - MIDI input is a browser singleton; one panel receives the
+//     drum-pad note-on events: the focused one (clicked most
+//     recently) if it is on screen, else the first drum panel on
+//     screen (_routeTarget)
 //   - focus-change clears held-pad / lane-flash state on the
 //     outgoing panel
 //   - _cfg.learnLane stays module-scope (per-user-intent — clicking
@@ -91,7 +92,20 @@ const STORE_KEYS = {
     // Subtracted from the song time of every scored hit, in ms (positive =
     // your hits register earlier; for audio / MIDI latency).
     inputOffsetMs:  'drums_input_offset_ms',
+    // MIDI note of the pad that activates star power on charts without
+    // drum fills (-1 = none; the Enter key always works).
+    spPad:          'drums_sp_pad_v1',
 };
+
+// Pads offered for star power activation: notes the engine does not score
+// (hat pedal) or seldom-charted extras. Any other note can be stored too.
+const SP_PAD_CHOICES = [
+    [-1, 'Off (Enter key only)'],
+    [44, 'Hi-hat pedal (44)'],
+    [53, 'Ride bell (53)'],
+    [55, 'Splash (55)'],
+    [52, 'China (52)'],
+];
 
 // Valid preset ids — kept here so _saveCfg can validate before persisting
 // (drums_lane_preset_v1 is user-controlled, like every other storage key
@@ -193,6 +207,7 @@ const _cfg = {
     })(),
     autoVolume:     _readNum(STORE_KEYS.autoVolume, 0.8, 0, 1),
     inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, -250, 250)),
+    spPad:          Math.round(_readNum(STORE_KEYS.spPad, -1, -1, 127)),
     difficulty:     (function () {
         const raw = _readStore(STORE_KEYS.difficulty);
         return _VALID_DIFFICULTIES.has(raw) ? raw : 'expert';
@@ -249,6 +264,10 @@ function _saveCfg(key, val) {
     if (key === 'inputOffsetMs') {
         const n = Math.round(Number(val));
         val = Number.isFinite(n) ? Math.max(-250, Math.min(250, n)) : 0;
+    }
+    if (key === 'spPad') {
+        const n = Math.round(Number(val));
+        val = Number.isFinite(n) && n >= 0 && n <= 127 ? n : -1;
     }
     _cfg[key] = val;
     const storeKey = STORE_KEYS[key];
@@ -333,6 +352,49 @@ function _setAssist(key, val) {
     for (const inst of _instances) {
         try { if (inst._assistsChanged) inst._assistsChanged(); } catch (e) { console.warn('[Drums] assist update failed:', e); }
     }
+}
+
+// Save the input offset (ms) and hand it to every live scoring session (the
+// settings field, and the timing meter's Apply button).
+function _setInputOffset(ms) {
+    _saveCfg('inputOffsetMs', ms);
+    try {
+        document.querySelectorAll('.drums-offset-input').forEach((el) => { el.value = String(_cfg.inputOffsetMs); });
+    } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+    }
+    return _cfg.inputOffsetMs;
+}
+
+// Save the star power pad (MIDI note, -1 = none).
+function _setSpPad(note) {
+    _saveCfg('spPad', note);
+    try {
+        document.querySelectorAll('.drums-sp-pad').forEach((sel) => { sel.innerHTML = _spPadOptions(_cfg.spPad); });
+    } catch (_) { /* no DOM */ }
+}
+
+function _spPadOptions(current) {
+    const list = SP_PAD_CHOICES.slice();
+    if (current >= 0 && !list.some(([n]) => n === current)) list.push([current, 'MIDI note ' + current]);
+    return list.map(([n, name]) => `<option value="${n}"${n === current ? ' selected' : ''}>${name}</option>`).join('');
+}
+
+// Short name of the star power pad for the HUD hint ('' = none).
+function _spPadName() {
+    if (_cfg.spPad < 0) return '';
+    const c = SP_PAD_CHOICES.find(([n]) => n === _cfg.spPad);
+    return c ? c[1].replace(/\s*\(\d+\)$/, '').toLowerCase() : 'MIDI note ' + _cfg.spPad;
+}
+
+// MIDI velocity (1..127) -> the engine's 0..1. The engine also accepts raw
+// MIDI values, but reads anything <= 1 as already normalised, so velocity 1
+// (the softest ghost note) would count as full strength.
+function _engineVelocity(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.max(0, Math.min(1, n / 127));
 }
 
 // <option> lists for the settings selects (values are fixed ids; names are ours).
@@ -588,15 +650,26 @@ function _rgbStr(r, g, b, a) {
 // Script loader
 // ═══════════════════════════════════════════════════════════════════════
 
+// A failed load removes its <script> element, so a later call for the same
+// URL loads it again instead of resolving at once on the dead tag.
 function _loadScript(url) {
     return new Promise((resolve, reject) => {
         if (document.querySelector(`script[src="${url}"]`)) { resolve(); return; }
         const s = document.createElement('script');
         s.src = url;
         s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load ' + url));
+        s.onerror = () => {
+            try { s.remove(); } catch (_) { /* already gone */ }
+            reject(new Error('Failed to load ' + url));
+        };
         document.head.appendChild(s);
     });
+}
+
+// Remove the <script> element for `url` (a load that "succeeded" without
+// registering its global, e.g. an error page served as JS).
+function _dropScript(url) {
+    try { document.querySelectorAll(`script[src="${url}"]`).forEach((el) => el.remove()); } catch (_) { /* no DOM */ }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -617,14 +690,17 @@ function _loadScoring() {
         return Promise.resolve({ E: window.DrumsEngine, H: window.DrumsSession });
     }
     if (_scoringPromise) return _scoringPromise;
-    const want = (name, global) => (window[global]
-        ? Promise.resolve()
-        : _loadScript(PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION));
-    _scoringPromise = Promise.all([want('engine.js', 'DrumsEngine'), want('session.js', 'DrumsSession')]).then(() => {
+    const files = [['engine.js', 'DrumsEngine'], ['session.js', 'DrumsSession']];
+    const url = (name) => PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION;
+    const want = (name, global) => (window[global] ? Promise.resolve() : _loadScript(url(name)));
+    _scoringPromise = Promise.all(files.map(([name, global]) => want(name, global))).then(() => {
         if (!window.DrumsEngine || !window.DrumsSession) throw new Error('drums scoring modules did not register');
         return { E: window.DrumsEngine, H: window.DrumsSession };
     }).catch((e) => {
-        _scoringPromise = null;   // allow a retry on the next init
+        // Allow a retry on the next init: drop the script elements of the
+        // files that didn't register, or _loadScript would resolve on them.
+        for (const [name, global] of files) if (!window[global]) _dropScript(url(name));
+        _scoringPromise = null;
         throw e;
     });
     return _scoringPromise;
@@ -703,13 +779,15 @@ function _synthEnsureCtx() {
 
 // One drum sound at `when` (AudioContext time; 0 = now). dest: the output
 // bus (default: the pad bus _synthGain; _autoGain for auto-played notes).
+// Returns the WebAudioFont envelope (so a scheduled note can be cancelled),
+// or null.
 function _synthPlayNote(midiNote, velocity, when, dest) {
-    if (!_synthPlayer || !_audioCtx || !_synthGain) return;
+    if (!_synthPlayer || !_audioCtx || !_synthGain) return null;
     const preset = _drumPresets[midiNote];
-    if (!preset) return;
+    if (!preset) return null;
     dest = dest || _synthGain;
-    _synthPlayer.queueWaveTable(_audioCtx, dest, preset, when || 0, midiNote, when ? 0.6 : 0.5,
-        (velocity / 127) * (dest === _synthGain ? _cfg.synthVolume : 1));
+    return _synthPlayer.queueWaveTable(_audioCtx, dest, preset, when || 0, midiNote, when ? 0.6 : 0.5,
+        (velocity / 127) * (dest === _synthGain ? _cfg.synthVolume : 1)) || null;
 }
 
 function _synthDrumHit(midiNote, velocity) {
@@ -772,6 +850,125 @@ function _autoNotesBetween(notes, chords, from, to, auto) {
         }
     });
     return out;
+}
+
+// ── Auto-note scheduler ──
+// Auto notes are timed from the song's audio clock, not the frame clock: a
+// frame's song time is up to a frame old and jittery, which played the auto
+// kick ~30 ms late with ±15 ms wobble, and a repeated or backward frame time
+// restarted the window so a note now and then played twice. Here a note's
+// song time maps to the stems plugin's AudioContext (when it is there: the
+// stems playhead runs on that context's clock) and then to the drum context
+// heard at the same moment (both contexts' getOutputTimestamp), so the two
+// line up even when their output latencies differ. One schedule for all drum
+// panels, and it only moves forward (no note is scheduled twice); a pause,
+// seek or song change cancels the notes that haven't sounded yet.
+const AUTO_LOOKAHEAD = 0.1;   // song seconds scheduled ahead of the playhead
+const _autoSched = { key: null, owner: null, ownerWall: -1e9, to: NaN, last: NaN, offs: [], pending: [], hooked: null };
+
+function _autoCancel() {
+    const now = _audioCtx ? _audioCtx.currentTime : 0;
+    for (const p of _autoSched.pending) {
+        if (p.t0 <= now) continue;
+        const src = p.env && p.env.audioBufferSourceNode;
+        try { if (src) src.stop(); else if (p.env && p.env.cancel) p.env.cancel(); } catch (_) { /* not started / gone */ }
+    }
+    _autoSched.pending = [];
+    _autoSched.to = NaN;
+}
+
+// The stems plugin's AudioContext (its gain nodes live in it), or null.
+function _stemsCtx() {
+    try {
+        const st = window.stems && typeof window.stems.getState === 'function' ? window.stems.getState() : null;
+        for (const s of (st || [])) if (s && s.gain && s.gain.context) return s.gain.context;
+    } catch (_) { /* no stems */ }
+    return null;
+}
+
+// Drum context time minus stems context time for sounds heard at the same
+// moment (s). Median of recent frames (getOutputTimestamp is a little noisy).
+function _autoCtxOffset(sctx) {
+    let off = NaN;
+    try {
+        const od = _audioCtx.getOutputTimestamp(), os = sctx.getOutputTimestamp();
+        if (od && os && od.performanceTime > 0 && os.performanceTime > 0) {
+            off = (od.contextTime - os.contextTime) - (od.performanceTime - os.performanceTime) / 1000;
+        }
+    } catch (_) { /* older engine */ }
+    if (!Number.isFinite(off)) {
+        const lat = (c) => (+c.outputLatency || 0) + (+c.baseLatency || 0);
+        off = (_audioCtx.currentTime - sctx.currentTime) - (lat(_audioCtx) - lat(sctx));
+    }
+    const o = _autoSched.offs;
+    o.push(off);
+    if (o.length > 31) o.shift();
+    const sorted = o.slice().sort((a, b) => a - b);
+    return sorted[sorted.length >> 1];
+}
+
+// Called every frame by each drum view with the chart it plays. owner: the
+// view's instance id (one view drives the schedule at a time). The song
+// time comes from the player's <audio> element (chart offsets other than the
+// loose-folder song offset are 0, so audio time = chart time).
+function _autoSchedule(notes, chords, auto, owner) {
+    const S = _autoSched;
+    const wall = performance.now();
+    if (S.owner !== owner) {
+        if (wall - S.ownerWall < 300) return;   // another view is scheduling
+        S.owner = owner;
+    }
+    S.ownerWall = wall;
+    let a = null;
+    try { a = document.getElementById('audio'); } catch (_) { /* no DOM */ }
+    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0;
+    if (!on || !a || a.paused) {
+        if (S.pending.length || Number.isFinite(S.to)) _autoCancel();
+        S.last = NaN;
+        return;
+    }
+    if (S.hooked !== a) {
+        // Pause / seek between frames: drop what's queued right away.
+        S.hooked = a;
+        try { a.addEventListener('pause', _autoCancel); a.addEventListener('seeking', _autoCancel); } catch (_) { /* shimmed element */ }
+    }
+    const t = +a.currentTime;
+    if (!Number.isFinite(t)) return;
+    const sctx = _stemsCtx();
+    const sNow = sctx ? sctx.currentTime : NaN;
+    const rate = Math.max(0.25, Math.min(2, +a.playbackRate || 1));
+    if (S.key !== notes) { _autoCancel(); S.key = notes; }
+    // A seek the events missed: the playhead went back or jumped ahead.
+    if (Number.isFinite(S.last) && (t < S.last - 0.03 || t > S.last + 0.5)) _autoCancel();
+    S.last = t;
+    const off = sctx ? _autoCtxOffset(sctx) : 0;
+    if (!Number.isFinite(S.to)) S.to = t;   // (re)start here: nothing already due is replayed
+    const to = t + AUTO_LOOKAHEAD * rate;
+    if (!(to > S.to)) return;
+    // After a stall, notes more than 20 ms overdue are skipped, not played late.
+    const due = _autoNotesBetween(notes, chords, Math.max(S.to, t - 0.02), to, auto);
+    S.to = to;
+    if (!due.length) return;
+    _synthEnsureCtx();
+    const now = _audioCtx.currentTime;
+    // Drum context time at which song time t is heard.
+    const base = sctx && Number.isFinite(sNow) ? sNow + off : now;
+    S.pending = S.pending.filter((p) => p.t0 > now);
+    for (const n of due) {
+        const when = Math.max(now, base + (n.t - t) / rate);
+        const env = _synthPlayNote(n.midi, n.vel, when, _autoGain);
+        if (env) S.pending.push({ env, t0: when });
+    }
+}
+
+// Stop scheduling for a view that goes away (its notes are no longer due).
+function _autoRelease(owner) {
+    if (_autoSched.owner !== owner) return;
+    _autoCancel();
+    _autoSched.owner = null;
+    _autoSched.ownerWall = -1e9;
+    _autoSched.key = null;
+    _autoSched.last = NaN;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -956,8 +1153,11 @@ async function _midiConnect(key) {
         if (res && res.handle) {
             _midiHandle = res.handle;
             // The domain handle delivers raw MIDI data; adapt to the old
-            // MIDIMessageEvent shape so _midiOnMessage stays unchanged.
-            _midiListener = (data) => _midiOnMessage({ data });
+            // MIDIMessageEvent shape so _midiOnMessage stays unchanged. A
+            // second argument, when a provider passes one, is the message's
+            // timeStamp (performance.now() clock): hits are then timed when
+            // the pad was struck rather than when this code ran.
+            _midiListener = (data, timeStamp) => _midiOnMessage({ data, timeStamp });
             // Wire the listener only when at least one renderer is active. A
             // late open() from an async _midiInit that resolved post-destroy
             // would otherwise re-enable scoring/synth in the background.
@@ -1036,12 +1236,23 @@ function _midiResumeHandler() {
     if (_midiHandle && _midiListener) { try { _midiHandle.addListener(_midiListener); } catch (_) { /* best-effort */ } }
 }
 
+// Which drum view gets kit hits: the focused one if it is on screen, else
+// the first drum view on screen, else the focused one. Splitscreen focus
+// starts on panel 1 and moves on click, so a drum panel that was never
+// clicked (or a hidden main-player drum view holding focus) used to swallow
+// every hit.
+function _routeTarget() {
+    const vis = [];
+    for (const i of _instances) { try { if (i._isVisible && i._isVisible()) vis.push(i); } catch (_) { /* ignore */ } }
+    if (_activeInstance && vis.includes(_activeInstance)) return _activeInstance;
+    if (vis.length) return vis[0];
+    return _activeInstance;
+}
+
 function _midiOnMessage(e) {
-    // Only the focused instance receives MIDI. Module-level
-    // _activeInstance is the routing slot; it points at null when
-    // no instance is focused (splitscreen toggled off mid-session
-    // between teardowns, or no instance initialised yet).
-    if (!_activeInstance) return;
+    // Hits go to one drum view (_routeTarget); none live -> dropped.
+    const target = _routeTarget();
+    if (!target) return;
 
     const [status, note, velocity] = e.data;
     const ch = status & 0x0F;
@@ -1049,7 +1260,7 @@ function _midiOnMessage(e) {
 
     const cmd = status & 0xF0;
     if (cmd === 0x90 && velocity > 0) {
-        _activeInstance._handleDrumHit(note, velocity);
+        target._handleDrumHit(note, velocity, e.timeStamp);
     }
     // Drums don't need note-off handling (one-shot hits)
 }
@@ -1327,7 +1538,6 @@ function createFactory() {
     let _chartRefs = null;          // [notes, chords, beats] identities loaded into the session
     let _metaKey;                   // drum tab the metadata was parsed from (undefined = none yet)
     let _metaCache = null;          // _h.parseDrumTabMeta(...) for _metaKey (null = Expert only, no star power)
-    const _clock = { time: NaN, wall: NaN, prevTime: NaN, prevWall: NaN };
     let _diffOptions = null;        // _h.difficultyOptions(...) for the loaded chart
     let _diff = null;               // _h.resolveDifficulty(...) in use: {id, requested, fallback, reason}
     let _badge = null;              // _h.difficultyBadge(...) drawn in the HUD
@@ -1338,49 +1548,30 @@ function createFactory() {
     let _badgeRectKey = '';
     let _diffMenu = null;           // difficulty pop-up menu
     let _onDiffKey = null, _onMenuOutside = null;
-    let _onVisibility = null, _onCanvasReplaced = null;
+    let _onVisibility = null, _onCanvasReplaced = null, _onSongEnded = null;
     let _hwVisible = true;
     let _auto = { kick: false, cymbals: false };   // auto lanes for the difficulty in use
-    // Auto-note sounds: song time up to which they're scheduled, and the last
-    // frame's (song time, wall ms) for the playback-rate estimate.
-    let _autoSchedTo = NaN, _autoPrevT = NaN, _autoPrevWall = NaN;
+    // Auto notes (kick / cymbals) are played so a muted drum stem doesn't
+    // leave holes: see _autoSchedule (module level, shared by all views).
+    function _scheduleAutoSounds(notes, chords) { _autoSchedule(notes, chords, _auto, _instanceId); }
 
-    // Play the auto notes (kick / cymbals) so a muted drum stem doesn't leave
-    // holes. Scheduled ~60 ms ahead on the audio clock for tight timing; a
-    // pause, seek or song change resets the schedule (nothing is replayed).
-    const AUTO_LOOKAHEAD = 0.06;
-    function _scheduleAutoSounds(notes, chords, t) {
-        const wall = performance.now();
-        const prevT = _autoPrevT, prevWall = _autoPrevWall;
-        _autoPrevT = t; _autoPrevWall = wall;
-        if ((!_auto.kick && !_auto.cymbals) || !_audioCtx || !_autoGain || _cfg.autoVolume <= 0) {
-            _autoSchedTo = NaN;
-            return;
-        }
-        const dt = t - prevT, dw = (wall - prevWall) / 1000;
-        if (!Number.isFinite(dt) || dt <= 0 || dt > 0.5 || !(dw > 0)) {
-            // first frame, paused, seek or jump back: start from here
-            _autoSchedTo = t;
-            return;
-        }
-        const rate = Math.max(0.25, Math.min(2, dt / dw));
-        if (!Number.isFinite(_autoSchedTo) || _autoSchedTo < t - 0.1 || _autoSchedTo > t + 1) _autoSchedTo = t;
-        const to = t + AUTO_LOOKAHEAD * rate;
-        const due = _autoNotesBetween(notes, chords, _autoSchedTo, to, _auto);
-        _autoSchedTo = to;
-        if (!due.length) return;
-        _synthEnsureCtx();
-        const now = _audioCtx.currentTime;
-        for (const n of due) _synthPlayNote(n.midi, n.vel, now + Math.max(0, (n.t - t) / rate), _autoGain);
-    }
+    // Smoothed highway clock (session.js createFrameClock): what this view
+    // draws and scores with each frame, and the time of a pad hit between
+    // frames. Created when session.js has loaded.
+    let _frameClock = null;
+    let _frameT = NaN;              // the clock's time at the last frame
 
     function _now() { return performance.now(); }
 
-    // Song time for an input arriving now (between frames), minus the
-    // user's input offset.
-    function _inputTime() {
-        const t = _h ? _h.estimateTime(_clock, _now()) : _clock.time;
-        return t - (_cfg.inputOffsetMs || 0) / 1000;
+    // Highway time of a hit. ts: when the MIDI message arrived
+    // (performance.now() clock), when the provider passes it; otherwise
+    // now. The scoring session subtracts the input offset.
+    function _inputTime(ts) {
+        const nowW = _now();
+        const at = (Number.isFinite(ts) && ts > 0 && ts <= nowW + 5 && nowW - ts < 250) ? ts : nowW;
+        const t = _frameClock ? _frameClock.at(at) : NaN;
+        if (Number.isFinite(t)) return t;
+        return Number.isFinite(_frameT) ? _frameT : (+_latestTime || 0);
     }
 
     // Load engine.js + session.js and build this instance's scoring session.
@@ -1389,9 +1580,11 @@ function createFactory() {
             if (_instanceDestroyed || !_isReady) return;
             _E = E;
             _h = H;
+            if (!_frameClock) _frameClock = H.createFrameClock();
             if (!_session) {
                 _auto = _autoAt(_diff ? _diff.id : _cfg.difficulty);
-                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams() });
+                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams(),
+                    inputOffsetMs: _cfg.inputOffsetMs });
                 _chartRefs = null;
             }
         }).catch((e) => console.warn('[Drums] scoring unavailable (engine/session failed to load):', e));
@@ -1406,14 +1599,26 @@ function createFactory() {
         _onVisibility = (e) => {
             if (!e || !e.detail || e.detail.canvas !== _highwayCanvas) return;
             _hwVisible = e.detail.visible !== false;
-            if (!_hwVisible) { _placeBadge(null); _toggleDiffMenu(false); }
+            if (!_hwVisible) { _placeBadge(null); _placeTimingBtn(null); _toggleDiffMenu(false); }
         };
         _onCanvasReplaced = (e) => {
             if (!e || !e.detail || e.detail.oldCanvas !== _highwayCanvas) return;
             _highwayCanvas = e.detail.newCanvas;
         };
+        // End-of-song results card (single view; splitscreen panels skip it).
+        _onSongEnded = () => {
+            if (_instanceDestroyed || !_session || !_cfg.hitDetection || _ssActive() || !_isVisible()) return;
+            _drumsEndCard(_session, _badge);
+        };
         try { bus.on('highway:visibility', _onVisibility); } catch (_) { _onVisibility = null; }
         try { bus.on('highway:canvas-replaced', _onCanvasReplaced); } catch (_) { _onCanvasReplaced = null; }
+        try { bus.on('song:ended', _onSongEnded); } catch (_) { _onSongEnded = null; }
+    }
+
+    // This view is on screen (splitscreen hides the panels it doesn't show).
+    function _isVisible() {
+        const c = _highwayCanvas;
+        return !!(c && c.isConnected && c.getClientRects && c.getClientRects().length && _hwVisible !== false);
     }
 
     function _unwireBus() {
@@ -1421,9 +1626,11 @@ function createFactory() {
         if (bus && typeof bus.off === 'function') {
             if (_onVisibility) { try { bus.off('highway:visibility', _onVisibility); } catch (_) { /* ignore */ } }
             if (_onCanvasReplaced) { try { bus.off('highway:canvas-replaced', _onCanvasReplaced); } catch (_) { /* ignore */ } }
+            if (_onSongEnded) { try { bus.off('song:ended', _onSongEnded); } catch (_) { /* ignore */ } }
         }
         _onVisibility = null;
         _onCanvasReplaced = null;
+        _onSongEnded = null;
     }
 
     // Gameplay metadata (star power, fills, solos, difficulty levels)
@@ -1485,6 +1692,10 @@ function createFactory() {
 
     function _proCymbalsChanged() {
         if (_session) _session.setProDrums(_cfg.proCymbals);
+    }
+
+    function _inputOffsetChanged() {
+        if (_session) _session.setInputOffset(_cfg.inputOffsetMs);
     }
 
     function _difficultyChanged() {
@@ -1576,6 +1787,42 @@ function createFactory() {
         if (key === _badgeRectKey) return;
         _badgeRectKey = key;
         const st = _badgeBtn.style;
+        st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
+        st.display = '';
+    }
+
+    // The timing meter's Apply pill: a transparent button over it sets the
+    // input offset to the suggested value (and restarts the meter).
+    let _timingBtn = null, _timingRectKey = '', _timingWant = null;
+    function _placeTimingBtn(rect, want) {
+        if (!rect || !_hwVisible || !_highwayCanvas || !_highwayCanvas.parentNode) {
+            if (_timingBtn && _timingRectKey !== '') { _timingBtn.style.display = 'none'; _timingRectKey = ''; }
+            return;
+        }
+        if (!_timingBtn) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'drums-timing-apply';
+            b.dataset.drumsInstance = String(_instanceId);
+            b.setAttribute('aria-label', 'Apply the suggested input offset');
+            b.style.cssText = 'position:absolute;z-index:3;display:none;margin:0;padding:0;border:0;'
+                + 'background:transparent;cursor:pointer;border-radius:999px;';
+            b.onclick = (e) => {
+                e.stopPropagation();
+                b.blur();   // keep Space = play/pause
+                if (Number.isFinite(_timingWant)) _setInputOffset(_timingWant);
+            };
+            _highwayCanvas.parentNode.insertBefore(b, _highwayCanvas.nextSibling);
+            _timingBtn = b;
+        }
+        _timingWant = want;
+        _timingBtn.title = 'Set the input offset to ' + want + ' ms (now ' + _cfg.inputOffsetMs + ' ms)';
+        const x = Math.round(_highwayCanvas.offsetLeft + rect.x), y = Math.round(_highwayCanvas.offsetTop + rect.y);
+        const w = Math.round(rect.w), h = Math.round(rect.h);
+        const key = x + '|' + y + '|' + w + '|' + h;
+        if (key === _timingRectKey) return;
+        _timingRectKey = key;
+        const st = _timingBtn.style;
         st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
         st.display = '';
     }
@@ -1678,8 +1925,11 @@ function createFactory() {
         _toggleDiffMenu(false);
         if (_diffMenu) { _diffMenu.remove(); _diffMenu = null; }
         if (_badgeBtn) { _badgeBtn.remove(); _badgeBtn = null; }
+        if (_timingBtn) { _timingBtn.remove(); _timingBtn = null; }
         _badgeRectKey = '';
+        _timingRectKey = '';
         if (_onDiffKey) { window.removeEventListener('keydown', _onDiffKey, true); _onDiffKey = null; }
+        if (_onSpKey) { window.removeEventListener('keydown', _onSpKey, true); _onSpKey = null; }
     }
 
     // D = harder, Shift+D = easier (focused, visible panel only; not while typing).
@@ -1697,6 +1947,30 @@ function createFactory() {
             _setDifficulty(H.nextDifficulty(_diff ? _diff.id : _cfg.difficulty, _diffOptions, k.dir));
         };
         window.addEventListener('keydown', _onDiffKey, true);
+    }
+
+    // Enter = activate star power on charts without fills (with fills the
+    // fill-end note activates it). Only when it can activate right now, so
+    // Enter keeps its usual meaning otherwise.
+    let _onSpKey = null;
+    function _wireStarPowerKey() {
+        if (_onSpKey) return;
+        _onSpKey = (e) => {
+            if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h || !_session) return;
+            if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.key !== 'Enter') return;
+            if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+            const H = _h;
+            if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
+            const ae = document.activeElement;
+            if (ae && /^(BUTTON|A)$/.test(String(ae.tagName || '').toUpperCase())) return;
+            const eng = _session.engine;
+            const st = _session.getState();
+            if (!eng || !eng.manualActivation || !st || !st.starPower || !st.starPower.canActivate || st.starPower.active) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            _session.activate(_inputTime());
+        };
+        window.addEventListener('keydown', _onSpKey, true);
     }
 
     // The badge is drawn on the lane canvas, top centre: left of the score
@@ -1741,21 +2015,17 @@ function createFactory() {
     // identity (new song / difficulty) and advance it to the playhead.
     // Empty chord lists compare as "none": the drum_tab path builds a fresh
     // [] every frame. A reload mid-song scores from the current time.
-    function _syncSession(bundle, notes, chords) {
+    // t: this frame's highway time (_frameClock). The session applies the
+    // input offset to it, the same as to the hits.
+    function _syncSession(bundle, notes, chords, t) {
         if (!_session) return;
         const chordKey = (Array.isArray(chords) && chords.length) ? chords : null;
         if (!_chartRefs || _chartRefs[0] !== notes || _chartRefs[1] !== chordKey || _chartRefs[2] !== bundle.beats) {
             _chartRefs = [notes, chordKey, bundle.beats];
             _session.load({ notes, chords, beats: bundle.beats });
             _session.setMeta(_metaCache);
-            _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
             _resetScoring();
         }
-        const t = +bundle.currentTime || 0;
-        _clock.prevTime = _clock.time;
-        _clock.prevWall = _clock.wall;
-        _clock.time = t;
-        _clock.wall = _now();
         _session.update(t);
     }
 
@@ -1818,7 +2088,8 @@ function createFactory() {
 
     // ── MIDI event handler (called by _midiOnMessage via _activeInstance) ──
 
-    function _handleDrumHit(midiNote, velocity) {
+    // ts: when the MIDI message arrived (performance.now() clock), if known.
+    function _handleDrumHit(midiNote, velocity, ts) {
         if (midiNote < 0 || midiNote > 127) return;
 
         // Learn mode: assign this MIDI note to the pending lane.
@@ -1856,10 +2127,16 @@ function createFactory() {
         }
 
         if (_session && _h && _E) {
+            // The star power pad (settings) activates star power instead of
+            // scoring (charts without fills; with fills the fill-end note does).
+            if (_cfg.spPad >= 0 && midiNote === _cfg.spPad) {
+                _session.activate(_inputTime(ts));
+                return;
+            }
             // The engine scores: a Learn/custom mapping entry wins, else GM.
             const m = _h.midiToPad(midiNote, _cfg.customMapping, _E.padFromMidi);
             if (m) {
-                const r = _session.hit(_inputTime(), m.pad, { cymbal: m.cymbal, velocity });
+                const r = _session.hit(_inputTime(ts), m.pad, { cymbal: m.cymbal, velocity: _engineVelocity(velocity) });
                 if (r && r.type === 'overhit' && laneIdx >= 0) _wrongFlashes.push({ lane: laneIdx, wall: performance.now() });
             }
             return;
@@ -2158,10 +2435,15 @@ function createFactory() {
                     <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(_cfg.timing)}</select>
                 </label>
                 <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
-                    title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late).">
+                    title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late). The timing meter under the score suggests a value: click Apply.">
                     Offset
-                    <input type="number" class="drums-offset-input" min="-250" max="250" step="5"
+                    <input type="number" class="drums-offset-input" min="-250" max="250" step="1"
                         value="${_cfg.inputOffsetMs}" style="${_SEL_CSS}width:58px;"> ms
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
+                    title="On charts without drum fills, star power is activated with the Enter key or this pad (it then does not score as a note).">
+                    SP pad
+                    <select class="drums-sp-pad" aria-label="Star power pad" style="${_SEL_CSS}width:132px;">${_spPadOptions(_cfg.spPad)}</select>
                 </label>
                 <span class="drums-difficulty-note" style="font-size:10px;color:#a8946a;">${_difficultyNote()}</span>
             </div>
@@ -2250,9 +2532,9 @@ function createFactory() {
             _setDifficulty(this.value);
         };
         panel.querySelector('.drums-offset-input').onchange = function () {
-            _saveCfg('inputOffsetMs', this.value);
-            this.value = String(_cfg.inputOffsetMs);
+            _setInputOffset(this.value);
         };
+        panel.querySelector('.drums-sp-pad').onchange = function () { _setSpPad(this.value); };
         panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
         panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
         panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
@@ -2292,7 +2574,8 @@ function createFactory() {
 
     // ── Drawing ──
 
-    function _draw(notes, chords, t, beats) {
+    // message: text drawn over the empty lanes instead of the HUD (not a drum chart).
+    function _draw(notes, chords, t, beats, message) {
         if (!_drumCanvas || !_drumCtx) return;
 
         // Update the MIDI-scoring snapshots FIRST — before the
@@ -2421,10 +2704,16 @@ function createFactory() {
             _drawLaneLabels(ctx, laneLayout, nowLineY, H);
         }
 
+        if (message) {
+            _drawMessage(ctx, W, nowLineY, message);
+            return;
+        }
+
         let hudLeft = null;
-        if (_cfg.hitDetection) {
-            if (_session) hudLeft = _drawScoreHud(ctx, W);
-            else if ((_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
+        if (_cfg.hitDetection && _session) hudLeft = _drawScoreHud(ctx, W);
+        else {
+            _placeTimingBtn(null);
+            if (_cfg.hitDetection && (_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
         }
 
         // MIDI indicator — show on the focused panel only; non-focused
@@ -2733,7 +3022,8 @@ function createFactory() {
             ctx.lineWidth = 1;
             ctx.strokeRect(x + 5.5, y + 8.5, spW - 11, 7);
         }
-        // live drum solo
+        // Lines under the HUD: live drum solo, star power hint, timing meter.
+        let ly = y + h + 6;
         const solo = bonus && bonus.soloLive && bonus.soloLive.active ? bonus.soloLive : null;
         if (solo) {
             const pct = solo.n ? Math.round(100 * solo.h / solo.n) : 100;
@@ -2742,13 +3032,107 @@ function createFactory() {
             const sw = ctx.measureText(text).width + 18;
             const sx = (W - sw) / 2;
             ctx.fillStyle = 'rgba(60,30,110,0.85)';
-            _roundRect(ctx, sx, y + h + 6, sw, 20, 6);
+            _roundRect(ctx, sx, ly, sw, 20, 6);
             ctx.fill();
             ctx.fillStyle = '#e6dbff';
-            ctx.fillText(text, W / 2, y + h + 16);
+            ctx.fillText(text, W / 2, ly + 10);
+            ly += 26;
+        }
+        const hint = _h.starPowerHint(_session.meta, st, _spPadName());
+        if (hint) {
+            ctx.font = 'bold 11px sans-serif';
+            const hw = ctx.measureText(hint).width + 18;
+            ctx.fillStyle = 'rgba(20,50,80,0.85)';
+            _roundRect(ctx, (W - hw) / 2, ly, hw, 20, 6);
+            ctx.fill();
+            ctx.fillStyle = '#bff3ff';
+            ctx.fillText(hint, W / 2, ly + 10);
+            ly += 26;
         }
         ctx.restore();
+        _drawTimingMeter2D(ctx, left, ly, bonus);
         return left;
+    }
+
+    // Early/late meter (2D view): the last hits as ticks on a ±100 ms bar
+    // (blue early, orange late), their median, and the input offset that
+    // would centre them with an Apply button (a DOM button over the pill).
+    function _drawTimingMeter2D(ctx, x, y, bonus) {
+        const offs = bonus && bonus.offsets ? bonus.offsets : [];
+        if (!offs.length || !_h) { _placeTimingBtn(null); return; }
+        const sum = _h.timingSummary(offs, _cfg.inputOffsetMs);
+        const EARLY = '#66c7ff', LATE = '#ff9a40', OK = '#e5e7eb', RANGE = 100, DEAD = 10;
+        const col = (ms) => (Math.abs(ms) < DEAD ? OK : ms < 0 ? EARLY : LATE);
+        const h = 22, bw = 110, bh = 8;
+        ctx.save();
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'left';
+        ctx.font = 'bold 11px sans-serif';
+        const word = sum.label;
+        const ww = ctx.measureText(word).width;
+        const applyText = sum.suggest != null ? 'Apply ' + sum.suggest + ' ms' : '';
+        ctx.font = 'bold 10px sans-serif';
+        const aw = applyText ? ctx.measureText(applyText).width + 16 : 0;
+        const total = 52 + bw + 10 + ww + (aw ? 10 + aw : 0) + 12;
+        ctx.fillStyle = 'rgba(8,8,20,0.78)';
+        _roundRect(ctx, x, y, total, h, 6);
+        ctx.fill();
+        let cx = x + 8;
+        ctx.font = 'bold 9px sans-serif';
+        ctx.fillStyle = '#7a84a6';
+        ctx.fillText('TIMING', cx, y + h / 2);
+        cx += 44;
+        const by = y + (h - bh) / 2;
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(cx, by, bw, bh);
+        ctx.fillStyle = 'rgba(160,170,200,0.5)';
+        ctx.fillRect(cx + bw / 2 - 0.5, by, 1, bh);
+        const px = (ms) => cx + bw / 2 + (bw / 2) * Math.max(-1, Math.min(1, ms / RANGE));
+        offs.forEach((ms, i) => {
+            ctx.globalAlpha = 0.25 + 0.75 * (i + 1) / offs.length;
+            ctx.fillStyle = col(ms);
+            ctx.fillRect(px(ms) - 1, by + 1, 2, bh - 2);
+        });
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = col(sum.median);
+        ctx.fillRect(px(sum.median) - 1.5, by - 3, 3, bh + 6);
+        cx += bw + 10;
+        ctx.font = 'bold 11px sans-serif';
+        ctx.fillText(word, cx, y + h / 2);
+        cx += ww + 10;
+        if (aw) {
+            const ph = 16, py = y + (h - ph) / 2;
+            ctx.fillStyle = 'rgba(30,40,70,0.95)';
+            _roundRect(ctx, cx, py, aw, ph, ph / 2);
+            ctx.fill();
+            ctx.strokeStyle = '#7f8cc0';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = '#f1f5f9';
+            ctx.textAlign = 'center';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.fillText(applyText, cx + aw / 2, y + h / 2 + 0.5);
+            ctx.restore();
+            _placeTimingBtn({ x: cx, y: py, w: aw, h: ph }, sum.suggest);
+            return;
+        }
+        ctx.restore();
+        _placeTimingBtn(null);
+    }
+
+    function _drawMessage(ctx, W, nowLineY, text) {
+        ctx.save();
+        ctx.font = 'bold 15px sans-serif';
+        const tw = ctx.measureText(text).width + 32;
+        const y = Math.max(40, nowLineY * 0.4);
+        ctx.fillStyle = 'rgba(8,8,20,0.85)';
+        _roundRect(ctx, (W - tw) / 2, y - 18, tw, 36, 8);
+        ctx.fill();
+        ctx.fillStyle = '#c8ccd8';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, W / 2, y);
+        ctx.restore();
     }
 
     function _drawAccuracyHUD(ctx, W /* , H */) {
@@ -2805,8 +3189,9 @@ function createFactory() {
         _diffUiKey = '';
         _lvlMemo = null;
         _has2xMemo = null;
-        _autoSchedTo = _autoPrevT = _autoPrevWall = NaN;
-        _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
+        _autoRelease(_instanceId);
+        if (_frameClock) _frameClock.reset();
+        _frameT = NaN;
 
         _removeSettingsPanel();
         _removeSettingsGear();
@@ -2879,6 +3264,7 @@ function createFactory() {
             _wireBus();
             _ensureBadge();
             _wireDifficultyKey();
+            _wireStarPowerKey();
 
             const ss = window.slopsmithSplitscreen;
             // Subscribe only when splitscreen is FULLY supported and
@@ -2965,23 +3351,43 @@ function createFactory() {
                 drumNotes = bundle.notes;
                 drumChords = bundle.chords;
             }
+            // This highway's smoothed clock (falls back to the raw sample
+            // until session.js has loaded).
+            const t = _frameClock ? _frameClock.tick(+bundle.currentTime || 0, bundle.isPlaying, _now()) : (+bundle.currentTime || 0);
+            _frameT = t;
+            // Not a drum chart (no drum tab, and the arrangement isn't
+            // Drums): e.g. a splitscreen panel left on the Drum Highway
+            // falls back to Lead on a song without a Drums part. Guitar
+            // notes read as drum notes (string * 24 + fret) gave a few
+            // random gems to score; show a message and play / score nothing.
+            const hasTab = !!(dt && Array.isArray(dt.hits));
+            if (isReady && !hasTab && !_isDrumsArrangement(bundle.songInfo)) {
+                _latestNotes = [];
+                _latestChords = [];
+                _latestTime = t;
+                _autoRelease(_instanceId);
+                _placeBadge(null);
+                _placeTimingBtn(null);
+                _draw([], [], t, bundle.beats, _noDrumsMessage(bundle.songInfo));
+                return;
+            }
             if (isReady) {
                 // Difficulty: Expert+ = the full chart, Expert drops the
                 // double kicks, Easy/Medium/Hard come from the tab's levels.
-                _syncMeta((dt && Array.isArray(dt.hits)) ? dt : null);
+                _syncMeta(hasTab ? dt : null);
                 const lv = _applyDifficulty(bundle, drumNotes, drumChords);
                 drumNotes = lv.notes;
                 drumChords = lv.chords;
             }
             _latestNotes = drumNotes;
             _latestChords = drumChords;
-            _latestTime = bundle.currentTime;
+            _latestTime = t;
             if (isReady) {
-                _scheduleAutoSounds(drumNotes, drumChords, +bundle.currentTime || 0);
-                _syncSession(bundle, drumNotes, drumChords);
+                _scheduleAutoSounds(drumNotes, drumChords);
+                _syncSession(bundle, drumNotes, drumChords, t);
                 _drainSessionEvents();
             } else {
-                _autoSchedTo = NaN;
+                _autoRelease(_instanceId);
             }
 
             // Loading / reconnect window — chart isn't confirmed
@@ -2997,10 +3403,11 @@ function createFactory() {
                     _drumCtx.fillRect(0, 0, W, H);
                 }
                 _placeBadge(null);
+                _placeTimingBtn(null);
                 return;
             }
 
-            _draw(drumNotes, drumChords, bundle.currentTime, bundle.beats);
+            _draw(drumNotes, drumChords, t, bundle.beats);
         },
         resize(/* w, h */) {
             if (!_isReady) return;
@@ -3040,6 +3447,8 @@ function createFactory() {
         _difficultyChanged,
         _proCymbalsChanged,
         _assistsChanged,
+        _inputOffsetChanged,
+        _isVisible,
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         _engineState() { return _session ? _session.getState() : null; },
@@ -3048,6 +3457,101 @@ function createFactory() {
     };
 
     return instance;
+}
+
+// The selected arrangement is a drum part (by name).
+function _isDrumsArrangement(si) {
+    if (!si) return false;
+    if (si.arrangement && DRUMS_PATTERNS.test(si.arrangement)) return true;
+    if (Array.isArray(si.arrangements)) {
+        const arr = si.arrangements.find(a => a && a.index === si.arrangement_index);
+        if (arr && DRUMS_PATTERNS.test(arr.name || '')) return true;
+    }
+    return false;
+}
+
+// What the drum view says on a part that is not drums.
+function _noDrumsMessage(si) {
+    si = si || {};
+    const hasDrums = Array.isArray(si.arrangements)
+        && si.arrangements.some((a) => a && DRUMS_PATTERNS.test(a.name || ''));
+    return hasDrums ? 'Pick the Drums part: ' + (si.arrangement || 'this part') + ' is not drums'
+        : 'This song has no drums';
+}
+
+// ── End-of-song results card ──────────────────────────────────────────
+// Final score (engine score + session bonuses), stars, accuracy, best streak
+// and where the points came from: notes x multiplier, star power, accents /
+// ghosts, spot-on timing, rolls and drum solos. The best score per song and
+// difficulty is kept in localStorage ("drums.best:<song>|<difficulty>").
+// Shown once per song end, only when the player hit something.
+let _endCardAt = -Infinity;
+function _drumsEndCard(session, badge) {
+    const st = session && session.getState ? session.getState() : null;
+    if (!st || !(st.notesHit > 0)) return null;
+    if (performance.now() - _endCardAt < 2000) return null;   // one card per song end
+    _endCardAt = performance.now();
+    const b = (session.getBonus && session.getBonus()) || { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, runs: [], solos: [] };
+    const bus = _bus();
+    const cs = (bus && bus.currentSong) || {};
+    const diff = badge && badge.text ? badge.text : 'EXPERT';
+    const total = Math.round((st.score || 0) + (b.total || 0));
+    const key = 'drums.best:' + (cs.filename || cs.title || '') + '|' + diff;
+    let prev = null;
+    try { prev = Number(localStorage.getItem(key)) || null; } catch (_) { /* storage blocked */ }
+    const isBest = prev == null || total > prev;
+    if (isBest) { try { localStorage.setItem(key, String(total)); } catch (_) { /* storage blocked */ } }
+    const n = (x) => Math.round(x || 0).toLocaleString('en-US');
+    const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const resolved = st.notesHit + st.notesMissed;
+    const acc = resolved ? 100 * st.notesHit / resolved : 100;
+    const stars = Math.floor(st.stars || 0), gold = (st.stars || 0) >= 6;
+    const starHtml = Array.from({ length: 5 }, (_, i) =>
+        `<span style="color:${gold ? '#ffcf3a' : i < stars ? '#f4f6ff' : '#3a4060'}">★</span>`).join('');
+    const chip = (label, col) => `<span style="font-size:12px;padding:3px 9px;border-radius:10px;background:rgba(255,255,255,.06);color:${col}">${esc(label)}</span>`;
+    const sp = st.starPowerScore || 0;
+    const chips = [
+        chip('notes × multiplier +' + n((st.score || 0) - sp), '#f1f5f9'),
+        sp ? chip('star power +' + n(sp), '#8fe6ff') : '',
+        (st.totalAccents || st.totalGhosts) ? chip('dynamics: ' + (st.accentsHit || 0) + '/' + (st.totalAccents || 0) + ' accents, '
+            + (st.ghostsHit || 0) + '/' + (st.totalGhosts || 0) + ' ghosts', '#b77bff') : '',
+        b.timing ? chip('spot-on timing +' + n(b.timing) + ' (' + b.perfect + ' hits)', '#ffc531') : '',
+        b.rolls ? chip('rolls +' + n(b.rolls) + (b.runs && b.runs.length ? ' (' + b.runs.map((r) => r.h + '/' + r.n).join(', ') + ')' : ''), '#ff9a40') : '',
+        b.solo ? chip('solos +' + n(b.solo), '#c9b6ff') : '',
+    ].join('');
+    const solos = (b.solos || []).map((x) => `<div style="color:#c9b6ff;font-size:13px">${esc(x.rating)} ${Number(x.pct).toFixed(2)}% (${x.h}/${x.n}) · +${n(x.bonus)}</div>`).join('');
+    const ov = document.createElement('div');
+    ov.className = 'drums-endcard';
+    ov.setAttribute('role', 'dialog');
+    ov.setAttribute('aria-label', 'Drums results');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);font-family:system-ui,sans-serif';
+    ov.innerHTML = `<div style="width:30rem;max-width:92vw;background:#0e1322;border:1px solid #2b3556;border-radius:14px;padding:22px 24px;color:#cbd5e1;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+        <div style="font-size:12px;letter-spacing:3px;color:#8b95a5">DRUMS · ${esc(diff)}</div>
+        ${cs.title ? `<div style="font-size:17px;color:#f1f5f9;margin-top:2px">${esc(cs.title)}${cs.artist ? `<span style="color:#8b95a5"> — ${esc(cs.artist)}</span>` : ''}</div>` : ''}
+        <div style="font:900 46px/1.1 system-ui,sans-serif;color:${isBest ? '#ffc531' : '#f1f5f9'};margin-top:12px">${n(total)}</div>
+        <div style="font-size:12px;color:#8b95a5">${isBest ? '<b style="color:#ffc531">NEW BEST SCORE</b>' + (prev != null ? ' · previous ' + n(prev) : '') : 'best ' + n(prev)}</div>
+        <div style="font-size:26px;margin-top:6px;letter-spacing:4px">${starHtml}</div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:14px 0">
+            <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${acc.toFixed(2)}%</div><div style="font-size:11px;color:#8b95a5">accuracy</div></div>
+            <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${st.notesHit} / ${st.totalNotes}</div><div style="font-size:11px;color:#8b95a5">notes hit</div></div>
+            <div><div style="font-weight:800;font-size:20px;color:${st.fullCombo ? '#ffc531' : '#f1f5f9'}">${st.fullCombo ? 'FC' : st.maxCombo}</div><div style="font-size:11px;color:#8b95a5">${st.fullCombo ? 'full combo!' : 'best streak'}</div></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:8px">${chips}</div>
+        ${solos}
+        ${st.overhits ? `<div style="font-size:12px;color:#8b95a5;margin-top:4px">${st.overhits} overhit${st.overhits > 1 ? 's' : ''}</div>` : ''}
+        <button type="button" class="drums-endcard-close" style="margin-top:14px;padding:6px 22px;border-radius:8px;border:1px solid #3a4670;background:#1b2440;color:#f1f5f9;cursor:pointer">Close</button>
+    </div>`;
+    const onKey = (e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); close(); } };
+    function close() {
+        ov.remove();
+        document.removeEventListener('keydown', onKey, true);
+        if (bus && typeof bus.off === 'function') { try { bus.off('song:loading', close); } catch (_) { /* ignore */ } }
+    }
+    ov.addEventListener('click', (e) => { if (e.target === ov || (e.target && e.target.closest && e.target.closest('.drums-endcard-close'))) close(); });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(ov);
+    if (bus) { try { bus.on('song:loading', close); } catch (_) { /* ignore */ } }
+    return { total, best: isBest, previous: prev, accuracy: acc, element: ov, close };
 }
 
 createFactory.matchesArrangement = function (songInfo) {
@@ -3083,6 +3587,9 @@ if (typeof module !== 'undefined' && module.exports) {
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
+        _engineVelocity, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
+        _loadScoring, _routeTarget, _isDrumsArrangement, _noDrumsMessage, _drumsEndCard,
+        _instances: () => _instances, _midiOnMessage,
     };
 }
 

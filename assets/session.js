@@ -66,6 +66,13 @@
     // Seeks: a jump larger than this (seconds) rebuilds the engine from the new position.
     const SEEK_BACK = 0.25;
     const SEEK_FORWARD = 1.5;
+    // The engine runs this far (seconds) behind the frame clock, so a pad hit timestamped a little
+    // before the latest frame is judged at its own time (see createSession update()).
+    const INPUT_GRACE = 0.06;
+    // Hits kept for the early/late timing meter.
+    const TIMING_SAMPLES = 24;
+    // Input offset range (ms), same as the settings panel.
+    const INPUT_OFFSET_MIN = -250, INPUT_OFFSET_MAX = 250;
 
     function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
     function defaultNow() {
@@ -509,6 +516,55 @@
         return time + ahead * rate;
     }
 
+    /**
+     * Smoothed song clock for one highway (the pattern core's 3D highway uses for its own clock).
+     * bundle.currentTime is the audio time sampled by the player's tick, so it steps unevenly from
+     * frame to frame and is up to a frame old by the time a pad hit is handled. The clock anchors on
+     * every new sample, measures the playback rate between samples, and interpolates from there:
+     *  - tick(raw, isPlaying, perfNow): the time to draw / score this frame;
+     *  - at(perfNow): the song time at another moment (e.g. when a MIDI message arrived), extrapolated
+     *    up to 100 ms forward or 250 ms back from the last sample; the raw time while paused.
+     * isPlaying is core's bundle.isPlaying (false = paused / stalled / seeking; undefined on older
+     * hosts, where a sample older than 100 ms counts as stalled).
+     */
+    function createFrameClock() {
+        let anchorT = NaN, anchorP = NaN, rate = 1, raw = NaN, playing = false;
+        function reset() { anchorT = anchorP = raw = NaN; rate = 1; playing = false; }
+        function tick(rawTime, isPlaying, perfNow) {
+            rawTime = +rawTime;
+            const p = Number.isFinite(perfNow) ? perfNow : defaultNow();
+            if (!Number.isFinite(rawTime)) return NaN;
+            raw = rawTime;
+            if (isPlaying === false) {
+                anchorT = rawTime; anchorP = p; rate = 1; playing = false;
+                return rawTime;
+            }
+            if (rawTime !== anchorT) {
+                if (Number.isFinite(anchorP)) {
+                    const dP = (p - anchorP) / 1000;
+                    if (dP > 0.001 && dP < 0.5) {
+                        const r = (rawTime - anchorT) / dP;
+                        rate = (r > 0.05 && r < 5) ? r : 1;   // seek / loop: start over at 1x
+                    } else if (dP >= 0.5) rate = 1;          // long gap (paused, tab hidden)
+                }
+                anchorT = rawTime; anchorP = p; playing = true;
+                return rawTime;
+            }
+            // Same sample as last frame: interpolate, unless the clock has stalled.
+            const dt = (p - anchorP) / 1000;
+            if (dt > 0.1) { playing = false; return rawTime; }
+            if (dt <= 0) return rawTime;
+            return anchorT + rate * dt;
+        }
+        function at(perfNow) {
+            if (!playing || !Number.isFinite(anchorT)) return raw;
+            const p = Number.isFinite(perfNow) ? perfNow : defaultNow();
+            return anchorT + rate * clamp((p - anchorP) / 1000, -0.25, 0.1);
+        }
+        reset();
+        return { tick, at, reset, get rate() { return rate; }, get playing() { return playing; } };
+    }
+
     /** True when the playhead jumped (seek, loop restart) and the engine must be rebuilt. */
     function isSeek(prevTime, time) {
         if (!Number.isFinite(prevTime) || !Number.isFinite(time)) return false;
@@ -579,12 +635,59 @@
         };
     }
 
-    // ── Session: the engine for one chart ───────────────────────────────────
+    /**
+     * Early/late timing meter model. offsets: hit time minus note time in ms (+ = late), oldest
+     * first, as session.getBonus().offsets gives them; currentOffsetMs: the input offset in use.
+     * -> {count, median, state: 'waiting'|'early'|'late'|'ok', label, suggest}. `suggest` is the
+     * input offset that would centre the hits (after at least `minHits` hits and when the median is
+     * at least `deadMs` off), else null. Hits are already offset-corrected, so a late median
+     * raises the offset by that much.
+     */
+    function timingSummary(offsets, currentOffsetMs, o) {
+        o = o || {};
+        const minHits = o.minHits || 6, deadMs = o.deadMs != null ? o.deadMs : 10;
+        const list = Array.isArray(offsets) ? offsets.filter(Number.isFinite) : [];
+        const cur = Number.isFinite(+currentOffsetMs) ? Math.round(+currentOffsetMs) : 0;
+        if (!list.length) return { count: 0, median: null, state: 'waiting', label: 'waiting for hits', suggest: null, current: cur };
+        const srt = list.slice().sort((a, b) => a - b), mid = srt.length >> 1;
+        const median = srt.length % 2 ? srt[mid] : (srt[mid - 1] + srt[mid]) / 2;
+        const off = Math.abs(median) >= deadMs;
+        const state = !off ? 'ok' : (median < 0 ? 'early' : 'late');
+        const label = !off ? 'ON TIME' : (median > 0 ? '+' : '') + Math.round(median) + ' ms ' + (median < 0 ? 'EARLY' : 'LATE');
+        const suggest = list.length >= minHits && off
+            ? clamp(Math.round(cur + median), INPUT_OFFSET_MIN, INPUT_OFFSET_MAX) : null;
+        return { count: list.length, median, state, label, suggest: suggest === cur ? null : suggest, current: cur };
+    }
 
     /**
-     * createSession(DrumsEngine, {now}) -> session. load() a chart (wire notes + beats), optionally
-     * setMeta() the drums block, then update(time) every frame and hit()/activate() on input.
-     * drainEvents() hands queued visual events ({type, pad, cymbal, sp, wall}) to the view.
+     * Star power hint for the HUD: how the player activates star power when it is ready, or null.
+     * With fills in the chart the fill-end note activates it; without fills (manual activation) a
+     * key / pad does. spPadName: the configured star power pad's name, or ''.
+     */
+    function starPowerHint(meta, state, spPadName) {
+        const sp = state && state.starPower;
+        if (!sp || !sp.canActivate || sp.active) return null;
+        if (meta && Array.isArray(meta.activation) && meta.activation.length) return 'Hit the note at the end of the fill to activate';
+        return 'Press Enter' + (spPadName ? ' or hit ' + spPadName : '') + ' to activate star power';
+    }
+
+    // ── Session: the engine for one chart ───────────────────────────────────
+
+    function normalizeInputOffset(ms) {
+        const n = Math.round(Number(ms));
+        return Number.isFinite(n) ? clamp(n, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX) : 0;
+    }
+
+    /**
+     * createSession(DrumsEngine, {now, inputOffsetMs, ...}) -> session. load() a chart (wire notes
+     * + beats), optionally setMeta() the drums block, then update(time) every frame and
+     * hit()/activate() on input. drainEvents() hands queued visual events ({type, pad, cymbal, sp,
+     * wall}) to the view.
+     *
+     * Times passed to update(), hit() and activate() are on the highway's clock (what the player
+     * sees). The session subtracts the input offset from all of them alike, so with a positive
+     * offset a hit that registers late is compared against an engine that has not yet moved past
+     * its note.
      */
     function createSession(Engine, opts) {
         opts = opts || {};
@@ -592,12 +695,16 @@
         const MAX_EVENTS = 256;
         const s = {
             decoded: null, gems: [], beats: [], rawBeats: null, meta: null, engine: null,
-            lastTime: null, events: [], builds: 0,
+            lastTime: null, lastFrame: null, events: [], builds: 0,
             proWanted: opts.proDrums !== false,   // the player's "Pro cymbals" setting
             auto: normalizeAuto(opts.auto),       // {kick, cymbals}: lanes played for the player
             params: opts.params || null,          // engine params override (hit window)
             bonus: null,                          // Rock Band-style extras on top of the engine score
+            offset: normalizeInputOffset(opts.inputOffsetMs) / 1000,   // input offset (s)
+            onHit: null,
         };
+        // Highway time -> player time (the input offset applied).
+        const playerTime = (t) => +t - s.offset;
 
         // ── Bonus score (on top of the engine's score) ──
         //  - timing: +10 x multiplier for a hit within 25 ms of the note;
@@ -621,7 +728,7 @@
             }
             const solos = ((s.meta && s.meta.solos) || []).map(r => ({ start: r.start, end: r.end, h: 0, n: 0, done: false }));
             return { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, dynamics: 0, rollSet: rolls, run: null,
-                runs: [], solos, soloDone: [], feed: [] };
+                runs: [], solos, soloDone: [], feed: [], offsets: (s.bonus && s.bonus.offsets) || [] };
         }
         function bonusFeed(text, color) {
             const b = s.bonus;
@@ -633,6 +740,9 @@
             const b = s.bonus;
             const mult = e.multiplier || 1;
             const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
+            // Early/late meter: hit time minus note time (ms, + = late), the last TIMING_SAMPLES hits.
+            b.offsets.push(Math.round((e.time - nt) * 1000) || 0);   // || 0: no -0
+            if (b.offsets.length > TIMING_SAMPLES) b.offsets.shift();
             let pts = 0;
             if (Math.abs(e.time - nt) <= 0.025) { pts += 10 * mult; b.timing += 10 * mult; b.perfect++; }
             if (b.rollSet.has(noteKey(nt, e.pad))) {
@@ -719,6 +829,9 @@
             eng.on('hit', e => {
                 push({ type: 'hit', pad: e.pad, cymbal: e.cymbal, id: e.id, sp: eng.isStarPowerNote(e.id), bonus: !!e.bonus, time: e.time });
                 bonusHit(e);
+                if (s.onHit) {
+                    try { s.onHit({ time: e.time, noteTime: Number.isFinite(e.noteTime) ? e.noteTime : e.time, pad: e.pad }); } catch (_) { /* listener only */ }
+                }
             });
             eng.on('miss', e => {
                 push({ type: 'miss', pad: e.pad, cymbal: e.cymbal, id: e.id, time: e.time });
@@ -788,14 +901,17 @@
                 }
                 return api;
             },
-            update(time) {
-                time = +time;
-                if (!Number.isFinite(time) || !s.engine) return;
+            /** Advance to the highway time of this frame (the input offset is applied here too). */
+            update(frameTime) {
+                frameTime = +frameTime;
+                if (!Number.isFinite(frameTime) || !s.engine) return;
+                const time = playerTime(frameTime);
                 if (s.lastTime != null) {
                     if (isSeek(s.lastTime, time)) build(time);
-                    else if (time > s.lastTime && (s.auto.kick || s.auto.cymbals)) {
-                        // Auto notes crossing the strikeline this frame flash as if played.
-                        for (let i = firstAfter(s.gems, s.lastTime); i < s.gems.length && s.gems[i].t <= time; i++) {
+                    else if (s.lastFrame != null && frameTime > s.lastFrame && (s.auto.kick || s.auto.cymbals)) {
+                        // Auto notes crossing the strikeline this frame flash as if played
+                        // (on the highway clock: that is when the player sees them arrive).
+                        for (let i = firstAfter(s.gems, s.lastFrame); i < s.gems.length && s.gems[i].t <= frameTime; i++) {
                             const g = s.gems[i];
                             if (g.auto) push({ type: 'hit', pad: g.pad, cymbal: g.cymbal, id: g.id, sp: false, auto: true, time: g.t });
                         }
@@ -804,23 +920,48 @@
                 // First frame after a load that starts mid-song (view switched while playing,
                 // renderer installed late): score from here instead of missing everything before.
                 else if (s.gems.length && time > s.gems[0].t - SEEK_BACK) build(time);
-                s.engine.update(time);
+                // The engine runs INPUT_GRACE behind: pad hits are timed by when they were struck
+                // (their MIDI timestamp), and the engine moves any input older than its own time
+                // forward to it (YARG QueueInput). Advanced to the frame time, every hit that
+                // arrived just after a frame would be judged late by up to a frame. Misses are
+                // only final INPUT_GRACE later.
+                s.engine.update(time - INPUT_GRACE);
                 bonusTick(time);
                 s.lastTime = time;
+                s.lastFrame = frameTime;
             },
+            /** A pad hit struck at highway time `time`. o: {cymbal, velocity (0..1)}. */
             hit(time, pad, o) {
                 o = o || {};
                 push({ type: 'press', pad: pad | 0, cymbal: !!o.cymbal });
                 // Pads the game plays for you: no score, no overhit.
                 if (isAutoNote(pad | 0, !!o.cymbal, s.auto)) return { type: 'ignored', reason: 'auto' };
                 if (!s.engine || !Number.isFinite(+time)) return { type: 'ignored', reason: 'no-chart' };
-                if (s.lastTime != null && isSeek(s.lastTime, +time)) return { type: 'ignored', reason: 'seek' };
-                return s.engine.hit(+time, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
+                const t = playerTime(time);
+                if (s.lastTime != null && isSeek(s.lastTime, t)) return { type: 'ignored', reason: 'seek' };
+                return s.engine.hit(t, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
             },
+            /**
+             * Activate star power at highway time `time` (the Enter key / star power pad). Only
+             * works on charts without fills (with fills, the fill-end note activates it).
+             */
             activate(time) {
-                if (!s.engine) return false;
-                return s.engine.activateStarPower(time);
+                if (!s.engine || !Number.isFinite(+time)) return false;
+                return s.engine.activateStarPower(playerTime(time));
             },
+            /** Input offset in ms (subtracted from every time above; + = hits register earlier). */
+            setInputOffset(ms) {
+                const v = normalizeInputOffset(ms) / 1000;
+                if (v === s.offset) return api;
+                s.offset = v;
+                if (s.bonus) s.bonus.offsets = [];   // the meter measured the old offset
+                return api;
+            },
+            get inputOffsetMs() { return Math.round(s.offset * 1000); },
+            /** Per-hit timing listener ({time, noteTime, pad}: player seconds) or null. */
+            setOnHit(fn) { s.onHit = typeof fn === 'function' ? fn : null; return api; },
+            /** Forget the early/late samples. */
+            resetTiming() { if (s.bonus) s.bonus.offsets = []; return api; },
             drainEvents() {
                 if (!s.events.length) return [];
                 const out = s.events.slice();
@@ -843,6 +984,7 @@
                 const live = t == null ? null : b.solos.find(x => t >= x.start - 0.5 && t < x.end + 0.3);
                 return { total: b.total, timing: b.timing, rolls: b.rolls, solo: b.solo, perfect: b.perfect, dynamics: b.dynamics,
                     feed: b.feed.slice(), rollActive: !!(b.run && b.run.n >= 3), runs: b.runs.slice(), solos: b.soloDone.slice(),
+                    offsets: b.offsets.slice(),
                     soloLive: live ? { h: live.h, n: live.n, active: t >= live.start && t < live.end } : null };
             },
             get engine() { return s.engine; },
@@ -858,15 +1000,16 @@
     }
 
     return {
-        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, SEEK_BACK, SEEK_FORWARD,
+        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, SEEK_BACK, SEEK_FORWARD, INPUT_GRACE, TIMING_SAMPLES,
         collectWireNotes, classifyNote, buildGems, visibleRange, normalizeBeats,
         AUTO_LEVELS, normalizeAutoLevel, autoAppliesAt, autoFor, isAutoNote,
         parseDrumTabMeta,
         DIFFICULTIES, LOWER_LEVELS, DEFAULT_DIFFICULTY, DIFFICULTY_LABELS, DIFFICULTY_NAMES, DIFFICULTY_COLORS,
         normalizeDifficulty, hasKick2x, stripKick2x, difficultyOptions,
         resolveDifficulty, nextDifficulty, difficultyLabel, difficultyBadge, difficultyChart, isDifficultyKey,
-        midiToPad, isTypingTarget, estimateTime, isSeek,
-        formatScore, formatAccuracy, multiplierColor, starProgress, hudModel,
+        midiToPad, isTypingTarget, estimateTime, createFrameClock, isSeek,
+        formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, timingSummary, starPowerHint,
+        normalizeInputOffset,
         createSession,
     };
 });

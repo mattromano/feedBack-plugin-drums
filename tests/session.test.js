@@ -672,3 +672,166 @@ test('session: setParams widens the hit window', () => {
     m.setParams({ hitWindow: { maxWindow: 0.26, minWindow: 0.26 } });
     m.update(1.09); assert.equal(m.hit(1.09, H.PAD.RED).type, 'hit');
 });
+
+// ── hit timing: input offset, engine grace, timing meter, frame clock ─────
+
+test('session: a positive input offset delays the engine too, so a late-registered hit still counts', () => {
+    // Note at t=1.0. The player's hits register 200 ms late (input offset +200 ms):
+    // the pad is struck on the beat but the hit arrives at highway time 1.2.
+    const s = H.createSession(E, { inputOffsetMs: 200 });
+    s.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    s.update(0.9);
+    s.update(1.25);            // the frame drawn before the late hit arrives
+    const r = s.hit(1.2, H.PAD.RED);
+    assert.equal(r.type, 'hit', 'the engine has not moved past the note yet');
+    assert.ok(Math.abs(r.offset) < 0.001, 'judged on time once the offset is applied');
+    s.update(2);
+    assert.equal(s.getState().notesMissed, 0);
+    assert.equal(s.inputOffsetMs, 200);
+
+    // An engine advanced on the raw frame time (the old behaviour: offset 0 for the frame
+    // clock) has already missed the note when the same late hit arrives.
+    const s0 = H.createSession(E);
+    s0.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    s0.update(0.9); s0.update(1.25);
+    assert.notEqual(s0.hit(1.2 - 0.2, H.PAD.RED).type, 'hit');
+    assert.equal(s0.getState().notesMissed, 1);
+});
+
+test('session: setInputOffset applies to later frames and hits, and restarts the timing meter', () => {
+    const s = H.createSession(E);
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    s.update(0.95); s.hit(1.03, H.PAD.RED);   // 30 ms late
+    assert.deepEqual(s.getBonus().offsets, [30]);
+    s.setInputOffset(30);
+    assert.deepEqual(s.getBonus().offsets, [], 'samples measured with the old offset are dropped');
+    s.update(1.95); s.hit(2.03, H.PAD.RED);
+    assert.deepEqual(s.getBonus().offsets, [0]);
+    s.setInputOffset('junk');
+    assert.equal(s.inputOffsetMs, 0);
+    s.setInputOffset(999);
+    assert.equal(s.inputOffsetMs, 250, 'clamped like the settings field');
+});
+
+test('session: a hit timestamped before the latest frame keeps its own time (not moved to the frame)', () => {
+    const s = H.createSession(E);
+    s.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    const seen = [];
+    s.setOnHit((h) => seen.push(h));
+    s.update(0.9);
+    s.update(1.016);           // the frame after the note at t=1 was drawn...
+    s.hit(1.004, H.PAD.RED);   // ...then a hit struck at 1.004 arrives (MIDI timestamp)
+    assert.equal(seen.length, 1);
+    assert.ok(Math.abs(seen[0].time - 1.004) < 1e-9, 'judged at the strike, not at the frame time 1.016');
+    assert.equal(seen[0].noteTime, 1);
+    s.update(1.5);
+    assert.equal(s.getState().notesHit, 1);
+    // misses are still found, INPUT_GRACE later
+    const m = H.createSession(E);
+    m.load({ notes: [w(1, 38)], chords: [], beats: [] });
+    m.update(0.9); m.update(1.08);
+    assert.equal(m.getState().notesMissed, 0, 'still inside the window + grace');
+    m.update(1.2);
+    assert.equal(m.getState().notesMissed, 1);
+});
+
+test('session: MIDI velocity normalised to 0..1 decides the dynamics bonus (soft hit on an accent gets none)', () => {
+    const play = (vel) => {
+        const s = H.createSession(E);
+        s.load({ notes: [w(1, 38, { ac: true })], chords: [], beats: [] });
+        s.update(0.95);
+        const r = s.hit(1.0, H.PAD.RED, { velocity: vel });
+        s.update(1.5);
+        return { r, st: s.getState() };
+    };
+    const soft = play(1 / 127);   // screen.js passes velocity / 127
+    assert.equal(soft.r.type, 'hit');
+    assert.equal(soft.r.bonus, false, 'velocity 1 is the softest hit, not full strength');
+    const hard = play(127 / 127);
+    assert.equal(hard.r.bonus, true);
+    assert.ok(hard.st.score > soft.st.score);
+});
+
+test('session: activate() uses the input offset and works on a chart without fills', () => {
+    const s = H.createSession(E, { inputOffsetMs: 40 });
+    s.load(chart());
+    s.setMeta(tabMeta({ star_power: [{ start_time: 1, end_time: 2 }, { start_time: 3, end_time: 4 }] }));
+    playPerfect(s, 0, 5);
+    const st = s.getState();
+    assert.equal(st.starPower.canActivate, true);
+    assert.equal(s.engine.manualActivation, true, 'no fills: manual activation');
+    assert.equal(H.starPowerHint(s.meta, st, 'hi-hat pedal'), 'Press Enter or hit hi-hat pedal to activate star power');
+    assert.equal(s.activate(5.05), true);
+    assert.equal(s.getState().starPower.active, true);
+    assert.equal(H.starPowerHint(s.meta, s.getState(), ''), null, 'no hint while active');
+    assert.equal(s.activate(NaN), false);
+});
+
+test('starPowerHint: fills say how they activate; nothing while not ready', () => {
+    const ready = { starPower: { canActivate: true, active: false } };
+    assert.equal(H.starPowerHint({ activation: [{ start: 1, end: 2 }] }, ready, ''), 'Hit the note at the end of the fill to activate');
+    assert.equal(H.starPowerHint(null, ready, ''), 'Press Enter to activate star power');
+    assert.equal(H.starPowerHint(null, { starPower: { canActivate: false } }, ''), null);
+    assert.equal(H.starPowerHint(null, null, ''), null);
+});
+
+test('timingSummary: median, early / late label and the suggested input offset', () => {
+    assert.deepEqual(H.timingSummary([], 0), { count: 0, median: null, state: 'waiting', label: 'waiting for hits', suggest: null, current: 0 });
+    const late = H.timingSummary([20, 25, 30, 28, 22, 35, 400], 10);
+    assert.equal(late.median, 28);
+    assert.equal(late.state, 'late');
+    assert.equal(late.label, '+28 ms LATE');
+    assert.equal(late.suggest, 38, 'current offset + median');
+    const early = H.timingSummary([-30, -30, -30, -30, -30, -30], 0);
+    assert.equal(early.label, '-30 ms EARLY');
+    assert.equal(early.suggest, -30);
+    const ok = H.timingSummary([4, -3, 5, -6, 2, 0], 12);
+    assert.equal(ok.state, 'ok');
+    assert.equal(ok.label, 'ON TIME');
+    assert.equal(ok.suggest, null);
+    assert.equal(H.timingSummary([40, 40, 40], 0).suggest, null, 'needs 6 hits before suggesting');
+    assert.equal(H.timingSummary([200, 200, 200, 200, 200, 200], 200).suggest, 250, 'clamped to the field range');
+});
+
+test('session: the timing meter keeps the last 24 hits and survives a seek', () => {
+    const s = H.createSession(E);
+    const notes = [];
+    for (let i = 0; i < 30; i++) notes.push(w(1 + i * 0.5, 38));
+    s.load({ notes, chords: [], beats: [] });
+    for (const n of notes) { s.update(n.t - 0.01); s.hit(n.t + 0.012, H.PAD.RED); }
+    const offs = s.getBonus().offsets;
+    assert.equal(offs.length, H.TIMING_SAMPLES);
+    assert.ok(offs.every(v => v === 12));
+    s.update(2);   // seek back: the score restarts, the timing samples stay
+    assert.equal(s.getBonus().total, 0);
+    assert.equal(s.getBonus().offsets.length, H.TIMING_SAMPLES);
+    s.resetTiming();
+    assert.deepEqual(s.getBonus().offsets, []);
+});
+
+test('createFrameClock: interpolates between audio samples, holds while paused, times past input', () => {
+    const c = H.createFrameClock();
+    assert.ok(Number.isNaN(c.at(0)));
+    assert.equal(c.tick(10, true, 1000), 10);
+    assert.equal(c.tick(10.02, true, 1020), 10.02);           // new sample: rate 1
+    assert.ok(Math.abs(c.tick(10.02, true, 1030) - 10.03) < 1e-9, 'same sample: interpolated');
+    assert.ok(Math.abs(c.at(1025) - 10.025) < 1e-9, 'a hit between frames');
+    assert.ok(Math.abs(c.at(1010) - 10.01) < 1e-9, 'a hit timestamped before the last sample');
+    assert.ok(Math.abs(c.at(1500) - 10.12) < 1e-9, 'capped 100 ms ahead');
+    // paused (core's bundle.isPlaying false): no interpolation
+    assert.equal(c.tick(10.5, false, 2000), 10.5);
+    assert.equal(c.tick(10.5, false, 2050), 10.5);
+    assert.equal(c.at(2060), 10.5);
+    // older hosts (isPlaying undefined): a stalled sample stops interpolating after 100 ms
+    const d = H.createFrameClock();
+    d.tick(5, undefined, 0); d.tick(5.016, undefined, 16);
+    assert.ok(d.tick(5.016, undefined, 30) > 5.016);
+    assert.equal(d.tick(5.016, undefined, 200), 5.016);
+    assert.equal(d.at(210), 5.016);
+    // half speed: the rate is measured
+    const e = H.createFrameClock();
+    e.tick(1, true, 0); e.tick(1.01, true, 20);
+    assert.ok(Math.abs(e.tick(1.01, true, 30) - 1.015) < 1e-9);
+    c.reset();
+    assert.ok(Number.isNaN(c.at(0)));
+});
