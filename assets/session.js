@@ -789,6 +789,25 @@
             ev.wall = now();
             s.events.push(ev);
             if (s.events.length > MAX_EVENTS) s.events.splice(0, s.events.length - MAX_EVENTS);
+            return ev;
+        }
+
+        // Public judgment listener (setOnEvent): the recorded event without its wall clock, plus
+        // the engine's state after it. A throwing listener never reaches the engine.
+        function tell(eng, ev, extra) {
+            if (!s.onEvent) return;
+            try {
+                const st = eng.getState();
+                const d = Object.assign({}, ev, extra);
+                delete d.wall;
+                d.multiplier = st.multiplier;
+                d.score = st.score;
+                d.stars = st.stars;
+                d.combo = st.combo;
+                d.spActive = !!st.starPower.active;
+                d.spAmount = st.starPower.amount;
+                s.onEvent(d);
+            } catch (_) { /* listener only */ }
         }
 
         function build(fromTime) {
@@ -821,19 +840,21 @@
                 ev.points = Math.max(0, sc - scoreAtHit) + extra;
                 scoreAtHit = sc;
                 if (s.onHit) {
-                    try { s.onHit({ time: e.time, noteTime: Number.isFinite(e.noteTime) ? e.noteTime : e.time, pad: e.pad }); } catch (_) { /* listener only */ }
+                    try { s.onHit({ time: e.time, noteTime: nt, pad: e.pad }); } catch (_) { /* listener only */ }
                 }
+                tell(eng, ev, { noteTime: nt });
             });
             eng.on('miss', e => {
-                push({ type: 'miss', pad: e.pad, cymbal: e.cymbal, id: e.id, time: e.time });
+                const ev = push({ type: 'miss', pad: e.pad, cymbal: e.cymbal, id: e.id, time: e.time });
                 bonusMiss(e);
+                tell(eng, ev, { noteTime: e.noteTime });
             });
-            eng.on('overhit', e => push({ type: 'overhit', pad: e.pad, cymbal: e.cymbal, time: e.time }));
-            eng.on('sp-phrase', e => push({ type: 'sp-phrase', time: e.time }));
-            eng.on('sp-phrase-fail', e => push({ type: 'sp-phrase-fail', time: e.time }));
-            eng.on('sp-ready', e => push({ type: 'sp-ready', time: e.time }));
-            eng.on('sp-activate', e => push({ type: 'sp-activate', time: e.time }));
-            eng.on('sp-end', e => push({ type: 'sp-end', time: e.time }));
+            eng.on('overhit', e => tell(eng, push({ type: 'overhit', pad: e.pad, cymbal: e.cymbal, time: e.time })));
+            eng.on('sp-phrase', e => tell(eng, push({ type: 'sp-phrase', time: e.time })));
+            eng.on('sp-phrase-fail', e => tell(eng, push({ type: 'sp-phrase-fail', time: e.time })));
+            eng.on('sp-ready', e => tell(eng, push({ type: 'sp-ready', time: e.time })));
+            eng.on('sp-activate', e => tell(eng, push({ type: 'sp-activate', time: e.time })));
+            eng.on('sp-end', e => tell(eng, push({ type: 'sp-end', time: e.time })));
             eng.on('combo-break', e => push({ type: 'combo-break', combo: e.combo, time: e.time }));
             s.engine = eng;
             s.builds++;
@@ -959,6 +980,13 @@
             getState() { return s.engine ? s.engine.getState() : null; },
             /** Per-hit timing listener ({time, noteTime, pad}: player seconds) or null. */
             setOnHit(fn) { s.onHit = typeof fn === 'function' ? fn : null; return api; },
+            /**
+             * Judgment / star power listener, or null. After each hit, miss, overhit, sp-phrase,
+             * sp-phrase-fail, sp-ready, sp-activate and sp-end: the recorded event (no `wall`) plus
+             * {multiplier, score, stars, combo, spActive, spAmount} from getState() after it; hits
+             * and misses also carry noteTime, hits their points.
+             */
+            setOnEvent(fn) { s.onEvent = typeof fn === 'function' ? fn : null; return api; },
             /** Forget the early/late samples (after the input offset changed). */
             resetTiming() { if (s.bonus) s.bonus.offsets = []; return api; },
             /** The chart note behind an event id: {t, midi, pad, cymbal}, or null. */

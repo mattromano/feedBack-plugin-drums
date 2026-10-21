@@ -837,3 +837,44 @@ test('session: hit events carry the combo, the timing offset and the points they
     const again = s.drainEvents().filter(e => e.type === 'hit');
     assert.equal(again[0].points, s.getState().score + s.getBonus().total);
 });
+
+test('setOnEvent hands every judgment to the listener with the engine state after it', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    const got = [];
+    s.setOnEvent((d) => got.push(d));
+    s.update(0);
+    s.update(1); s.hit(1, 1);   // hit the first note
+    for (let t = 1.25; t <= 3; t += 0.25) s.update(t);   // let the second one pass
+    const hit = got.find(d => d.type === 'hit');
+    assert.ok(hit, 'a hit');
+    assert.ok(hit.points > 0);
+    assert.equal(hit.combo, 1);
+    assert.equal(hit.multiplier, 1);
+    assert.ok(Number.isFinite(hit.stars));
+    assert.equal(hit.spActive, false);
+    assert.ok(Number.isFinite(hit.spAmount));
+    assert.equal(hit.noteTime, 1);
+    assert.ok(!('wall' in hit), 'no wall clock');
+    const miss = got.find(d => d.type === 'miss');
+    assert.ok(miss, 'a miss');
+    assert.equal(miss.combo, 0);
+    assert.equal(miss.noteTime, 2);
+    assert.ok(!('wall' in miss));
+    assert.ok(got.indexOf(hit) < got.indexOf(miss));
+    assert.ok(!got.some(d => d.type === 'combo-break'), 'combo-break is recorded but not handed on');
+    s.setOnEvent(null);
+    s.update(0.2); s.update(1); s.hit(1, 1);
+    assert.equal(got.filter(d => d.type === 'hit').length, 1, 'null removes the listener');
+});
+
+test('a throwing listener never breaks scoring', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    s.setOnEvent(() => { throw new Error('boom'); });
+    s.update(0);
+    s.update(1); s.hit(1, 1);
+    assert.equal(s.getState().notesHit, 1);
+    s.update(2); s.hit(2, 1);
+    assert.equal(s.getState().notesHit, 2);
+});

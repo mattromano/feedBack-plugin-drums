@@ -899,3 +899,14 @@ test('band API: setMidiInput saves the pick as a manual choice', () => {
     assert.equal(JSON.stringify(writes), snap);
     assert.equal(mod._cfg().midiInputId, '');
 });
+
+// ── Public bus events (drums:hit / miss / overhit / star power) ──
+test('_bandEventDetail adds the canvas and keeps the payload', () => {
+    const mod = freshPlugin();
+    const c = {};
+    const d = { type: 'hit', points: 60 };
+    const out = mod._bandEventDetail(d, c);
+    assert.deepEqual(out, { type: 'hit', points: 60, canvas: c });
+    assert.equal(out.canvas, c);
+    assert.deepEqual(d, { type: 'hit', points: 60 }, 'the input is not mutated');
+});

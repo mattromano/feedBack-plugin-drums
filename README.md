@@ -322,6 +322,26 @@ Click "Reset Map" to return to standard GM mapping.
 - `setMidiInput(logicalSourceKey)` picks the MIDI input like the settings dropdown does, saved as a manual choice. `''` is "None". Non-strings are ignored.
 - `getInstanceState(canvas)` returns that lane's scoring state, or `null`.
 
+## Events for other plugins
+
+Every drum view emits its judgments and star power on core's event bus (`window.feedBack.on(...)`):
+`drums:hit`, `drums:miss`, `drums:overhit`, `drums:sp-phrase`, `drums:sp-phrase-fail`, `drums:sp-ready`,
+`drums:sp-activate` and `drums:sp-end`. Several drum views can be live at once (split view, the band
+stage) and all emit on the same bus, so filter by `canvas`: `detail.canvas` is the emitting view's highway
+canvas.
+
+Each `detail` holds:
+
+- `type` (`hit`, `miss`, ...) and `time` (player seconds);
+- the engine state after the event: `multiplier` (doubled while star power is active), `score` (the
+  engine's score, without the plugin's bonuses), `stars`, `combo`, `spActive` and `spAmount` (the star
+  power meter, 0..1);
+- hits: `pad`, `cymbal`, `id`, `sp`, `bonus`, `offsetMs`, `noteTime` and `points` (what the hit added:
+  engine score plus the plugin's timing / roll bonuses);
+- misses: `pad`, `cymbal`, `id` and `noteTime`; overhits: `pad` and `cymbal`.
+
+`combo-break` is not emitted: the `combo` on each event shows a broken streak.
+
 ## Development
 
 Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node --test tests/*.test.js`, or one

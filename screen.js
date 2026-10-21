@@ -2055,6 +2055,12 @@ function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
     if (_VALID_DIFFICULTIES.has(bandId)) return bandId;
     return null;
 }
+// Public bus events: each session judgment / star power event goes out as
+// 'drums:<type>' with the lane's canvas, so listeners can filter by canvas.
+const _BAND_EVENT_TYPES = new Set(['hit', 'miss', 'overhit', 'sp-phrase', 'sp-phrase-fail', 'sp-ready', 'sp-activate', 'sp-end']);
+function _bandEventDetail(detail, canvas) {
+    return { ...detail, canvas };
+}
 function _instanceForCanvas(canvas) {
     if (!canvas) return null;
     for (const i of _instances) {
@@ -2688,6 +2694,12 @@ function createFactory(forceView) {
                             inputOffsetMs: _cfg.inputOffsetMs || 0, canvas: _highwayCanvas,
                         } }));
                     } catch (_) { /* listeners only */ }
+                });
+                // Judgments and star power on core's bus (drums:hit, drums:miss, ...).
+                _session.setOnEvent((d) => {
+                    const bus = _bus();
+                    if (!bus || typeof bus.emit !== 'function' || !d || !_BAND_EVENT_TYPES.has(d.type)) return;
+                    try { bus.emit('drums:' + d.type, _bandEventDetail(d, _highwayCanvas)); } catch (_) { /* listeners only */ }
                 });
             }
         }).catch((e) => console.warn('[Drums] scoring unavailable (engine/session failed to load):', e));
@@ -5346,7 +5358,7 @@ if (typeof module !== 'undefined' && module.exports) {
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
-        _bandDifficultyFor, _resolveOwnDifficulty,
+        _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
