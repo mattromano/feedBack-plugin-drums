@@ -833,3 +833,16 @@ test('band API: setDifficulty without canvas is global; getInstanceState reads e
     assert.deepEqual(window.feedBackDrums.getInstanceState(c1), { score: 7 });
     assert.equal(window.feedBackDrums.getInstanceState({}), null);
 });
+
+test('band API: setDifficulty with an unmatched canvas leaves the global difficulty alone', () => {
+    const mod = freshPlugin();
+    let changed = 0;
+    mod._instances.add(fakeInst({}, { _difficultyChanged: () => changed++ }));
+    window.feedBackDrums.setDifficulty('medium');
+    assert.equal(mod._difficultyPref(), 'medium');
+    changed = 0;
+    // A lane canvas the plugin never mounted on (or one already torn down).
+    window.feedBackDrums.setDifficulty('easy', {});
+    assert.equal(mod._difficultyPref(), 'medium');
+    assert.equal(changed, 0);
+});

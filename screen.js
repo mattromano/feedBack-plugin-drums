@@ -4731,10 +4731,14 @@ if (typeof window !== 'undefined') {
     // Public API for the band stage: pin kit hits and difficulty to one lane.
     window.feedBackDrums = {
         setInputTarget: (canvas) => _setInputTarget(canvas),
+        // With a canvas, sets that lane only; a canvas no instance owns (not
+        // mounted yet, or torn down) is a no-op, never a global change. Only
+        // canvas == null sets the global difficulty.
         setDifficulty: (id, canvas) => {
             if (!_VALID_DIFFICULTIES.has(id)) return;
+            if (canvas == null) { _setDifficulty(id); return; }
             const inst = _instanceForCanvas(canvas);
-            if (inst) inst._setOwnDifficulty(id); else _setDifficulty(id);
+            if (inst) inst._setOwnDifficulty(id);
         },
         getInstanceState: (canvas) => {
             const inst = _instanceForCanvas(canvas);
