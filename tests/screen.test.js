@@ -1704,7 +1704,7 @@ test('the Drums screen Back survives a throwing showScreen', () => {
 
 function cardElement(tag) {
     const el = {
-        tagName: String(tag).toUpperCase(), children: [], style: {}, dataset: {}, listeners: {}, parentNode: null,
+        tagName: String(tag).toUpperCase(), children: [], style: { setProperty() {} }, dataset: {}, listeners: {}, parentNode: null,
         textContent: '', value: '', disabled: false, hidden: false, className: '',
         appendChild(c) { if (c.parentNode) c.remove(); c.parentNode = el; el.children.push(c); return c; },
         append(...cs) { for (const c of cs) el.appendChild(c); },
@@ -1780,45 +1780,78 @@ test('opening the Drums screen without core\'s gamepad-input shows a note and lo
     mod._padCardClose();
 });
 
-test('a saved binding refreshes the sources', async () => {
-    const gi = fakeGi([KIT, XBOX]);
+// A page whose every [data-dr] lookup is a fake element (the real screen.html isn't loaded); padList is `list`.
+function fullPage(mod, list) {
+    const els = new Map();
+    const get = (sel) => {
+        if (sel.includes('"padList"')) return list;
+        if (!els.has(sel)) {
+            const e = cardElement('div');
+            e.options = []; e.checked = false; e.style = { setProperty() {}, removeProperty() {} }; e.classList = { add() {}, remove() {}, contains: () => false };
+            e.querySelector = () => null; e.querySelectorAll = () => [];
+            els.set(sel, e);
+        }
+        return els.get(sel);
+    };
+    mod._testPage({ querySelector: get, querySelectorAll: () => [], classList: { contains: () => false } });
+}
+
+test('a saved binding refreshes the sources: the card drives the free source and every instance', async () => {
+    const gi = fakeGi([XBOX]);
+    const { mod, sessions } = realPlugin({ gi });
+    document.createElement = cardElement;
+    document.getElementById = () => null;
+    const list = cardElement('div');
+    fullPage(mod, list);
+    const v = await liveView();
+    v.draw(drumBundle());
+    await tick();
+    gi.button(0, 1);   // the free pad hits: engaged, standard layout, no cymbals -> pro off
+    const s = sessions[0];
+    assert.equal(s.pro[s.pro.length - 1], false);
+    gi.button(0, 0);
+    mod._pageSetVisible(true);   // the screen opens: through the real hook
+    await tick(); await tick();
+    assert.equal(gi.owner(0), 'drums.controls');
+    assert.equal(cardCount(list, 'padCard'), 1);
+    let refreshed = 0;
+    const spy = { _refreshPad: () => { refreshed++; } };
+    mod._instances.add(spy);
+    // Set the pad up as a kit with every action (cymbals included) through the card.
+    cardFind(list, 'setupKit').fire('click');
+    for (let i = 0; i < 10; i++) gi.button(10 + i, 1, 0, i + 1);
+    mod._instances.delete(spy);
+    assert.equal(GP.loadBindings()[XBOX.id + '#1'].kind, 'kit');
+    assert.equal(refreshed, 1, 'the card\'s save refreshed every instance');
+    assert.equal(s.pro[s.pro.length - 1], true, 'the free source re-resolved: a kit with cymbals plays pro');
+    // Rebinding goes through the same hook.
+    mod._instances.add(spy);
+    cardFind(list, 'padRebindAction').value = 'kick';
+    cardFind(list, 'padRebind').fire('click');
+    gi.button(40, 1, 0, 99);
+    mod._instances.delete(spy);
+    assert.equal(refreshed, 2);
+    mod._pageSetVisible(false);   // leaving: the card is gone and the free source claims again
+    assert.equal(list.children.length, 0);
+    assert.equal(gi.owner(0), 'drums');
+    v.destroy();
+});
+
+test('a pinned lane re-resolves its binding when the card saves one (instance _refreshPad)', async () => {
+    const gi = fakeGi([KIT]);
     const store = memStore({ [GP.BINDINGS_KEY]: JSON.stringify({ [KIT.id + '#1']: KIT_BINDING }) });
     const { api, mod, sessions } = realPlugin({ gi, store });
-    document.createElement = cardElement;
-    const list = pageWithList(mod);
-    // A band lane plays the kit (no cymbal bound beyond yellow: it has cymbals); a free view is on screen.
     const lane = fakeCanvas();
     api.setController(KIT.id + '#1', lane);
     const pinned = await liveView(lane);
     pinned.draw(drumBundle());
     await tick();
-    const laneSession = sessions[sessions.length - 1];
-    assert.equal(laneSession.pro.concat(laneSession.opts.proDrums).pop(), true, 'a kit with a yellow cymbal: pro on');
-    mod._padCardOpen();
-    await tick(); await tick();
-    assert.equal(gi.owner(0), 'drums', 'the lane keeps the kit');
-    // The card sets the Xbox pad up as a kit with no cymbals, and rebinds the kit: save through the card.
-    cardFind(list, 'setupKit').fire('click');
-    let t = 1;
-    for (const a of ['red_pad', 'yellow_pad', 'blue_pad', 'green_pad', 'kick']) gi.button(10 + t, 1, 1, t++);
-    for (let i = 0; i < 4; i++) cardFind(list, 'padSkip').fire('click');   // three cymbals + star power
-    gi.button(30, 1, 1, 50);   // pause
-    assert.equal(GP.loadBindings()[XBOX.id + '#1'].kind, 'kit');
-    // Drop the lane's yellow cymbal in storage and save a binding for it: the lane's source re-resolves.
+    const s = sessions[sessions.length - 1];
+    assert.equal(s.opts.proDrums, true, 'the kit binds a yellow cymbal');
     const noCym = { kind: 'kit', map: Object.assign({}, KIT_BINDING.map) };
     delete noCym.map.yellow_cymbal;
     GP.saveBinding(KIT.id + '#1', noCym);
-    mod._padBindingSaved();
-    assert.equal(laneSession.pro[laneSession.pro.length - 1], false, 'the lane now plays with pro drums off');
-    // A saved offset is stored for that controller (clamped) and every view re-applies its own.
-    let reapplied = 0;
-    const spy = { _inputOffsetChanged: () => { reapplied++; } };
-    mod._instances.add(spy);
-    cardFind(list, 'padOffset').value = '47';
-    cardFind(list, 'padOffset').fire('change');
-    mod._instances.delete(spy);
-    assert.equal(GP.loadSettings().offsetMs[XBOX.id + '#1'], 45);
-    assert.equal(reapplied, 1);
-    mod._padCardClose();
+    pinned._refreshPad();
+    assert.equal(s.pro[s.pro.length - 1], false, 'the lane now plays with pro drums off');
     pinned.destroy();
 });

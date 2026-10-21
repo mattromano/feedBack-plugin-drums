@@ -5120,12 +5120,6 @@ function createFactory(forceView) {
         _proCymbalsChanged,
         _assistsChanged,
         _inputOffsetChanged,
-        // A binding was saved on the Controllers card: a pinned lane's source re-resolves
-        // its binding, then this view re-applies its pro drums and offset.
-        _padRefresh() {
-            if (_padSource) { try { _padSource.refresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); } }
-            _padChanged();
-        },
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         _engineState() { return _session ? _session.getState() : null; },
@@ -5914,7 +5908,7 @@ function _padBindingSaved() {
     if (_freePad) { try { _freePad.refresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); } }
     _freePadChanged();
     for (const inst of _instances) {
-        try { if (inst._padRefresh) inst._padRefresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); }
+        try { if (inst._refreshPad) inst._refreshPad(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); }
     }
 }
 // A controller's input offset was saved: every view re-applies its own.
@@ -6035,7 +6029,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _engineVelocity, _loadScoring, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
         _loadGamepad, _effectivePro, _effectiveOffset, _freePadWanted, _spHint, _setPadControlsOpen,
         _bandControllerFor, _bandControllerCanvases, _pageBack,
-        _padCardOpen, _padCardClose, _padBindingSaved, _testPage: (el) => { _page = el; _pageRefs = null; },
+        _pageSetVisible, _padCardOpen, _padCardClose, _testPage: (el) => { _page = el; _pageRefs = null; },
     };
 }
 

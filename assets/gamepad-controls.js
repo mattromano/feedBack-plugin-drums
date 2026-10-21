@@ -233,16 +233,18 @@
         }
 
         function buildCard(info, nth, key, bindings, settings) {
+            const h = claim(info.index);
+            if (!h) return null;   // taken between list() and claim()
+            // The claim's controllerKey is the authority (it can differ when a twin's key is held).
+            if (typeof h.controllerKey === 'string' && h.controllerKey) key = h.controllerKey;
             const card = {
                 info, nth, key, handle: null, claimedBy: null, binding: G.resolveBinding(info, bindings[key]),
                 mapper: null, lights: {}, recorder: null, recording: null, onEvent: null,
             };
-            const h = claim(info.index);
-            if (!h) return null;   // taken between list() and claim()
             card.handle = h;
             card.claimedBy = owner;
             card.mapper = card.binding ? G.createMapper(card.binding) : null;
-            const m = cardModel({ info, nth, binding: card.binding, offsetMs: settings.offsetMs[key] });
+            const m = cardModel({ info: Object.assign({}, info, { controllerKey: key }), nth, binding: card.binding, offsetMs: settings.offsetMs[key] });
 
             const root = el('div', '');
             root.style.cssText = 'border-top:1px solid #1f2937;padding:.7rem 0;';
@@ -372,6 +374,11 @@
                 if (c) built.push(c);
             }
             cards = built;
+            // Replace the DOM only when the card set changed: a focused input or open select survives
+            // the change events other pads' claims fire.
+            const same = cards.length && list.children.length === cards.length
+                && cards.every((c, i) => list.children[i] === c.el);
+            if (same) return;
             if (cards.length) list.replaceChildren(...cards.map((c) => c.el));
             else {
                 list.replaceChildren(note(connected

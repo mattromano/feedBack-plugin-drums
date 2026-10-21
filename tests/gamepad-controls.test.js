@@ -327,3 +327,31 @@ test('a card shows the controller\'s stored offset', (t) => {
     assert.equal(find(list, 'padOffset').value, '-15');
     card.destroy();
 });
+
+test('card: a change event that leaves the cards as they are does not rebuild the list', (t) => {
+    const env = setup(t, [XBOX, KIT]);
+    let replaced = 0;
+    const orig = env.list.replaceChildren;
+    env.list.replaceChildren = (...a) => { replaced++; return orig(...a); };
+    const first = env.list.children.slice();
+    env.gi.change('claim', 5);
+    env.gi.change('release', 5);
+    assert.equal(replaced, 0, 'a focused input keeps its place');
+    assert.deepEqual(env.list.children, first);
+});
+
+test('card: the claim\'s controllerKey is the card\'s key', (t) => {
+    const env = setup(t, [XBOX]);
+    env.card.destroy();
+    const gi = fakeGi([XBOX]);
+    const realClaim = gi.claim;
+    gi.claim = (i, o) => { const h = realClaim(i, o); return h && Object.assign(h, { controllerKey: 'Renumbered#2' }); };
+    const list = fakeElement('div');
+    const offsets = [];
+    const card = C.create({ G, gamepadInput: gi, list, owner: 'drums.controls', onOffsetSaved: (k, ms) => offsets.push([k, ms]) });
+    const input = find(list, 'padOffset');
+    input.value = '10';
+    input.fire('change');
+    assert.deepEqual(offsets, [['Renumbered#2', 10]]);
+    card.destroy();
+});
