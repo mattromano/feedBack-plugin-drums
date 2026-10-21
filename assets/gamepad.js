@@ -108,12 +108,14 @@
     // fresh press afterwards.
     function createMapper(binding) {
         const map = (binding && binding.map) || {};
+        const actions = Object.keys(map);   // hoisted: an event allocates only the returned array
         let down = Object.create(null);
         return {
             map(ev) {
                 const out = [];
                 if (!ev) return out;
-                for (const action of Object.keys(map)) {
+                for (let i = 0; i < actions.length; i++) {
+                    const action = actions[i];
                     const v = reading(map[action], ev);
                     if (v === null) continue;
                     const was = !!down[action];
