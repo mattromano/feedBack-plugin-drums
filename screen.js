@@ -2038,12 +2038,26 @@ function _refreshMidiStatus() {
     }, 150);
 }
 
+// Band mode pins kit hits to one lane's canvas, whatever focus says.
+// null (or a canvas with no live instance) = the default routing below.
+let _inputTargetCanvas = null;
+function _setInputTarget(canvas) { _inputTargetCanvas = canvas || null; }
+function _instanceForCanvas(canvas) {
+    if (!canvas) return null;
+    for (const i of _instances) {
+        try { if (i._canvas && i._canvas() === canvas) return i; } catch (_) { /* ignore */ }
+    }
+    return null;
+}
+
 // Which drum view gets kit hits. In split view focus starts on panel 1 and
 // moves on click, so a drum panel that wasn't clicked, or the hidden
 // main-player view, used to swallow them. Now: the focused drum view if it
 // is on screen, else the first drum view on screen, else whatever is
 // focused (single view, the settings page).
 function _routeTarget() {
+    const pinned = _instanceForCanvas(_inputTargetCanvas);
+    if (pinned) return pinned;
     const vis = [];
     for (const i of _instances) {
         try { if (i._isVisible && i._isVisible()) vis.push(i); } catch (_) { /* ignore */ }
@@ -4592,6 +4606,7 @@ function createFactory(forceView) {
         _difficultyChanged,
         _inSplit,
         _setOwnDifficulty,
+        _canvas() { return _highwayCanvas; },
         // Split view routing / results: is this drum view on screen, and its numbers.
         _isVisible() {
             const c = _highwayCanvas;
@@ -4712,6 +4727,19 @@ if (typeof window !== 'undefined') {
         kit: () => _sampleKit,
         diag: () => Object.assign({}, _midiDiag),
         routeTarget: () => _routeTarget(),
+    };
+    // Public API for the band stage: pin kit hits and difficulty to one lane.
+    window.feedBackDrums = {
+        setInputTarget: (canvas) => _setInputTarget(canvas),
+        setDifficulty: (id, canvas) => {
+            if (!_VALID_DIFFICULTIES.has(id)) return;
+            const inst = _instanceForCanvas(canvas);
+            if (inst) inst._setOwnDifficulty(id); else _setDifficulty(id);
+        },
+        getInstanceState: (canvas) => {
+            const inst = _instanceForCanvas(canvas);
+            try { return inst && inst._engineState ? inst._engineState() : null; } catch (_) { return null; }
+        },
     };
     // Split view: every drum panel's results on screen (for a results card).
     window.__drumsPanelResults = () => {
@@ -5279,7 +5307,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
-        _setDifficulty, _setAssist, _saveCfg, _routeTarget, PANEL_DIFF_PREFIX,
+        _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,

@@ -769,3 +769,67 @@ test('star power pad: drums_sp_pad_v1, off by default, any MIDI note 0..127', ()
     assert.equal(mod._cfg().spPad, -1);
     assert.equal(mod.SP_PAD_CHOICES[0][0], -1);
 });
+
+// ── Public band API (window.feedBackDrums) ──
+function fakeInst(canvas, extra) {
+    return Object.assign({
+        _canvas: () => canvas,
+        _isVisible: () => true,
+        _inSplit: () => false,
+        _setOwnDifficulty() {},
+        _engineState: () => ({ score: 7 }),
+    }, extra || {});
+}
+
+test('band API: input target overrides focus and visibility', () => {
+    const mod = freshPlugin();
+    const c1 = {}, c2 = {};
+    const a = fakeInst(c1), b = fakeInst(c2, { _isVisible: () => false });
+    mod._instances.add(a); mod._instances.add(b);
+    mod._setActiveInstance(a);
+    assert.equal(mod._routeTarget(), a);
+    mod._setInputTarget(c2);
+    assert.equal(mod._routeTarget(), b);
+});
+
+test('band API: null target restores default routing', () => {
+    const mod = freshPlugin();
+    const c1 = {}, c2 = {};
+    const a = fakeInst(c1), b = fakeInst(c2);
+    mod._instances.add(a); mod._instances.add(b);
+    mod._setInputTarget(c2);
+    mod._setInputTarget(null);
+    assert.equal(mod._routeTarget(), a);
+});
+
+test('band API: unknown canvas falls back to default routing', () => {
+    const mod = freshPlugin();
+    const a = fakeInst({});
+    mod._instances.add(a);
+    mod._setInputTarget({});
+    assert.equal(mod._routeTarget(), a);
+});
+
+test('band API: setDifficulty with canvas sets that instance only, even unsplit', () => {
+    const mod = freshPlugin();
+    const c1 = {}, c2 = {};
+    const got = [];
+    const a = fakeInst(c1, { _setOwnDifficulty: (id) => got.push(['a', id]) });
+    const b = fakeInst(c2, { _setOwnDifficulty: (id) => got.push(['b', id]) });
+    mod._instances.add(a); mod._instances.add(b);
+    window.feedBackDrums.setDifficulty('hard', c2);
+    window.feedBackDrums.setDifficulty('bogus', c2);
+    assert.deepEqual(got, [['b', 'hard']]);
+});
+
+test('band API: setDifficulty without canvas is global; getInstanceState reads engine state', () => {
+    const mod = freshPlugin();
+    const c1 = {};
+    let changed = 0;
+    mod._instances.add(fakeInst(c1, { _difficultyChanged: () => changed++ }));
+    window.feedBackDrums.setDifficulty('easy');
+    assert.equal(mod._difficultyPref(), 'easy');
+    assert.equal(changed, 1);
+    assert.deepEqual(window.feedBackDrums.getInstanceState(c1), { score: 7 });
+    assert.equal(window.feedBackDrums.getInstanceState({}), null);
+});
