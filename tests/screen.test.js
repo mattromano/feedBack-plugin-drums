@@ -968,3 +968,27 @@ test('hidden score display: the run still records its personal best (not in spli
     assert.equal(mod._recordRunBest(session(0, 0, 0), badge), null);
     assert.equal(mod._drumsRunTotal(session(3, 10, 0), null).diff, 'EXPERT');
 });
+
+test('_modalOpen finds an open modal dialog', () => {
+    const mod = freshPlugin();
+    let seen = null;
+    assert.equal(mod._modalOpen({ querySelector: (s) => { seen = s; return {}; } }), true);
+    assert.equal(seen, '[aria-modal="true"], .feedBack-modal');
+    assert.equal(mod._modalOpen({ querySelector: () => null }), false);
+    assert.equal(mod._modalOpen(null), false);
+    assert.equal(mod._modalOpen({}), false);
+    assert.equal(mod._modalOpen({ querySelector: () => { throw new Error('boom'); } }), false);
+});
+
+test('drum, star power and difficulty keys stand down under a modal', () => {
+    const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'screen.js'), 'utf8');
+    for (const name of ['_onKeyDown', '_onSpKey', '_onDiffKey']) {
+        const start = src.indexOf(`${name} = (e) =>`);
+        assert.ok(start >= 0, `${name} handler found`);
+        const body = src.slice(start);
+        const modal = body.indexOf('_modalOpen(document)');
+        const prevent = body.indexOf('e.preventDefault()');
+        assert.ok(modal >= 0, `${name} checks _modalOpen(document)`);
+        assert.ok(modal < prevent, `${name} checks the modal before preventDefault`);
+    }
+});

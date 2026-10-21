@@ -88,6 +88,7 @@ that want one view regardless of the setting (not in the picker).
 
 The keys work only while the drum view is visible and focused (in splitscreen: the focused panel), and not
 while you type in a text field. Space stays play/pause; D / Shift+D change the difficulty.
+The drum keys, Enter (star power) and D are ignored while a modal dialog is open (the band results, a confirm dialog).
 
 ## Scoring
 

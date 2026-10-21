@@ -2081,6 +2081,16 @@ function _instanceForCanvas(canvas) {
     return null;
 }
 
+// True while a modal dialog is open (band results, Settings overlay, a confirm
+// dialog). Drum, star power and difficulty keys stand down so they can't leak
+// into it.
+function _modalOpen(doc) {
+    try {
+        return !!(doc && typeof doc.querySelector === 'function'
+            && doc.querySelector('[aria-modal="true"], .feedBack-modal'));
+    } catch (_) { return false; }
+}
+
 // Which drum view gets kit hits. In split view focus starts on panel 1 and
 // moves on click, so a drum panel that wasn't clicked, or the hidden
 // main-player view, used to swallow them. Now: the focused drum view if it
@@ -2595,6 +2605,7 @@ function createFactory(forceView) {
             .catch((e) => console.warn('[Drums] keyboard input unavailable:', e));
         _onKeyDown = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_cfg.keyboard) return;
+            if (_modalOpen(document)) return;
             if (!_V || !_h || !_session) return;
             if (_h.isTypingTarget(e.target) || _h.isTypingTarget(document.activeElement)) return;
             const m = _V.keyToPad(e);
@@ -3130,6 +3141,7 @@ function createFactory(forceView) {
         if (_onSpKey) return;
         _onSpKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h || !_session) return;
+            if (_modalOpen(document)) return;
             if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.key !== 'Enter') return;
             if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
             const H = _h;
@@ -3151,6 +3163,7 @@ function createFactory(forceView) {
         if (_onDiffKey) return;
         _onDiffKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h) return;
+            if (_modalOpen(document)) return;
             const H = _h;
             if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
             const k = H.isDifficultyKey(e);
@@ -5402,7 +5415,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
-        _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
+        _setDifficulty, _setAssist, _saveCfg, _routeTarget, _modalOpen, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
