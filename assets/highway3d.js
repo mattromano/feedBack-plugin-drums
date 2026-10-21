@@ -283,7 +283,8 @@
      *     its css-px rect after the frame (screen.js overlays a clickable button there)
      *     inputOffsetMs: the player's input offset, for the early/late meter's suggestion; the
      *     meter's Apply pill is at view.timingRect, for the offset view.timingSuggest
-     *     hideScore: true leaves the HUD overlay empty (band mode shows the score itself)
+     *     hideScore: true hides the score HUD (band mode shows the score itself); the difficulty
+     *     badge is still drawn
      *   view.dispose()
      *   view.fxSnapshot(): the hit FX of the last frame ({trail: [{state, kind, alpha, z}], sparksLive,
      *     sparksBorn, flash, flashHit, pops, popPool, bursts, ring, breakWash}) for tests and debugging
