@@ -1015,6 +1015,7 @@ test('drum, star power and difficulty keys stand down under a modal', () => {
 const ASSETS = path.join(__dirname, '..', 'assets');
 const GP = require(path.join(ASSETS, 'gamepad.js'));
 const GPS = require(path.join(ASSETS, 'gamepad-source.js'));
+const GPC = require(path.join(ASSETS, 'gamepad-controls.js'));
 
 function memStore(init) {
     const m = new Map(Object.entries(init || {}));
@@ -1108,6 +1109,7 @@ function realPlugin({ gi, store } = {}) {
     window.DrumsHighway3D = require(path.join(ASSETS, 'highway3d.js'));
     window.DrumsGamepad = GP;
     window.DrumsGamepadSource = GPS;
+    window.DrumsGamepadControls = GPC;
     const file = path.join(__dirname, '..', 'screen.js');
     delete require.cache[require.resolve(file)];
     const mod = require(file);
@@ -1696,4 +1698,127 @@ test('the Drums screen Back survives a throwing showScreen', () => {
     console.warn = (...a) => warned.push(a);
     try { mod._pageBack(); } finally { console.warn = warn; }
     assert.equal(warned.length, 1);
+});
+
+// ── The Controllers card on the Drums screen ──
+
+function cardElement(tag) {
+    const el = {
+        tagName: String(tag).toUpperCase(), children: [], style: {}, dataset: {}, listeners: {}, parentNode: null,
+        textContent: '', value: '', disabled: false, hidden: false, className: '',
+        appendChild(c) { if (c.parentNode) c.remove(); c.parentNode = el; el.children.push(c); return c; },
+        append(...cs) { for (const c of cs) el.appendChild(c); },
+        replaceChildren(...cs) { for (const c of el.children.slice()) c.remove(); for (const c of cs) el.appendChild(c); },
+        remove() { const p = el.parentNode; if (p) { p.children.splice(p.children.indexOf(el), 1); el.parentNode = null; } },
+        setAttribute() {},
+        addEventListener(type, fn) { (el.listeners[type] || (el.listeners[type] = [])).push(fn); },
+        fire(type) { for (const fn of (el.listeners[type] || []).slice()) fn({ type, target: el }); },
+    };
+    return el;
+}
+function cardFind(root, dr) {
+    if (root.dataset && root.dataset.dr === dr) return root;
+    for (const c of root.children) { const r = cardFind(c, dr); if (r) return r; }
+    return null;
+}
+function cardCount(root, dr) {
+    return (root.dataset && root.dataset.dr === dr ? 1 : 0) + root.children.reduce((n, c) => n + cardCount(c, dr), 0);
+}
+// Gives the Drums screen's page a Controllers list over a fake Controllers list element.
+function pageWithList(mod) {
+    const list = cardElement('div');
+    mod._testPage({ querySelector: (sel) => (sel.includes('"padList"') ? list : null), querySelectorAll: () => [] });
+    return list;
+}
+const PAD2 = { id: 'Second Pad (STANDARD GAMEPAD)', mapping: 'standard' };
+
+test('opening the Drums screen releases the free claim and keeps pinned claims; the card never claims a pinned controller; leaving lets the free source claim again', async () => {
+    const gi = fakeGi([XBOX, PAD2]);
+    const { api, mod } = realPlugin({ gi });
+    document.createElement = cardElement;
+    const list = pageWithList(mod);
+    const v = await liveView();
+    v.draw(drumBundle());
+    await tick();
+    assert.equal(gi.owner(0), 'drums', 'the free source holds the first pad');
+    mod._padCardOpen();
+    await tick(); await tick();
+    assert.equal(gi.owner(0), 'drums.controls', 'the free claim is released and the card has the pad');
+    assert.equal(gi.owner(1), 'drums.controls');
+    assert.equal(cardCount(list, 'padCard'), 2);
+    mod._padCardClose();
+    assert.equal(gi.owner(1), null, 'the card let go');
+    assert.equal(gi.owner(0), 'drums', 'the free source claims again');
+    assert.equal(list.children.length, 0);
+    // A band lane pins the second pad: it keeps its claim while the card is open.
+    const lane = fakeCanvas();
+    api.setController(PAD2.id + '#1', lane);
+    const pinned = await liveView(lane);
+    await tick();
+    assert.equal(gi.owner(1), 'drums', 'the lane\'s claim');
+    assert.equal(gi.owner(0), null, 'a band pin: the free source claims nothing');
+    mod._padCardOpen();
+    await tick(); await tick();
+    assert.equal(gi.owner(1), 'drums', 'the pinned claim is kept');
+    assert.equal(gi.owner(0), 'drums.controls');
+    assert.equal(cardCount(list, 'padCard'), 1, 'only the unpinned controller has a card');
+    mod._padCardClose();
+    assert.equal(gi.owner(1), 'drums');
+    assert.equal(gi.owner(0), null);
+    api.clearController(lane);
+    assert.equal(gi.owner(0), 'drums', 'no pin left: the free source claims again');
+    pinned.destroy(); v.destroy();
+});
+
+test('opening the Drums screen without core\'s gamepad-input shows a note and loads nothing', async () => {
+    const { mod } = realPlugin({});
+    document.createElement = cardElement;
+    const list = pageWithList(mod);
+    mod._padCardOpen();
+    await tick();
+    assert.match(list.textContent, /newer feedBack/);
+    mod._padCardClose();
+});
+
+test('a saved binding refreshes the sources', async () => {
+    const gi = fakeGi([KIT, XBOX]);
+    const store = memStore({ [GP.BINDINGS_KEY]: JSON.stringify({ [KIT.id + '#1']: KIT_BINDING }) });
+    const { api, mod, sessions } = realPlugin({ gi, store });
+    document.createElement = cardElement;
+    const list = pageWithList(mod);
+    // A band lane plays the kit (no cymbal bound beyond yellow: it has cymbals); a free view is on screen.
+    const lane = fakeCanvas();
+    api.setController(KIT.id + '#1', lane);
+    const pinned = await liveView(lane);
+    pinned.draw(drumBundle());
+    await tick();
+    const laneSession = sessions[sessions.length - 1];
+    assert.equal(laneSession.pro.concat(laneSession.opts.proDrums).pop(), true, 'a kit with a yellow cymbal: pro on');
+    mod._padCardOpen();
+    await tick(); await tick();
+    assert.equal(gi.owner(0), 'drums', 'the lane keeps the kit');
+    // The card sets the Xbox pad up as a kit with no cymbals, and rebinds the kit: save through the card.
+    cardFind(list, 'setupKit').fire('click');
+    let t = 1;
+    for (const a of ['red_pad', 'yellow_pad', 'blue_pad', 'green_pad', 'kick']) gi.button(10 + t, 1, 1, t++);
+    for (let i = 0; i < 4; i++) cardFind(list, 'padSkip').fire('click');   // three cymbals + star power
+    gi.button(30, 1, 1, 50);   // pause
+    assert.equal(GP.loadBindings()[XBOX.id + '#1'].kind, 'kit');
+    // Drop the lane's yellow cymbal in storage and save a binding for it: the lane's source re-resolves.
+    const noCym = { kind: 'kit', map: Object.assign({}, KIT_BINDING.map) };
+    delete noCym.map.yellow_cymbal;
+    GP.saveBinding(KIT.id + '#1', noCym);
+    mod._padBindingSaved();
+    assert.equal(laneSession.pro[laneSession.pro.length - 1], false, 'the lane now plays with pro drums off');
+    // A saved offset is stored for that controller (clamped) and every view re-applies its own.
+    let reapplied = 0;
+    const spy = { _inputOffsetChanged: () => { reapplied++; } };
+    mod._instances.add(spy);
+    cardFind(list, 'padOffset').value = '47';
+    cardFind(list, 'padOffset').fire('change');
+    mod._instances.delete(spy);
+    assert.equal(GP.loadSettings().offsetMs[XBOX.id + '#1'], 45);
+    assert.equal(reapplied, 1);
+    mod._padCardClose();
+    pinned.destroy();
 });

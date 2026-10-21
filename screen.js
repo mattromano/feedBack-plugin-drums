@@ -883,6 +883,28 @@ function _loadGamepad() {
     return _gamepadPromise;
 }
 
+// gamepad-controls.js (the Controllers card), on the Drums screen's first visit
+// with core's gamepad-input domain. Resolves { G, C }.
+let _controlsPromise = null;
+function _loadGamepadControls() {
+    if (window.DrumsGamepadControls) {
+        return _loadGamepad().then(({ G }) => ({ G, C: window.DrumsGamepadControls }));
+    }
+    if (_controlsPromise) return _controlsPromise;
+    const url = PLUGIN_ASSETS + 'gamepad-controls.js?v=' + ASSET_VERSION;
+    _controlsPromise = _loadGamepad()
+        .then(({ G }) => _loadScript(url).then(() => {
+            if (!window.DrumsGamepadControls) throw new Error('gamepad-controls.js did not register');
+            return { G, C: window.DrumsGamepadControls };
+        }))
+        .catch((e) => {
+            _controlsPromise = null;   // as _loadScoring: allow a retry
+            if (!window.DrumsGamepadControls) _dropScript(url);
+            throw e;
+        });
+    return _controlsPromise;
+}
+
 // highway3d.js (keyboard helpers + the 3D view; needs session.js). One
 // shared promise: the 2D view loads it for the keyboard helpers and the 3D
 // view for the scene, and _loadScript resolves early for a <script> tag
@@ -5098,6 +5120,12 @@ function createFactory(forceView) {
         _proCymbalsChanged,
         _assistsChanged,
         _inputOffsetChanged,
+        // A binding was saved on the Controllers card: a pinned lane's source re-resolves
+        // its binding, then this view re-applies its pro drums and offset.
+        _padRefresh() {
+            if (_padSource) { try { _padSource.refresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); } }
+            _padChanged();
+        },
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         _engineState() { return _session ? _session.getState() : null; },
@@ -5871,6 +5899,63 @@ function _resetDrumSettings() {
     _saveCfg('hitDetection', false);
 }
 
+// ── The Controllers card (assets/gamepad-controls.js) ──
+// Open while the Drums screen is visible. The free source stands down for
+// the visit (_padControlsOpen); band lanes keep their claims and the card
+// never lists a controller pinned to one.
+const _padCard = { visit: 0, card: null };
+function _controllerPinnedToLane(key) {
+    for (const c of _bandControllerCanvases) if (_bandController.get(c) === key) return true;
+    return false;
+}
+// A binding was saved: every source re-resolves it, every view re-applies
+// its pro drums and offset.
+function _padBindingSaved() {
+    if (_freePad) { try { _freePad.refresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); } }
+    _freePadChanged();
+    for (const inst of _instances) {
+        try { if (inst._padRefresh) inst._padRefresh(); } catch (e) { console.warn('[Drums] controller refresh failed:', e); }
+    }
+}
+// A controller's input offset was saved: every view re-applies its own.
+function _padOffsetSaved(G, C, key, ms) {
+    try { G.setOffset(key, C.clampOffset(ms)); } catch (_) { /* storage */ }
+    for (const inst of _instances) {
+        try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+    }
+}
+function _padCardNote(list, text) {
+    if (list) list.textContent = text;
+}
+function _padCardOpen() {
+    _setPadControlsOpen(true);   // the free source lets go before the card claims
+    const list = _pq('padList');
+    if (!list) return;
+    const visit = ++_padCard.visit;
+    const gi = _gamepadInput();
+    if (!gi) { _padCardNote(list, 'Controllers need a newer feedBack.'); return; }
+    _padCardNote(list, 'Loading…');
+    _loadGamepadControls().then(({ G, C }) => {
+        if (visit !== _padCard.visit) return;
+        _padCard.card = C.create({
+            G, gamepadInput: gi, list, owner: C.CONTROLS_OWNER, isPinned: _controllerPinnedToLane,
+            onBindingSaved: _padBindingSaved,
+            onOffsetSaved: (key, ms) => _padOffsetSaved(G, C, key, ms),
+        });
+    }).catch((e) => {
+        console.warn('[Drums] controllers card failed to load:', e);
+        if (visit === _padCard.visit) _padCardNote(list, 'The Controllers card failed to load.');
+    });
+}
+function _padCardClose() {
+    _padCard.visit++;
+    if (_padCard.card) {
+        try { _padCard.card.destroy(); } catch (e) { console.warn('[Drums] controllers card destroy failed:', e); }
+        _padCard.card = null;
+    }
+    _setPadControlsOpen(false);   // after the card's releases: the free source claims once
+}
+
 function _pageSetVisible(on) {
     if (on === _pageVisible) return;
     _pageVisible = on;
@@ -5882,7 +5967,9 @@ function _pageSetVisible(on) {
         _midiResumeHandler();
         _midiInit();
         _midiUpdateAllDeviceLists();
+        _padCardOpen();
     } else {
+        _padCardClose();
         _instances.delete(_pageInst);
         if (_activeInstance === _pageInst) _activeInstance = null;
         _cfg.learnLane = null;
@@ -5948,6 +6035,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _engineVelocity, _loadScoring, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
         _loadGamepad, _effectivePro, _effectiveOffset, _freePadWanted, _spHint, _setPadControlsOpen,
         _bandControllerFor, _bandControllerCanvases, _pageBack,
+        _padCardOpen, _padCardClose, _padBindingSaved, _testPage: (el) => { _page = el; _pageRefs = null; },
     };
 }
 

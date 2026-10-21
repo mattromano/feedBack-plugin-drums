@@ -112,6 +112,16 @@ kit can drum too, through core's gamepad-input domain:
   pad is unplugged while paused, or while a band lane is set.
 - Each controller has its own input offset (`drums.gamepad.settings.v1`); the timing meter's Apply sets
   that one while a controller plays. Bindings are stored in `drums.gamepad.bindings.v1`.
+- **Controllers card** (this screen, under Your kit): one card per connected controller, with silent lights
+  for the pads, kick, cymbals, star power and Start.
+  - *Set up as drum kit* asks you to hit each pad in turn (Skip is offered for cymbals and star power). Kits
+    that report a cymbal as a colour button plus a flag button are not supported: bind one control per action.
+  - *Use gamepad layout* goes back to the built-in layout on an Xbox-style pad, and walks the gamepad
+    actions on any other controller.
+  - *Rebind* changes one action and keeps the rest.
+  - *Input offset* is per controller (-250 to 250 ms, step 5).
+  - While the screen is open the normal player's controller stands down so the card can show it; a
+    controller a band lane plays is left alone and not listed.
 - Without core's gamepad-input domain (an older core) nothing changes.
 
 ## Scoring
