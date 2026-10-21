@@ -130,6 +130,13 @@ const STORE_KEYS = {
 // (drums_lane_preset_v1 is user-controlled, like every other storage key
 // in this plugin).
 const _VALID_LANE_PRESETS = new Set(['phase_shift_8', 'rb4']);
+// Input offset range in ms (session.js INPUT_OFFSET_MIN / MAX). The global
+// offset and each controller's own offset are normalised the same way.
+const INPUT_OFFSET_MIN = -250, INPUT_OFFSET_MAX = 250;
+function _normalizeOffsetMs(ms) {
+    const n = Math.round(Number(ms));
+    return Number.isFinite(n) ? Math.max(INPUT_OFFSET_MIN, Math.min(INPUT_OFFSET_MAX, n)) : 0;
+}
 const _VALID_VIEWS = new Set(['auto', '3d', '2d']);
 // Same ids as DrumsSession.DIFFICULTIES (session.js loads lazily).
 const DIFFICULTY_IDS = ['easy', 'medium', 'hard', 'expert', 'expert_plus'];
@@ -262,7 +269,7 @@ const _cfg = {
         return _VALID_LANE_PRESETS.has(raw) ? raw : 'phase_shift_8';
     })(),
     autoVolume:     _readNum(STORE_KEYS.autoVolume, 0.8, 0, 1),
-    inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, -250, 250)),
+    inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX)),
     spPad:          Math.round(_readNum(STORE_KEYS.spPad, -1, -1, 127)),
     difficulty:     (function () {
         const raw = _readStore(STORE_KEYS.difficulty);
@@ -344,10 +351,7 @@ function _saveCfg(key, val) {
     if (key === 'hhPedal' && val !== 'off') {
         val = 'auto';
     }
-    if (key === 'inputOffsetMs') {
-        const n = Math.round(Number(val));
-        val = Number.isFinite(n) ? Math.max(-250, Math.min(250, n)) : 0;
-    }
+    if (key === 'inputOffsetMs') val = _normalizeOffsetMs(val);
     if (key === 'spPad') {
         const n = Math.round(Number(val));
         val = Number.isFinite(n) && n >= 0 && n <= 127 ? n : -1;
@@ -831,7 +835,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.5.3';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.6.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -855,6 +859,28 @@ function _loadScoring() {
         throw e;
     });
     return _scoringPromise;
+}
+
+// gamepad.js + gamepad-source.js (controller drumming), on first need: a
+// renderer only asks for them when core's gamepad-input domain exists.
+let _gamepadPromise = null;
+function _loadGamepad() {
+    if (window.DrumsGamepad && window.DrumsGamepadSource) {
+        return Promise.resolve({ G: window.DrumsGamepad, S: window.DrumsGamepadSource });
+    }
+    if (_gamepadPromise) return _gamepadPromise;
+    const files = [['gamepad.js', 'DrumsGamepad'], ['gamepad-source.js', 'DrumsGamepadSource']];
+    const url = (name) => PLUGIN_ASSETS + name + '?v=' + ASSET_VERSION;
+    const want = (name, global) => (window[global] ? Promise.resolve() : _loadScript(url(name)));
+    _gamepadPromise = Promise.all(files.map(([name, global]) => want(name, global))).then(() => {
+        if (!window.DrumsGamepad || !window.DrumsGamepadSource) throw new Error('drums gamepad modules did not register');
+        return { G: window.DrumsGamepad, S: window.DrumsGamepadSource };
+    }).catch((e) => {
+        _gamepadPromise = null;   // as _loadScoring: allow a retry
+        for (const [name, global] of files) if (!window[global]) _dropScript(url(name));
+        throw e;
+    });
+    return _gamepadPromise;
 }
 
 // highway3d.js (keyboard helpers + the 3D view; needs session.js). One
@@ -2041,7 +2067,19 @@ function _refreshMidiStatus() {
 // Band mode pins kit hits to one lane's canvas, whatever focus says.
 // null (or a canvas with no live instance) = the default routing below.
 let _inputTargetCanvas = null;
-function _setInputTarget(canvas) { _inputTargetCanvas = canvas || null; }
+function _setInputTarget(canvas) { _inputTargetCanvas = canvas || null; _syncFreePad(); }
+// Band mode: a lane canvas played by one game controller (setController),
+// canvas -> controllerKey. Like the band difficulty it survives a re-init on
+// the same canvas and can be made before the instance exists. The Set counts
+// the pins, so the free source knows whether any exists (a WeakMap can't).
+const _bandController = new WeakMap();
+const _bandControllerCanvases = new Set();
+function _bandControllerFor(canvas) {
+    return (canvas && typeof canvas === 'object' && _bandController.get(canvas)) || null;
+}
+function _isControllerPinned(inst) {
+    try { return !!(inst && typeof inst._controllerPinned === 'function' && inst._controllerPinned()); } catch (_) { return false; }
+}
 // The band difficulty pinned to a lane canvas. Survives an instance
 // re-init on the same canvas (and a pin made before the instance exists).
 const _bandDifficulty = new WeakMap();
@@ -2058,8 +2096,120 @@ function _scoreHudHiddenFor(canvas) {
 function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && !hidden); }
 // Pure: the end card needs a session, no split view and the lane not hidden.
 function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && !hidden); }
-// Pure: a hidden lane (single view) skips the card but still records its personal best.
-function _shouldRecordBestOnly({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && hidden); }
+// Pure: a hidden lane (single view) skips the card but still records its personal
+// best, except a controller-pinned band lane, which never records one.
+function _shouldRecordBestOnly({ hasSession, ssActive, hidden, controllerPinned }) {
+    return !!(hasSession && !ssActive && hidden && !controllerPinned);
+}
+
+// ── Controller drumming (core gamepad-input, assets/gamepad*.js) ──
+// controller: a source's current() ({ controllerKey, hasCymbals, standardLayout, ... }) or null.
+
+// Pure: pro drums for a session. A controller without cymbals plays with pro
+// drums off, so cymbal notes fall on its pads instead of being unhittable.
+function _effectivePro({ proCymbals, controller }) {
+    return !!(proCymbals && (!controller || controller.hasCymbals));
+}
+// Pure: the input offset for a session: a controller's own (offsets is
+// DrumsGamepad.loadSettings().offsetMs), 0 for one with none; the global one
+// (cfgMs) without a controller.
+function _effectiveOffset({ cfgMs, controller, offsets }) {
+    const key = controller && controller.controllerKey;
+    if (typeof key !== 'string' || !key) return _normalizeOffsetMs(cfgMs);
+    const v = offsets && typeof offsets === 'object' && Object.prototype.hasOwnProperty.call(offsets, key) ? offsets[key] : undefined;
+    return typeof v === 'number' && Number.isFinite(v) ? _normalizeOffsetMs(v) : 0;
+}
+// Pure: the free (normal player) source claims only while an unpinned drum
+// view plays (wanters: a count or a Set), no band pin exists (an input target
+// or a controller lane) and the Controllers card is closed.
+function _freePadWanted({ wanters, inputTargetPinned, controllerPins, controlsOpen }) {
+    const n = typeof wanters === 'number' ? wanters : (wanters && wanters.size) || 0;
+    return n > 0 && !inputTargetPinned && !controllerPins && !controlsOpen;
+}
+// Pure: the star power hint (fills: the fill-end note; a controller: its button).
+function _spHint({ meta, controller, spPadName }) {
+    if (meta && Array.isArray(meta.activation) && meta.activation.length) return 'Hit the marked note at the end of the fill to activate';
+    if (controller) return controller.standardLayout ? 'Press Y to activate star power' : 'Press Star power to activate star power';
+    return 'Press Enter' + (spPadName ? ' or hit ' + spPadName : '') + ' to activate star power';
+}
+
+// Core's gamepad-input domain, or null (an older core: no controller drumming).
+function _gamepadInput() {
+    const fb = typeof window !== 'undefined' ? window.feedBack : null;
+    const gi = fb && fb.gamepadInput;
+    return gi && gi.version === 1 ? gi : null;
+}
+
+// The free source: one for the module, created on first need. Its hits go to
+// _routeTarget(), like the kit's. Instances whose _padWant() holds are in
+// _padWanters (each draw touches the Set only when its own answer changes).
+let _freePad = null;
+let _freePadLoading = false;
+const _padWanters = new Set();
+// The Controllers card on the Drums screen is open (Task A4 sets it): the
+// free source stands down while the card names the controllers.
+let _padControlsOpen = false;
+function _setPadControlsOpen(open) {
+    _padControlsOpen = !!open;
+    _syncFreePad();
+}
+
+function _freePadWantedNow() {
+    return _freePadWanted({
+        wanters: _padWanters.size,
+        inputTargetPinned: !!_inputTargetCanvas,
+        controllerPins: _bandControllerCanvases.size > 0,
+        controlsOpen: _padControlsOpen,
+    });
+}
+
+// Re-evaluate the free source's want; create it when first wanted.
+function _syncFreePad() {
+    const want = _freePadWantedNow();
+    if (_freePad) {
+        _freePad.setWanted(want);
+        _freePadChanged();   // our own claim fires no onChange
+        return;
+    }
+    if (!want || _freePadLoading || !_gamepadInput()) return;
+    _freePadLoading = true;
+    _loadGamepad().then(({ G, S }) => {
+        _freePadLoading = false;
+        const gi = _gamepadInput();
+        if (_freePad || !gi) return;
+        _freePad = S.createSource({
+            gamepadInput: gi, G, owner: 'drums',
+            onHit: _freePadHit, onActivate: _freePadActivate, onPause: _freePadPause, onChange: _freePadChanged,
+        });
+        _syncFreePad();
+    }).catch((e) => {
+        _freePadLoading = false;
+        console.warn('[Drums] controller input unavailable (gamepad modules failed to load):', e);
+    });
+}
+
+function _freePadHit(pad, cymbal, tsMs) {
+    const t = _routeTarget();
+    if (t && typeof t._handlePadHit === 'function') t._handlePadHit(pad, cymbal, tsMs);
+}
+function _freePadActivate(tsMs) {
+    const t = _routeTarget();
+    if (t && typeof t._activateSp === 'function') t._activateSp(tsMs);
+}
+// Start on the free pad: core's play/pause (resuming goes through core's menus).
+function _freePadPause() {
+    if (typeof window.togglePlay !== 'function') return;
+    try { window.togglePlay(); } catch (e) { console.warn('[Drums] togglePlay failed:', e); }
+}
+// The free source's controller changed (claimed, parked, (dis)connected):
+// every unpinned view re-applies its pro drums and input offset.
+function _freePadChanged() {
+    for (const inst of _instances) {
+        if (_isControllerPinned(inst)) continue;
+        try { if (inst._proCymbalsChanged) inst._proCymbalsChanged(); } catch (e) { console.warn('[Drums] pro cymbals update failed:', e); }
+        try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+    }
+}
 // Pure: which difficulty this instance pins for itself (null = follow global).
 // A split panel's own pick wins in split view; otherwise the band pin.
 function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
@@ -2113,16 +2263,18 @@ function _modalOpen(doc) {
 // main-player view, used to swallow them. Now: the focused drum view if it
 // is on screen, else the first drum view on screen, else whatever is
 // focused (single view, the settings page).
+// A controller-pinned band lane never gets them: it plays its own controller.
 function _routeTarget() {
     const pinned = _instanceForCanvas(_inputTargetCanvas);
-    if (pinned) return pinned;
+    if (pinned && !_isControllerPinned(pinned)) return pinned;
     const vis = [];
     for (const i of _instances) {
+        if (_isControllerPinned(i)) continue;
         try { if (i._isVisible && i._isVisible()) vis.push(i); } catch (_) { /* ignore */ }
     }
     if (_activeInstance && vis.includes(_activeInstance)) return _activeInstance;
     if (vis.length) return vis[0];
-    return _activeInstance;
+    return _activeInstance && !_isControllerPinned(_activeInstance) ? _activeInstance : null;
 }
 
 // ── MIDI monitor (Plugins → Drums) ──
@@ -2525,6 +2677,18 @@ function createFactory(forceView) {
     let _onVisibility = null, _onCanvasReplaced = null;
     let _hwVisible = true;
     let _onKeyDown = null;
+    // ── Controller drumming ──
+    // A band lane pinned to one controller (setController) has its own source;
+    // other views share the module's free source. _padCtl caches the driving
+    // source's current() (refreshed on its changes, never per frame).
+    let _padSource = null;          // DrumsGamepadSource for a pinned lane
+    let _padKey = null;             // the pinned controllerKey
+    let _padToken = 0;              // supersedes an in-flight pinned source load
+    let _padCtl = null;             // current() of the source driving this view
+    let _padStatus = '';            // pinned lane: "Controller disconnected" etc. ('' = none)
+    let _padWantNow = false;        // this view is in _padWanters
+    let _playing = false;           // bundle.isPlaying on the last ready frame
+    let _offsetMs = _cfg.inputOffsetMs;   // the input offset this view's session runs with
     let _onSongEnded = null;          // end-of-song card
     let _V = null;                  // DrumsHighway3D (keyboard helpers + 3D view factory) once loaded
 
@@ -2622,6 +2786,7 @@ function createFactory(forceView) {
             .catch((e) => console.warn('[Drums] keyboard input unavailable:', e));
         _onKeyDown = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_cfg.keyboard) return;
+            if (_controllerPinned()) return;   // a controller lane takes no keyboard hits
             if (!_V || !_h || !_session) return;
             if (_h.isTypingTarget(e.target) || _h.isTypingTarget(document.activeElement)) return;
             const m = _V.keyToPad(e);
@@ -2646,6 +2811,141 @@ function createFactory(forceView) {
     function _padLane2D(pad, cymbal) {
         const midi = _V ? _V.synthMidiForPad(pad, cymbal) : null;
         return midi == null ? -1 : _midiToLaneIdx(midi);
+    }
+
+    // A controller pad hit (engine pad, cymbal flag, performance.now() ms): the
+    // kit sound as for a keyboard hit, the 2D lane flash, the score, and the 2D
+    // wrong-hit flash on an overhit. Without a session it only sounds.
+    function _handlePadHit(pad, cymbal, tsMs) {
+        if (_instanceDestroyed || !_isReady) return;
+        const midi = _V ? _V.synthMidiForPad(pad, cymbal) : null;
+        if (midi != null) { _synthInit(); _synthDrumHit(midi, 100); }
+        if (!_session) return;
+        const lane = midi == null ? -1 : _midiToLaneIdx(midi);
+        if (_view !== '3d' && lane >= 0) {
+            const c = DRUM_LANES[lane].color;
+            _laneFlashes.push({ laneIdx: lane, wall: performance.now(), color: _rgbStr(c[0], c[1], c[2], 0.6) });
+        }
+        const r = _session.hit(_inputTime(tsMs), pad, { cymbal: !!cymbal });
+        if (_view !== '3d' && r && r.type === 'overhit' && lane >= 0) _wrongFlashes.push({ lane, wall: performance.now() });
+    }
+    // A controller's star power button.
+    function _activateSp(tsMs) {
+        if (_instanceDestroyed || !_isReady || !_session) return;
+        _session.activate(_inputTime(tsMs));
+    }
+
+    function _controllerPinned() { return !!_bandControllerFor(_highwayCanvas); }
+    // The free source may claim for this view: on screen, a session with a
+    // chart, playing. (_hwVisible, not _isVisible(): this runs every frame.)
+    function _padWant() {
+        if (!_isReady || !_hwVisible || !_playing || !_session || !_chartRefs) return false;
+        return !!((_chartRefs[0] && _chartRefs[0].length) || _chartRefs[1]);
+    }
+    // Join or leave the free source's wanters; only on a change. A pinned lane
+    // never wants the free source (its own source is always wanted).
+    function _syncPadWant(v) {
+        v = !!v && !_padKey && !_controllerPinned();
+        if (v === _padWantNow) return;
+        _padWantNow = v;
+        if (v) _padWanters.add(instance); else _padWanters.delete(instance);
+        _syncFreePad();
+    }
+
+    function _padController() {
+        if (_padKey) return _padSource ? _padSource.current() : null;
+        return _freePad ? _freePad.current() : null;
+    }
+    function _padStatusText(ctl) {
+        if (!_padKey) return '';
+        if (ctl && ctl.connected === false) return 'Controller disconnected';
+        if (!ctl || !ctl.claimed) return 'Connect a controller and press any button';
+        return '';
+    }
+    function _refreshPadCtl() {
+        _padCtl = _padController();
+        _padStatus = _padStatusText(_padCtl);
+    }
+    // The offset for this view: its controller's (a pinned lane's key counts
+    // before the claim), else the global one.
+    function _offsetNow() {
+        const c = _padCtl || (_padKey ? { controllerKey: _padKey } : null);
+        if (!c) return _cfg.inputOffsetMs;
+        const G = window.DrumsGamepad;
+        let offsets = null;
+        try { offsets = G ? G.loadSettings().offsetMs : null; } catch (_) { offsets = null; }
+        return _effectiveOffset({ cfgMs: _cfg.inputOffsetMs, controller: c, offsets });
+    }
+    function _padChanged() {
+        _proCymbalsChanged();
+        _inputOffsetChanged();
+    }
+    // The star power hint, rebuilt only when the chart's metadata, the
+    // controller or the star power pad changes (the draws call it every frame).
+    let _hintMeta, _hintCtl, _hintSp = NaN, _hintText = '';
+    function _spHintText(meta) {
+        if (meta !== _hintMeta || _padCtl !== _hintCtl || _cfg.spPad !== _hintSp) {
+            _hintMeta = meta; _hintCtl = _padCtl; _hintSp = _cfg.spPad;
+            _hintText = _spHint({ meta, controller: _padCtl, spPadName: _spPadName() });
+        }
+        return _hintText;
+    }
+
+    // Bus events for the band (same path as drums:hit): Start, and a held Back.
+    function _emitBandPad(type) {
+        const bus = _bus();
+        if (!bus || typeof bus.emit !== 'function') return;
+        try { bus.emit(type, { controllerKey: _padKey, canvas: _highwayCanvas }); } catch (_) { /* listeners only */ }
+    }
+
+    // Pin this view to a controller: its own source, wanted until unpinned
+    // (also while paused or loading), so the band's pad stays this lane's.
+    function _pinController(key) {
+        _syncPadWant(false);
+        _padKey = key;
+        if (_padSource) {
+            _padSource.setKey(key);
+            _padSource.setWanted(true);
+            _padChanged();
+            return;
+        }
+        _padChanged();   // the key's offset and the status apply before the claim
+        if (!_gamepadInput()) return;   // an older core: no source
+        const token = ++_padToken;
+        _loadGamepad().then(({ G, S }) => {
+            const gi = _gamepadInput();
+            if (token !== _padToken || _instanceDestroyed || !_isReady || _padSource || !_padKey || !gi) return;
+            _padSource = S.createSource({
+                gamepadInput: gi, G, owner: 'drums',
+                onHit: _handlePadHit,
+                onActivate: _activateSp,
+                onPause: () => _emitBandPad('drums:band-pause'),
+                onBackHold: () => _emitBandPad('drums:band-back-hold'),
+                onChange: _padChanged,
+            });
+            _padSource.setKey(_padKey);
+            _padSource.setWanted(true);
+            _padChanged();
+        }).catch((e) => console.warn('[Drums] controller input unavailable (gamepad modules failed to load):', e));
+    }
+    function _unpinController() {
+        _padToken++;
+        _padKey = null;
+        if (_padSource) { try { _padSource.destroy(); } catch (_) { /* ignore */ } _padSource = null; }
+        _padChanged();
+    }
+    // destroy() / re-init: drop the pinned source and leave the wanters.
+    function _padTeardown() {
+        _padToken++;
+        if (_padSource) { try { _padSource.destroy(); } catch (_) { /* ignore */ } _padSource = null; }
+        _padKey = null;
+        _padCtl = null;
+        _padStatus = '';
+        _playing = false;
+        if (_highwayCanvas) _bandControllerCanvases.delete(_highwayCanvas);
+        _padWantNow = false;
+        _padWanters.delete(instance);
+        _syncFreePad();
     }
 
     // 3D init: claim the webgl2 context and mount the HUD overlay
@@ -2700,12 +3000,9 @@ function createFactory(forceView) {
             _placeTimingBtn(null);
             return;
         }
-        const meta = _session.meta;
-        const hint = meta && meta.activation.length
-            ? 'Hit the marked note at the end of the fill to activate'
-            : 'Press Enter' + (_spPadName() ? ' or hit ' + _spPadName() : '') + ' to activate star power';
-        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _cfg.inputOffsetMs,
-            hideScore: _scoreHudHiddenFor(_highwayCanvas) });
+        const hint = _spHintText(_session.meta);
+        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _offsetMs,
+            hideScore: _scoreHudHiddenFor(_highwayCanvas), message: _padStatus || null });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -2723,8 +3020,10 @@ function createFactory(forceView) {
             _h = H;
             if (!_session) {
                 _auto = _autoAt(_diff ? _diff.id : _myDiff());
-                _session = H.createSession(E, { proDrums: _cfg.proCymbals, auto: _auto, params: _timingParams(),
-                    inputOffsetMs: _cfg.inputOffsetMs });
+                _refreshPadCtl();
+                _offsetMs = _offsetNow();
+                _session = H.createSession(E, { proDrums: _effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }),
+                    auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
@@ -2732,7 +3031,7 @@ function createFactory(forceView) {
                     try {
                         window.dispatchEvent(new CustomEvent('drums:judgment', { detail: {
                             noteTime: hit.noteTime, time: hit.time, pad: hit.pad, errMs: (hit.time - hit.noteTime) * 1000,
-                            inputOffsetMs: _cfg.inputOffsetMs || 0, canvas: _highwayCanvas,
+                            inputOffsetMs: _offsetMs || 0, canvas: _highwayCanvas,
                         } }));
                     } catch (_) { /* listeners only */ }
                 });
@@ -2831,8 +3130,11 @@ function createFactory(forceView) {
         if (_session) _session.setAuto(_auto);
     }
 
+    // The global offset changed, or this view's controller (or its offset) did.
     function _inputOffsetChanged() {
-        if (_session) _session.setInputOffset(_cfg.inputOffsetMs);
+        _refreshPadCtl();
+        _offsetMs = _offsetNow();
+        if (_session) _session.setInputOffset(_offsetMs);
     }
 
     function _assistsChanged() {
@@ -2840,8 +3142,10 @@ function createFactory(forceView) {
         if (_session) _session.setParams(_timingParams());
     }
 
+    // "Pro cymbals" changed, or this view's controller did (no cymbals: pro off).
     function _proCymbalsChanged() {
-        if (_session) _session.setProDrums(_cfg.proCymbals);
+        _refreshPadCtl();
+        if (_session) _session.setProDrums(_effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }));
     }
 
     // ── Split view: this panel's own difficulty + a picker in its bar ──
@@ -3009,7 +3313,7 @@ function createFactory(forceView) {
                 e.stopPropagation();
                 b.blur();
                 if (!Number.isFinite(_timingWant)) return;
-                _setInputOffset(_timingWant);   // the session restarts the meter
+                _applySuggestedOffset(_timingWant);   // the session restarts the meter
             };
             const after = _hudCanvas || _highwayCanvas;
             after.parentNode.insertBefore(b, after.nextSibling);
@@ -3024,6 +3328,18 @@ function createFactory(forceView) {
         const st = _timingBtn.style;
         st.left = x + 'px'; st.top = y + 'px'; st.width = w + 'px'; st.height = h + 'px';
         st.display = '';
+    }
+
+    // The timing meter's suggestion goes to the controller driving this view
+    // (its own offset), else to the global offset.
+    function _applySuggestedOffset(ms) {
+        const key = (_padCtl && _padCtl.controllerKey) || _padKey;
+        const G = window.DrumsGamepad;
+        if (!key || !G) { _setInputOffset(ms); return; }
+        try { G.setOffset(key, _normalizeOffsetMs(ms)); } catch (_) { /* storage */ }
+        for (const inst of _instances) {
+            try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+        }
     }
 
     // rect: the badge in canvas css px (from the 2D draw / 3D HUD), or null to hide.
@@ -3158,6 +3474,7 @@ function createFactory(forceView) {
         if (_onSpKey) return;
         _onSpKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h || !_session) return;
+            if (_controllerPinned()) return;
             if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.key !== 'Enter') return;
             if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
             const H = _h;
@@ -3180,6 +3497,7 @@ function createFactory(forceView) {
         if (_onDiffKey) return;
         _onDiffKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h) return;
+            if (_controllerPinned()) return;
             const H = _h;
             if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
             const k = H.isDifficultyKey(e);
@@ -4296,7 +4614,8 @@ function createFactory(forceView) {
             ctx.fillText(text, W / 2, ly + 10);
             ly += 26;
         }
-        const hint = _h.starPowerHint ? _h.starPowerHint(_session.meta, st, _spPadName()) : null;
+        const sp = st && st.starPower;
+        const hint = sp && sp.canActivate && !sp.active ? _spHintText(_session.meta) : null;
         if (hint) {
             ctx.font = 'bold 11px sans-serif';
             const hw = ctx.measureText(hint).width + 18;
@@ -4429,6 +4748,7 @@ function createFactory(forceView) {
                 }
                 _instances.delete(instance);
                 if (_activeInstance === instance) _activeInstance = null;
+                _padTeardown();
                 _teardown();
                 _isReady = false;
                 _isFocused = false;
@@ -4510,7 +4830,8 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
-                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas) };
+                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas),
+                    controllerPinned: _controllerPinned() };
                 if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
                 else if (_shouldRecordBestOnly(when)) _recordRunBest(_session, _badge);
             };
@@ -4523,6 +4844,9 @@ function createFactory(forceView) {
             _synthInit();
 
             _isReady = true;
+            // A band lane pinned to a controller before this view existed.
+            const padKey = _bandControllerFor(canvas);
+            if (padKey) { _bandControllerCanvases.add(canvas); _pinController(padKey); _syncFreePad(); }
             _startScoring();
 
             // Determine focus BEFORE resuming the MIDI handler so
@@ -4592,6 +4916,7 @@ function createFactory(forceView) {
                 _latestChords = [];
                 _latestTime = ft;
                 const msg = _notDrumsMessage(bundle.songInfo);
+                _syncPadWant(false);   // nothing to play: never claim a controller
                 if (_view === '3d') {
                     if (_view3d) _view3d.render({ time: ft, session: null, wallNow: _now(), message: msg });
                     _placeBadge(null);
@@ -4614,10 +4939,14 @@ function createFactory(forceView) {
             _latestNotes = drumNotes;
             _latestChords = drumChords;
             _latestTime = ft;
+            _playing = isReady && bundle.isPlaying !== false;
             if (isReady) {
                 _scheduleAutoSounds(drumNotes, drumChords);
                 _syncAudioOffset(bundle);
                 _syncSession(bundle, drumNotes, drumChords, ft);
+            }
+            _syncPadWant(_padWant());
+            if (isReady) {
                 // The 3D view reads the session's events itself (flashes, sparks).
                 if (_view !== '3d') _drainSessionEvents();
             }
@@ -4644,6 +4973,7 @@ function createFactory(forceView) {
             }
 
             _draw(drumNotes, drumChords, ft, bundle.beats);
+            if (_padStatus) _drawCenterMessage(_padStatus);
         },
         resize(/* w, h */) {
             if (!_isReady) return;
@@ -4671,6 +5001,7 @@ function createFactory(forceView) {
             _instances.delete(instance);
             if (_activeInstance === instance) _activeInstance = null;
             _isFocused = false;
+            _padTeardown();
             // Pause the MIDI handler only if we're the last instance
             // standing. Otherwise other instances still need MIDI
             // events flowing into _midiOnMessage (which routes to the
@@ -4683,6 +5014,18 @@ function createFactory(forceView) {
         // Internal hooks used by module-level MIDI router + device-swap.
         _handleDrumHit,
         _releaseAllSounding,
+        // Controller drumming: the free source's hits (via _routeTarget), the
+        // band pin (setController / clearController), the claim rule.
+        _handlePadHit,
+        _activateSp,
+        _controllerPinned,
+        _padWant,
+        _setController(key) { if (_isReady && typeof key === 'string' && key) _pinController(key); },
+        _clearController() { if (_padKey || _padSource) _unpinController(); },
+        // The timing meter's Apply (3D HUD button): this view's controller offset, else the global one.
+        _applyTimingSuggestion: (ms) => _applySuggestedOffset(ms),
+        // A binding or offset was saved on the Controllers card.
+        _refreshPad() { if (_padSource) _padSource.refresh(); _padChanged(); },
         // Called by the module-level setters for every live instance.
         _difficultyChanged,
         _inSplit,
@@ -4788,6 +5131,59 @@ window.feedBackViz_drums3d.matchesArrangement = createFactory.matchesArrangement
 window.feedBackViz_drums2d = function () { return createFactory('2d'); };
 window.feedBackViz_drums2d.matchesArrangement = createFactory.matchesArrangement;
 
+// ── Controller listing for the band (feedBackDrums.listControllers) ──
+// list() entries with their controllerKey (core's when present, else the nth
+// connected same-id controller, as the sources count it), name and binding.
+function _controllerList(G, gi) {
+    let list;
+    try { list = gi ? gi.list() : null; } catch (_) { list = null; }
+    if (!Array.isArray(list)) return [];
+    const bindings = G.loadBindings();
+    const nth = Object.create(null);
+    const out = [];
+    for (const e of list) {
+        if (!e || typeof e.id !== 'string' || !e.id) continue;
+        const n = (nth[e.id] || 0) + 1;
+        if (e.connected) nth[e.id] = n;   // core numbers connected controllers only
+        const key = typeof e.controllerKey === 'string' && e.controllerKey ? e.controllerKey : G.controllerKey(e, n);
+        const b = G.resolveBinding(e, bindings[key]);
+        const kind = b && (b.kind === 'kit' || b.kind === 'gamepad') ? b.kind : null;
+        out.push({
+            index: e.index, controllerKey: key, id: e.id, mapping: e.mapping, name: G.controllerName(e.id, n),
+            kind, hasCymbals: !!b && G.hasCymbals(b), connected: !!e.connected, claimedBy: e.claimedBy || null,
+        });
+    }
+    return out;
+}
+function _controllerMapper(G, gi, key) {
+    const e = _controllerList(G, gi).find((c) => c.controllerKey === key);
+    const stored = G.loadBindings()[key];
+    const b = G.resolveBinding(e || null, stored);
+    return b ? G.createMapper(b) : null;
+}
+
+// feedBackDrums.openControls: the Drums screen, scrolled to the Controllers
+// card (when it is there), with Back going to returnTo once.
+let _pageBackTo = null;
+function _openControls(opts) {
+    const to = opts && typeof opts.returnTo === 'string' && opts.returnTo ? opts.returnTo : 'home';
+    if (typeof window.showScreen === 'function') {
+        try { window.showScreen('plugin-drums'); } catch (e) { console.warn('[Drums] showScreen failed:', e); }
+    }
+    _pageBackTo = to;   // after showScreen: a visit that was already open keeps it too
+    try {
+        const sec = typeof document !== 'undefined' && document.querySelector
+            ? document.querySelector('section[aria-labelledby="dr-h-pads"]') : null;
+        if (sec && typeof sec.scrollIntoView === 'function') sec.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    } catch (_) { /* no card yet */ }
+}
+// The Drums screen's Back button.
+function _pageBack() {
+    const to = _pageBackTo || 'home';
+    _pageBackTo = null;
+    if (typeof window.showScreen === 'function') window.showScreen(to);
+}
+
 // ── Hooks for calibration / sync tools and the console ───────────────
 // A sync / calibration tool (e.g. a sync lab plugin) can set the input
 // offset and pad volume, read the settings, re-apply the hit window after
@@ -4849,6 +5245,48 @@ if (typeof window !== 'undefined') {
             const inst = _instanceForCanvas(canvas);
             try { return inst && inst._engineState ? inst._engineState() : null; } catch (_) { return null; }
         },
+        // Play this lane with one game controller (core gamepad-input
+        // controllerKey `${id}#${n}`): the lane claims it, from now (or from
+        // when an instance inits on the canvas) until clearController, and
+        // takes no kit or keyboard hits. Calling again changes the controller.
+        // false (changing nothing) unless a non-empty key and an object canvas.
+        setController: (controllerKey, canvas) => {
+            if (typeof controllerKey !== 'string' || !controllerKey || !canvas || typeof canvas !== 'object') return false;
+            _bandController.set(canvas, controllerKey);
+            _bandControllerCanvases.add(canvas);
+            const inst = _instanceForCanvas(canvas);
+            try { if (inst && inst._setController) inst._setController(controllerKey); } catch (e) { console.warn('[Drums] setController failed:', e); }
+            _syncFreePad();
+            return true;
+        },
+        // Forget the lane's controller: its source is released and the lane
+        // takes kit / keyboard hits again.
+        clearController: (canvas) => {
+            if (!canvas || typeof canvas !== 'object') return;
+            _bandController.delete(canvas);
+            _bandControllerCanvases.delete(canvas);
+            const inst = _instanceForCanvas(canvas);
+            try { if (inst && inst._clearController) inst._clearController(); } catch (e) { console.warn('[Drums] clearController failed:', e); }
+            _syncFreePad();
+        },
+        // Promise of the connected controllers (loads assets/gamepad.js on demand):
+        // [{ index, controllerKey, id, mapping, name, kind, hasCymbals, connected, claimedBy }].
+        listControllers: () => {
+            const gi = _gamepadInput();
+            if (!gi) return Promise.resolve([]);
+            return _loadGamepad().then(({ G }) => _controllerList(G, gi))
+                .catch((e) => { console.warn('[Drums] listControllers failed:', e); return []; });
+        },
+        // Promise of an input mapper for the controller's drum binding (its
+        // stored one, else the standard pad layout), or null.
+        createMapper: (controllerKey) => {
+            if (typeof controllerKey !== 'string' || !controllerKey) return Promise.resolve(null);
+            return _loadGamepad().then(({ G }) => _controllerMapper(G, _gamepadInput(), controllerKey))
+                .catch((e) => { console.warn('[Drums] createMapper failed:', e); return null; });
+        },
+        // Show the Drums screen's Controllers card; for that visit its Back
+        // button goes to returnTo (a screen id, default home).
+        openControls: (opts) => _openControls(opts),
     };
     // Split view: every drum panel's results on screen (for a results card).
     window.__drumsPanelResults = () => {
@@ -5279,7 +5717,7 @@ function _pageFill() {
 
 function _pageWire() {
     const q = _pq;
-    q('back').onclick = () => { if (typeof window.showScreen === 'function') window.showScreen('home'); };
+    q('back').onclick = _pageBack;
     q('difficulty').onchange = function () { _setDifficulty(this.value); };
     q('autoKick').onchange = function () { _setAssist('autoKick', this.value); };
     q('autoCymbals').onchange = function () { _setAssist('autoCymbals', this.value); };
@@ -5379,6 +5817,7 @@ function _resetDrumSettings() {
 function _pageSetVisible(on) {
     if (on === _pageVisible) return;
     _pageVisible = on;
+    if (!on) _pageBackTo = null;   // openControls' Back target lasts one visit
     if (on) {
         _pageFill();
         _instances.add(_pageInst);
@@ -5450,6 +5889,8 @@ if (typeof module !== 'undefined' && module.exports) {
         _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, DIRECT_PROVIDER,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
         _engineVelocity, _loadScoring, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
+        _loadGamepad, _effectivePro, _effectiveOffset, _freePadWanted, _spHint, _setPadControlsOpen,
+        _bandControllerFor, _bandControllerCanvases, _pageBack,
     };
 }
 

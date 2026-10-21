@@ -288,3 +288,27 @@ test('back-hold: free mode never fires, nor does a non-standard controller', () 
     kit.gi.button(8, 1);
     assert.equal(kit.timers.length, 0);
 }));
+
+test('a stored action that is not a pad action (e.g. "constructor") is no hit', () => withStorage(() => {
+    G.saveBinding('Rock Band Drums#1', { kind: 'kit', map: {
+        constructor: { type: 'button', index: 1 }, toString: { type: 'button', index: 2 }, kick: { type: 'button', index: 3 },
+    } });
+    const { gi, src, calls } = harness([KIT]);
+    src.setWanted(true);
+    gi.button(1, 1, 0, 1);
+    gi.button(2, 1, 0, 1.1);
+    gi.button(3, 1, 0, 1.2);
+    assert.deepEqual(calls.hits, [[0, false, 1200]]);
+}));
+
+test('current().standardLayout: true for the built-in pad layout, false for a stored binding (also parked)', () => withStorage(() => {
+    const { src } = harness([XBOX]);
+    src.setWanted(true);
+    assert.equal(src.current().standardLayout, true);
+    src.setWanted(false);
+    assert.equal(src.current().standardLayout, true);
+    G.saveBinding('Rock Band Drums#1', kitBinding);
+    const k = harness([KIT]);
+    k.src.setWanted(true);
+    assert.equal(k.src.current().standardLayout, false);
+}));

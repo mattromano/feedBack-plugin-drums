@@ -1,7 +1,7 @@
 {
   "id": "drums",
   "name": "Drum Highway",
-  "version": "4.5.3",
+  "version": "4.6.0",
   "type": "visualization",
   "private": false,
   "nav": {
@@ -37,6 +37,20 @@
       "ownership": "requester-only",
       "safety": "sensitive",
       "description": "Reads the e-kit/MIDI-pad input through the core midi-input domain (Web-MIDI provider ships built-in with the domain). Absent domain → no MIDI devices, fail-soft.",
+      "version": 1
+    },
+    "gamepad-input": {
+      "roles": [
+        "requester"
+      ],
+      "requests": [
+        "list-sources"
+      ],
+      "mode": "active",
+      "compatibility": "degrade-noop",
+      "ownership": "requester-only",
+      "safety": "sensitive",
+      "description": "Claims one game controller (an Xbox-style pad or a plastic drum kit) through the core gamepad-input domain while a drum part plays, and reads its buttons and axes as drum hits. Absent domain: no controller, fail-soft.",
       "version": 1
     }
   },

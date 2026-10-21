@@ -90,6 +90,28 @@ The keys work only while the drum view is visible and focused (in splitscreen: t
 while you type in a text field. Space stays play/pause; D / Shift+D change the difficulty.
 The drum keys, Enter (star power) and D are ignored while a modal dialog is open (the band results, a confirm dialog).
 
+### Controller
+
+An Xbox-style gamepad (any controller the browser reports with the `standard` mapping) or a plastic Rock Band
+kit can drum too, through core's gamepad-input domain:
+
+| Gamepad | Pad |
+|---|---|
+| LB / RB / LT / RT | red / yellow / blue / green pad |
+| A | kick |
+| Y | activate star power (when the chart has no fills) |
+| Start | play / pause |
+
+- The view claims a controller only while a drum part plays (a drum chart loaded, not paused), so core's
+  menus get the pad back when you pause or leave. It takes a controller set up as a drum kit first, then a
+  standard pad, each in slot order.
+- Hits sound the kit like keyboard hits and score without velocity (accents and ghosts score as normal hits).
+- A controller without cymbals plays with **pro cymbals off**: cymbal notes land on its pads. A pause keeps
+  the controller's settings, so the score never restarts.
+- Each controller has its own input offset (`drums.gamepad.settings.v1`); the timing meter's Apply sets
+  that one while a controller plays. Bindings are stored in `drums.gamepad.bindings.v1`.
+- Without core's gamepad-input domain (an older core) nothing changes.
+
 ## Scoring
 
 Turn on **Score** in the settings panel (gear) to see the scoring HUD: multiplier, score, streak, stars
@@ -328,6 +350,26 @@ Click "Reset Map" to return to standard GM mapping.
   applied, `false` (changing nothing) unless `canvas` is an object and `hidden` a boolean.
 - `isScoreHudHidden(canvas)` returns whether that canvas's score display is hidden.
 - `getInstanceState(canvas)` returns that lane's scoring state, or `null`.
+- `setController(controllerKey, canvas)` plays that lane with one game controller (`controllerKey` is core
+  gamepad-input's `${id}#${n}`). The lane claims it at once (or when an instance inits on the canvas) and
+  holds it, also while paused, until `clearController`. A controller lane takes no kit or keyboard hits
+  (nor Enter or D), uses that controller's input offset, records no personal best, and shows "Connect a
+  controller and press any button" / "Controller disconnected" while its controller is missing. Start
+  emits `drums:band-pause` and holding Back for 1 s `drums:band-back-hold` on the bus, both with
+  `detail { controllerKey, canvas }` (it never calls play / pause itself). While any controller lane or
+  input target is set, the normal player's controller stands down. Returns `false` (changing nothing)
+  unless the key is a non-empty string and `canvas` an object; calling again changes the controller.
+- `clearController(canvas)` forgets the lane's controller: it is released and the lane takes kit and
+  keyboard hits again.
+- `listControllers()` resolves to the connected controllers: `[{ index, controllerKey, id, mapping, name,
+  kind ('gamepad' | 'kit' | null when it needs setup), hasCymbals, connected, claimedBy }]`.
+- `createMapper(controllerKey)` resolves to an input mapper for that controller's drum binding (its
+  `map(ev)` names raw gamepad-input events as drum actions, e.g. `pause` for Start), or `null`.
+- `openControls({ returnTo })` shows the Drums screen at its Controllers card; for that visit its Back
+  button goes to `returnTo` (a screen id, default `home`).
+
+`listControllers` and `createMapper` return Promises (they load `assets/gamepad.js` on demand); check for the
+controller API with `typeof window.feedBackDrums.setController === 'function'`.
 
 ## Events for other plugins
 

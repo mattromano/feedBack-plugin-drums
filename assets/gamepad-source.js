@@ -76,6 +76,8 @@
                 if (action === 'star_power') { if (onActivate) onActivate(ev.t * 1000); }
                 else if (action === 'pause') { if (onPause) onPause(); }
                 else {
+                    // Own pad actions only: a corrupt stored action ("constructor") is no hit.
+                    if (!Object.prototype.hasOwnProperty.call(G.PADS, action)) continue;
                     const p = G.PADS[action];
                     if (p && onHit) onHit(p.pad, p.cymbal && cymbals, ev.t * 1000);
                 }
@@ -187,7 +189,9 @@
             current() {
                 if (!gi || curKey === null) return null;
                 if (!handle && !parked) return null;
-                return { controllerKey: curKey, kind: curKind, hasCymbals: cymbals, claimed: !!handle, connected };
+                // standardLayout: the built-in Xbox-style layout is in use (Y is star power).
+                return { controllerKey: curKey, kind: curKind, hasCymbals: cymbals, claimed: !!handle, connected,
+                    standardLayout: binding === G.STANDARD_GAMEPAD };
             },
             // A binding was saved on the Controllers card: re-resolve ours, or drop and re-claim.
             refresh() {
