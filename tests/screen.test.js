@@ -846,3 +846,56 @@ test('band API: setDifficulty with an unmatched canvas leaves the global difficu
     assert.equal(mod._difficultyPref(), 'medium');
     assert.equal(changed, 0);
 });
+
+// ── Band difficulty memory, clearDifficulty, setMidiInput ──
+test('band API: setDifficulty remembers the band difficulty for a canvas, even before an instance owns it', () => {
+    const mod = freshPlugin();
+    const before = mod._difficultyPref();
+    const c = {};
+    window.feedBackDrums.setDifficulty('hard', c);
+    assert.equal(mod._bandDifficultyFor(c), 'hard');
+    assert.equal(mod._difficultyPref(), before);
+});
+
+test('band API: unknown ids are not remembered', () => {
+    const mod = freshPlugin();
+    const c = {};
+    window.feedBackDrums.setDifficulty('bogus', c);
+    assert.equal(mod._bandDifficultyFor(c), null);
+});
+
+test('_resolveOwnDifficulty prefers the panel in split, the band pin otherwise', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._resolveOwnDifficulty({ inSplit: true, bandId: 'easy', panelId: 'hard' }), 'hard');
+    assert.equal(mod._resolveOwnDifficulty({ inSplit: false, bandId: 'easy', panelId: 'hard' }), 'easy');
+    assert.equal(mod._resolveOwnDifficulty({ inSplit: false, bandId: null, panelId: null }), null);
+    assert.equal(mod._resolveOwnDifficulty({ inSplit: false, bandId: 'nope', panelId: null }), null);
+});
+
+test('band API: clearDifficulty forgets the pin and hands the instance back to the global level', () => {
+    const mod = freshPlugin();
+    const c = {};
+    let cleared = 0;
+    mod._instances.add(fakeInst(c, { _clearOwnDifficulty: () => cleared++ }));
+    window.feedBackDrums.setDifficulty('hard', c);
+    window.feedBackDrums.clearDifficulty(c);
+    assert.equal(mod._bandDifficultyFor(c), null);
+    assert.equal(cleared, 1);
+});
+
+test('band API: setMidiInput saves the pick as a manual choice', () => {
+    const mod = freshPlugin();
+    const writes = {};
+    global.document.querySelectorAll = () => [];   // the async connect refreshes device lists
+    global.localStorage.setItem = (k, v) => { writes[k] = v; };
+    assert.equal(window.feedBackDrums.setMidiInput('webmidi:kit'), undefined);
+    assert.equal(mod._cfg().midiInputId, 'webmidi:kit');
+    assert.equal(writes.drums_midi_manual, '1');
+    window.feedBackDrums.setMidiInput('');
+    assert.equal(mod._cfg().midiInputId, '');
+    assert.equal(writes.drums_midi_manual, '');
+    const snap = JSON.stringify(writes);
+    window.feedBackDrums.setMidiInput(42);
+    assert.equal(JSON.stringify(writes), snap);
+    assert.equal(mod._cfg().midiInputId, '');
+});

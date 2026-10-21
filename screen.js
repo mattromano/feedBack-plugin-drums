@@ -2042,6 +2042,19 @@ function _refreshMidiStatus() {
 // null (or a canvas with no live instance) = the default routing below.
 let _inputTargetCanvas = null;
 function _setInputTarget(canvas) { _inputTargetCanvas = canvas || null; }
+// The band difficulty pinned to a lane canvas. Survives an instance
+// re-init on the same canvas (and a pin made before the instance exists).
+const _bandDifficulty = new WeakMap();
+function _bandDifficultyFor(canvas) {
+    return (canvas && typeof canvas === 'object' && _bandDifficulty.get(canvas)) || null;
+}
+// Pure: which difficulty this instance pins for itself (null = follow global).
+// A split panel's own pick wins in split view; otherwise the band pin.
+function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
+    if (inSplit && _VALID_DIFFICULTIES.has(panelId)) return panelId;
+    if (_VALID_DIFFICULTIES.has(bandId)) return bandId;
+    return null;
+}
 function _instanceForCanvas(canvas) {
     if (!canvas) return null;
     for (const i of _instances) {
@@ -2787,11 +2800,17 @@ function createFactory(forceView) {
         } catch (_) { return null; }
     }
     function _loadOwnDifficulty() {
+        const inSplit = _ssActive();
+        const k = inSplit ? _panelDiffKey() : null;
+        _diffPref = _resolveOwnDifficulty({
+            inSplit,
+            bandId: _bandDifficultyFor(_highwayCanvas),
+            panelId: k ? _readStore(k) : null,
+        });
+    }
+    function _clearOwnDifficulty() {
         _diffPref = null;
-        if (!_ssActive()) return;
-        const k = _panelDiffKey();
-        const v = k ? _readStore(k) : null;
-        if (_VALID_DIFFICULTIES.has(v)) _diffPref = v;
+        _difficultyChanged();
     }
     function _setOwnDifficulty(id) {
         if (!_VALID_DIFFICULTIES.has(id)) return;
@@ -4606,6 +4625,7 @@ function createFactory(forceView) {
         _difficultyChanged,
         _inSplit,
         _setOwnDifficulty,
+        _clearOwnDifficulty,
         _canvas() { return _highwayCanvas; },
         // Split view routing / results: is this drum view on screen, and its numbers.
         _isVisible() {
@@ -4737,8 +4757,22 @@ if (typeof window !== 'undefined') {
         setDifficulty: (id, canvas) => {
             if (!_VALID_DIFFICULTIES.has(id)) return;
             if (canvas == null) { _setDifficulty(id); return; }
+            if (typeof canvas === 'object') _bandDifficulty.set(canvas, id);
             const inst = _instanceForCanvas(canvas);
             if (inst) inst._setOwnDifficulty(id);
+        },
+        // Forget a canvas's band pin; its instance follows the global level again.
+        clearDifficulty: (canvas) => {
+            if (!canvas || typeof canvas !== 'object') return;
+            _bandDifficulty.delete(canvas);
+            const inst = _instanceForCanvas(canvas);
+            if (inst && inst._clearOwnDifficulty) inst._clearOwnDifficulty();
+        },
+        // Same as picking a device in the settings dropdown; '' is None.
+        setMidiInput: (key) => {
+            if (typeof key !== 'string') return;
+            _saveCfg('midiManual', key ? '1' : '');
+            _midiConnect(key).catch((e) => console.warn('[Drums] midi connect failed:', e));
         },
         getInstanceState: (canvas) => {
             const inst = _instanceForCanvas(canvas);
@@ -5312,6 +5346,7 @@ if (typeof module !== 'undefined' && module.exports) {
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
+        _bandDifficultyFor, _resolveOwnDifficulty,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,

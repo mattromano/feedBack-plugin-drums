@@ -312,6 +312,16 @@ Different drum pads send different MIDI note numbers. Use the "Learn" mode in se
 
 Click "Reset Map" to return to standard GM mapping.
 
+## Band API
+
+`window.feedBackDrums` lets the Build-a-Band stage drive a drum lane. Lanes are identified by their highway canvas.
+
+- `setInputTarget(canvas)` pins kit hits to that lane's canvas (`null` restores the default routing).
+- `setDifficulty(id, canvas)` sets the difficulty for that lane only (`easy`, `medium`, `hard`, `expert`, `expert_plus`). Without a canvas it sets the global difficulty. A canvas with no instance yet never changes the global difficulty; the pick is remembered for it. The memory is per canvas, so a lane that re-inits on the same canvas keeps its band difficulty (in split view a panel's own pick still wins). Unknown ids are ignored and not remembered.
+- `clearDifficulty(canvas)` forgets the canvas's remembered difficulty; its instance follows the global difficulty again.
+- `setMidiInput(logicalSourceKey)` picks the MIDI input like the settings dropdown does, saved as a manual choice. `''` is "None". Non-strings are ignored.
+- `getInstanceState(canvas)` returns that lane's scoring state, or `null`.
+
 ## Development
 
 Tests run with plain Node (the org CI runs each `tests/*.test.js`): `node --test tests/*.test.js`, or one
