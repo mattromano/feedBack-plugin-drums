@@ -2145,6 +2145,12 @@ function _gamepadInput() {
 // _padWanters (each draw touches the Set only when its own answer changes).
 let _freePad = null;
 let _freePadLoading = false;
+// The free controller sets unpinned views' pro drums and input offset only
+// once it is engaged: it delivered a pad hit during the current chart. An
+// idle pad (or a Steam Deck's own controls) never changes a kit drummer's
+// settings. Engagement survives a pause (the claim parks, nothing flips) and
+// ends with a new chart / session, or the parked controller unplugging.
+let _freePadEngaged = false;
 const _padWanters = new Set();
 // The Controllers card on the Drums screen is open (Task A4 sets it): the
 // free source stands down while the card names the controllers.
@@ -2188,7 +2194,26 @@ function _syncFreePad() {
     });
 }
 
+// The free controller's current(), when it drives unpinned views' pro drums
+// and offset: engaged and no band pin (an input target or a controller lane).
+function _freePadDriving() {
+    if (!_freePad || !_freePadEngaged || _inputTargetCanvas || _bandControllerCanvases.size > 0) return null;
+    return _freePad.current();
+}
+// A new chart or session on an unpinned view: back to the global settings
+// until the controller hits again.
+function _freePadDisengage() {
+    if (!_freePadEngaged) return;
+    _freePadEngaged = false;
+    _freePadChanged();
+}
 function _freePadHit(pad, cymbal, tsMs) {
+    if (!_freePadEngaged) {
+        // The first hit: the controller's pro drums and offset apply first, so
+        // this hit already scores with them.
+        _freePadEngaged = true;
+        _freePadChanged();
+    }
     const t = _routeTarget();
     if (t && typeof t._handlePadHit === 'function') t._handlePadHit(pad, cymbal, tsMs);
 }
@@ -2204,6 +2229,7 @@ function _freePadPause() {
 // The free source's controller changed (claimed, parked, (dis)connected):
 // every unpinned view re-applies its pro drums and input offset.
 function _freePadChanged() {
+    if (_freePadEngaged && (!_freePad || !_freePad.current())) _freePadEngaged = false;   // unplugged while parked
     for (const inst of _instances) {
         if (_isControllerPinned(inst)) continue;
         try { if (inst._proCymbalsChanged) inst._proCymbalsChanged(); } catch (e) { console.warn('[Drums] pro cymbals update failed:', e); }
@@ -2685,6 +2711,7 @@ function createFactory(forceView) {
     let _padKey = null;             // the pinned controllerKey
     let _padToken = 0;              // supersedes an in-flight pinned source load
     let _padCtl = null;             // current() of the source driving this view
+    let _padHintCtl = null;         // the controller the star power hint names
     let _padStatus = '';            // pinned lane: "Controller disconnected" etc. ('' = none)
     let _padWantNow = false;        // this view is in _padWanters
     let _playing = false;           // bundle.isPlaying on the last ready frame
@@ -2818,6 +2845,8 @@ function createFactory(forceView) {
     // wrong-hit flash on an overhit. Without a session it only sounds.
     function _handlePadHit(pad, cymbal, tsMs) {
         if (_instanceDestroyed || !_isReady) return;
+        // A band lane's pad also works the band's pause menu: no sound, no score while paused.
+        if (_padKey && !_playing) return;
         const midi = _V ? _V.synthMidiForPad(pad, cymbal) : null;
         if (midi != null) { _synthInit(); _synthDrumHit(midi, 100); }
         if (!_session) return;
@@ -2832,6 +2861,7 @@ function createFactory(forceView) {
     // A controller's star power button.
     function _activateSp(tsMs) {
         if (_instanceDestroyed || !_isReady || !_session) return;
+        if (_padKey && !_playing) return;
         _session.activate(_inputTime(tsMs));
     }
 
@@ -2852,9 +2882,11 @@ function createFactory(forceView) {
         _syncFreePad();
     }
 
+    // The controller whose pro drums / offset this view uses: a pinned lane's
+    // own, else the free one while it drives (engaged, no band pin).
     function _padController() {
         if (_padKey) return _padSource ? _padSource.current() : null;
-        return _freePad ? _freePad.current() : null;
+        return _freePadDriving();
     }
     function _padStatusText(ctl) {
         if (!_padKey) return '';
@@ -2865,6 +2897,13 @@ function createFactory(forceView) {
     function _refreshPadCtl() {
         _padCtl = _padController();
         _padStatus = _padStatusText(_padCtl);
+        // The hint ("Press Y") may follow a claimed free pad before it is engaged.
+        if (!_padCtl && !_padKey && _freePad) {
+            const c = _freePad.current();
+            _padHintCtl = c && c.claimed ? c : null;
+        } else {
+            _padHintCtl = _padCtl;
+        }
     }
     // The offset for this view: its controller's (a pinned lane's key counts
     // before the claim), else the global one.
@@ -2884,9 +2923,9 @@ function createFactory(forceView) {
     // controller or the star power pad changes (the draws call it every frame).
     let _hintMeta, _hintCtl, _hintSp = NaN, _hintText = '';
     function _spHintText(meta) {
-        if (meta !== _hintMeta || _padCtl !== _hintCtl || _cfg.spPad !== _hintSp) {
-            _hintMeta = meta; _hintCtl = _padCtl; _hintSp = _cfg.spPad;
-            _hintText = _spHint({ meta, controller: _padCtl, spPadName: _spPadName() });
+        if (meta !== _hintMeta || _padHintCtl !== _hintCtl || _cfg.spPad !== _hintSp) {
+            _hintMeta = meta; _hintCtl = _padHintCtl; _hintSp = _cfg.spPad;
+            _hintText = _spHint({ meta, controller: _padHintCtl, spPadName: _spPadName() });
         }
         return _hintText;
     }
@@ -3020,6 +3059,7 @@ function createFactory(forceView) {
             _h = H;
             if (!_session) {
                 _auto = _autoAt(_diff ? _diff.id : _myDiff());
+                if (!_controllerPinned()) _freePadDisengage();
                 _refreshPadCtl();
                 _offsetMs = _offsetNow();
                 _session = H.createSession(E, { proDrums: _effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }),
@@ -3062,7 +3102,15 @@ function createFactory(forceView) {
         };
         _onCanvasReplaced = (e) => {
             if (!e || !e.detail || e.detail.oldCanvas !== _highwayCanvas) return;
-            _highwayCanvas = e.detail.newCanvas;
+            const oldCanvas = _highwayCanvas, newCanvas = e.detail.newCanvas;
+            // The controller pin moves with the lane (routing, teardown).
+            const padKey = _bandControllerFor(oldCanvas);
+            if (padKey && newCanvas && typeof newCanvas === 'object') {
+                _bandController.delete(oldCanvas);
+                _bandController.set(newCanvas, padKey);
+                if (_bandControllerCanvases.delete(oldCanvas)) _bandControllerCanvases.add(newCanvas);
+            }
+            _highwayCanvas = newCanvas;
         };
         try { bus.on('highway:visibility', _onVisibility); } catch (_) { _onVisibility = null; }
         try { bus.on('highway:canvas-replaced', _onCanvasReplaced); } catch (_) { _onCanvasReplaced = null; }
@@ -3335,7 +3383,8 @@ function createFactory(forceView) {
     function _applySuggestedOffset(ms) {
         const key = (_padCtl && _padCtl.controllerKey) || _padKey;
         const G = window.DrumsGamepad;
-        if (!key || !G) { _setInputOffset(ms); return; }
+        if (!key) { _setInputOffset(ms); return; }
+        if (!G) return;   // a controller lane never changes the global offset
         try { G.setOffset(key, _normalizeOffsetMs(ms)); } catch (_) { /* storage */ }
         for (const inst of _instances) {
             try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
@@ -3806,6 +3855,7 @@ function createFactory(forceView) {
     }
 
     function _resetForNewChart() {
+        if (!_controllerPinned()) _freePadDisengage();   // a new chart: the global settings until a pad hits
         _resetScoring();
         _heldPads.clear();
         _chartRefs = null;
@@ -5143,13 +5193,19 @@ function _controllerList(G, gi) {
     const out = [];
     for (const e of list) {
         if (!e || typeof e.id !== 'string' || !e.id) continue;
-        const n = (nth[e.id] || 0) + 1;
-        if (e.connected) nth[e.id] = n;   // core numbers connected controllers only
-        const key = typeof e.controllerKey === 'string' && e.controllerKey ? e.controllerKey : G.controllerKey(e, n);
+        // Core numbers connected identical controllers in slot order (as the
+        // sources' claimable() does). A disconnected one's key is known only
+        // when core reports it (list().controllerKey), else it is left out.
+        const coreKey = typeof e.controllerKey === 'string' && e.controllerKey ? e.controllerKey : null;
+        let n = 0;
+        if (e.connected) n = nth[e.id] = (nth[e.id] || 0) + 1;
+        else if (!coreKey) continue;
+        const key = coreKey || G.controllerKey(e, n);
         const b = G.resolveBinding(e, bindings[key]);
         const kind = b && (b.kind === 'kit' || b.kind === 'gamepad') ? b.kind : null;
         out.push({
-            index: e.index, controllerKey: key, id: e.id, mapping: e.mapping, name: G.controllerName(e.id, n),
+            index: e.index, controllerKey: key, id: e.id, mapping: e.mapping,
+            name: G.controllerName(e.id, n || Number(String(key).slice(key.lastIndexOf('#') + 1))),
             kind, hasCymbals: !!b && G.hasCymbals(b), connected: !!e.connected, claimedBy: e.claimedBy || null,
         });
     }
@@ -5181,7 +5237,8 @@ function _openControls(opts) {
 function _pageBack() {
     const to = _pageBackTo || 'home';
     _pageBackTo = null;
-    if (typeof window.showScreen === 'function') window.showScreen(to);
+    if (typeof window.showScreen !== 'function') return;
+    try { window.showScreen(to); } catch (e) { console.warn('[Drums] showScreen failed:', e); }
 }
 
 // ── Hooks for calibration / sync tools and the console ───────────────
@@ -5280,7 +5337,7 @@ if (typeof window !== 'undefined') {
         // Promise of an input mapper for the controller's drum binding (its
         // stored one, else the standard pad layout), or null.
         createMapper: (controllerKey) => {
-            if (typeof controllerKey !== 'string' || !controllerKey) return Promise.resolve(null);
+            if (typeof controllerKey !== 'string' || !controllerKey || !_gamepadInput()) return Promise.resolve(null);
             return _loadGamepad().then(({ G }) => _controllerMapper(G, _gamepadInput(), controllerKey))
                 .catch((e) => { console.warn('[Drums] createMapper failed:', e); return null; });
         },

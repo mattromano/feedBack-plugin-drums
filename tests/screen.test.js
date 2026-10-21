@@ -1113,7 +1113,8 @@ function realPlugin({ gi, store } = {}) {
     const mod = require(file);
     document.getElementById = () => null;   // after load: no Drums screen to wait for
     const keydown = (e) => { for (const f of (listeners.keydown || []).slice()) f(e); };
-    return { mod, api: window.feedBackDrums, listeners, emitted, judgments, sessions, keydown };
+    const fire = (n, detail) => { for (const f of (busFns[n] || []).slice()) f({ detail }); };
+    return { mod, api: window.feedBackDrums, listeners, emitted, judgments, sessions, keydown, fire };
 }
 function fakeCtx() {
     const fn = function () { return proxy; };
@@ -1127,10 +1128,13 @@ function fakeCanvas() {
     return { getContext: () => fakeCtx(), getBoundingClientRect: () => ({ width: 400, height: 300 }), width: 400, height: 300,
         offsetParent: {}, parentNode: null, isConnected: true, getClientRects: () => [1], offsetLeft: 0, offsetTop: 0 };
 }
-// A drum chart: snares (GM 38 = string 1, fret 14) at 2 s and 3 s.
+// A drum chart: snares (GM 38 = string 1, fret 14) at 2 s and 3 s. The arrays are
+// shared, as core's bundle keeps them across frames (a new array reloads the chart).
+const DRUM_NOTES = [{ t: 2, s: 1, f: 14 }, { t: 3, s: 1, f: 14 }];
+const NO_CHORDS = [], NO_BEATS = [];
 function drumBundle(extra) {
-    return Object.assign({ isReady: true, isPlaying: true, currentTime: 2, notes: [{ t: 2, s: 1, f: 14 }, { t: 3, s: 1, f: 14 }],
-        chords: [], beats: [], songInfo: { arrangement: 'Drums' } }, extra || {});
+    return Object.assign({ isReady: true, isPlaying: true, currentTime: 2, notes: DRUM_NOTES,
+        chords: NO_CHORDS, beats: NO_BEATS, songInfo: { arrangement: 'Drums' } }, extra || {});
 }
 async function liveView(canvas) {
     const inst = window.feedBackViz_drums2d();
@@ -1231,27 +1235,107 @@ test('effectiveOffset: the controller\'s offset, else 0 for one without, else cf
     assert.equal(mod._effectiveOffset({ cfgMs: 40, controller: null, offsets }), 40);
 });
 
-test('parking (setWanted false) leaves effective pro and offset unchanged', async () => {
-    const store = memStore({ [GP.SETTINGS_KEY]: JSON.stringify({ offsetMs: { [XBOX.id + '#1']: 30 } }) });
+// The last pro / offset a recorded session was given (createSession, then setters).
+const lastPro = (rec) => (rec.pro.length ? rec.pro[rec.pro.length - 1] : rec.opts.proDrums);
+const lastOffset = (rec) => (rec.offset.length ? rec.offset[rec.offset.length - 1] : rec.opts.inputOffsetMs);
+const XKEY = XBOX.id + '#1';
+const xboxOffsetStore = () => memStore({ [GP.SETTINGS_KEY]: JSON.stringify({ offsetMs: { [XKEY]: -20 } }), drums_input_offset_ms: '-40' });
+
+test('an idle claimed pad leaves pro and the global offset until its first pad hit, and that hit scores', async () => {
     const gi = fakeGi([XBOX]);
-    const { sessions } = realPlugin({ gi, store });
+    const { sessions } = realPlugin({ gi, store: xboxOffsetStore() });
     const v = await liveView();
-    assert.equal(sessions.length, 1);
-    assert.equal(sessions[0].opts.proDrums, true, 'pro cymbals on by default, no controller yet');
+    v.draw(drumBundle({ currentTime: 1.9 }));
+    await tick();
+    assert.equal(gi.claimCount, 1, 'claimed while playing');
+    const s = sessions[0];
+    assert.equal(lastPro(s), true, 'pro stays on for an idle pad');
+    assert.equal(lastOffset(s), -40, 'global offset');
+    // Slightly early (the pro switch rebuilds the chart from the last frame on).
+    v.draw(drumBundle({ currentTime: 1.94 }));
+    gi.button(4, 1);   // LB = red pad (snare): the engaging hit
+    assert.equal(lastPro(s), false, 'engaged: an Xbox pad plays without pro cymbals');
+    assert.equal(lastOffset(s), -20, 'with its own offset');
+    v.draw(drumBundle({ currentTime: 2.2 }));
+    v.draw(drumBundle({ currentTime: 2.4 }));
+    assert.equal(v._engineState().notesHit, 1, 'the engaging hit scored');
+    v.destroy();
+});
+
+test('parking (setWanted false) leaves effective pro and offset unchanged', async () => {
+    const gi = fakeGi([XBOX]);
+    const { sessions } = realPlugin({ gi, store: xboxOffsetStore() });
+    const v = await liveView();
     v.draw(drumBundle());
     await tick();
+    gi.button(0, 1);   // engage
     const s = sessions[0];
-    assert.equal(s.pro[s.pro.length - 1], false, 'an Xbox pad plays without pro cymbals');
-    assert.equal(s.offset[s.offset.length - 1], 30, 'with its own offset');
-    const pro = s.pro.length, off = s.offset.length;
+    assert.equal(lastPro(s), false);
+    assert.equal(lastOffset(s), -20);
+    const engagedAt = s.pro.length;
     v.draw(drumBundle({ isPlaying: false }));   // pause: parked
     assert.equal(gi.claimCount, 0);
-    assert.ok(s.pro.slice(pro).every((p) => p === false), 'pro stays off while parked');
-    assert.ok(s.offset.slice(off).every((o) => o === 30), 'offset stays while parked');
+    assert.equal(lastPro(s), false, 'pro stays off while parked');
+    assert.equal(lastOffset(s), -20, 'offset stays while parked');
     v.draw(drumBundle());
-    assert.ok(s.pro.every((p, i) => i < pro || p === false));
+    assert.equal(gi.claimCount, 1);
+    assert.equal(lastPro(s), false);
+    assert.ok(!s.pro.slice(engagedAt).includes(true), 'pro never flipped back');
     assert.equal(sessions.length, 1, 'never a new session');
     v.destroy();
+});
+
+const NEXT_SONG = [{ t: 5, s: 1, f: 14 }];
+test('a new chart after an engaged song is back on the global settings until a hit', async () => {
+    const gi = fakeGi([XBOX]);
+    const { sessions } = realPlugin({ gi, store: xboxOffsetStore() });
+    const v = await liveView();
+    v.draw(drumBundle());
+    await tick();
+    gi.button(0, 1);
+    const s = sessions[0];
+    assert.equal(lastPro(s), false);
+    v.draw(drumBundle({ isReady: false }));   // song change
+    v.draw(drumBundle({ notes: NEXT_SONG }));
+    assert.equal(lastPro(s), true);
+    assert.equal(lastOffset(s), -40);
+    gi.button(0, 0); gi.button(0, 1);
+    assert.equal(lastPro(s), false, 'engaged again by a hit');
+    v.destroy();
+});
+
+test('an engaged pad unplugged while parked: back on the global settings', async () => {
+    const gi = fakeGi([XBOX]);
+    const { sessions } = realPlugin({ gi, store: xboxOffsetStore() });
+    const v = await liveView();
+    v.draw(drumBundle());
+    await tick();
+    gi.button(0, 1);
+    v.draw(drumBundle({ isPlaying: false }));
+    const s = sessions[0];
+    assert.equal(lastPro(s), false);
+    gi.change('disconnect', 0);
+    assert.equal(lastPro(s), true);
+    assert.equal(lastOffset(s), -40);
+    v.destroy();
+});
+
+test('an engaged, parked pad stops driving unpinned views once a band pin exists', async () => {
+    const gi = fakeGi([XBOX]);
+    const { api, sessions } = realPlugin({ gi, store: xboxOffsetStore() });
+    const v = await liveView();
+    v.draw(drumBundle());
+    await tick();
+    gi.button(0, 1);
+    assert.equal(lastPro(sessions[0]), false);
+    api.setController('Other#1', fakeCanvas());   // a band lane: the free pad parks
+    assert.equal(gi.claimCount, 0);
+    assert.equal(lastPro(sessions[0]), true, 'the MIDI lane gets pro cymbals back');
+    assert.equal(lastOffset(sessions[0]), -40);
+    const fresh = await liveView();
+    assert.equal(sessions[1].opts.proDrums, true, 'a fresh unpinned view starts with pro on');
+    assert.equal(sessions[1].opts.inputOffsetMs, -40, 'and the global offset');
+    fresh.destroy(); v.destroy();
 });
 
 test('setController before init pins the instance that inits on the canvas; bad arguments return false; clearController restores routing', async () => {
@@ -1521,4 +1605,95 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     const r = await p;
     assert.equal(r.G, GP);
     assert.equal(r.S, GPS);
+});
+
+test('a pinned lane keeps its pin when highway swaps its canvas; teardown forgets the new one', async () => {
+    const gi = fakeGi([XBOX]);
+    const { api, mod, fire } = realPlugin({ gi });
+    const lane = fakeCanvas(), swapped = fakeCanvas();
+    api.setController(XKEY, lane);
+    const v = await liveView(lane);
+    await tick();
+    fire('highway:canvas-replaced', { oldCanvas: lane, newCanvas: swapped });
+    assert.equal(v._controllerPinned(), true);
+    assert.equal(mod._bandControllerFor(swapped), XKEY);
+    assert.equal(mod._bandControllerFor(lane), null);
+    assert.deepEqual([...mod._bandControllerCanvases], [swapped]);
+    const other = await liveView();
+    mod._setActiveInstance(v);
+    assert.equal(mod._routeTarget(), other, 'still out of kit routing');
+    v.destroy();
+    assert.equal(mod._bandControllerCanvases.size, 0);
+    other.destroy();
+});
+
+test('a pinned lane ignores pad presses while paused (no score; the sound is skipped by the same early return)', async () => {
+    const gi = fakeGi([XBOX]);
+    const { api } = realPlugin({ gi });
+    const lane = fakeCanvas();
+    api.setController(XKEY, lane);
+    const v = await liveView(lane);
+    await tick();
+    v.draw(drumBundle({ isPlaying: false, currentTime: 2.0 }));
+    gi.button(4, 1); gi.button(4, 0);   // LB on the band's pause menu, right on the 2 s snare
+    gi.button(0, 1); gi.button(0, 0);   // A
+    v.draw(drumBundle({ isPlaying: false, currentTime: 2.0 }));
+    let st = v._engineState();
+    assert.deepEqual([st.notesHit, st.overhits], [0, 0], 'paused: nothing scored');
+    v.draw(drumBundle({ currentTime: 3.0 }));   // playing
+    gi.button(4, 1);
+    v.draw(drumBundle({ currentTime: 3.2 }));
+    st = v._engineState();
+    assert.equal(st.notesHit, 1, 'playing: the press scores');
+    v.destroy();
+});
+
+test('listControllers: identical ids are numbered over connected controllers, as core does', async () => {
+    const off = { ...XBOX, connected: false };
+    const gi = fakeGi([off, XBOX, XBOX]);
+    const { api } = realPlugin({ gi });
+    const list = await api.listControllers();
+    assert.deepEqual(list.map((c) => [c.index, c.controllerKey, c.name]), [
+        [1, XKEY, 'Xbox 360 Controller'],
+        [2, XBOX.id + '#2', 'Xbox 360 Controller 2'],
+    ], 'a disconnected one without a core key is left out');
+    // With core's list().controllerKey (Plan 3 core) it is used as is, also when disconnected.
+    const list0 = gi.list;
+    gi.list = () => list0().map((e, i) => ({ ...e, controllerKey: [XBOX.id + '#2', XKEY, XBOX.id + '#3'][i] }));
+    const keyed = await api.listControllers();
+    assert.deepEqual(keyed.map((c) => [c.index, c.controllerKey, c.connected, c.name]), [
+        [0, XBOX.id + '#2', false, 'Xbox 360 Controller 2'],
+        [1, XKEY, true, 'Xbox 360 Controller'],
+        [2, XBOX.id + '#3', true, 'Xbox 360 Controller 2'],
+    ]);
+});
+
+test('timing Apply on a pinned lane without the gamepad module leaves the global offset alone', async () => {
+    const { api, mod } = realPlugin({ store: memStore({ drums_input_offset_ms: '12' }) });
+    delete window.DrumsGamepad;
+    const lane = fakeCanvas();
+    api.setController(XKEY, lane);
+    const v = await liveView(lane);
+    v._applyTimingSuggestion(80);
+    assert.equal(mod._cfg().inputOffsetMs, 12);
+    v.destroy();
+});
+
+test('createMapper with no gamepad-input domain resolves null without loading gamepad.js', async () => {
+    const { api } = realPlugin({});
+    delete window.DrumsGamepad;
+    delete window.DrumsGamepadSource;
+    let queried = 0;
+    document.querySelector = () => { queried++; return null; };
+    assert.equal(await api.createMapper(XKEY), null);
+    assert.equal(queried, 0, 'no script load attempted');
+});
+
+test('the Drums screen Back survives a throwing showScreen', () => {
+    const mod = freshPlugin();
+    window.showScreen = () => { throw new Error('boom'); };
+    const warn = console.warn; const warned = [];
+    console.warn = (...a) => warned.push(a);
+    try { mod._pageBack(); } finally { console.warn = warn; }
+    assert.equal(warned.length, 1);
 });

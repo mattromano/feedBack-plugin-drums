@@ -106,8 +106,10 @@ kit can drum too, through core's gamepad-input domain:
   menus get the pad back when you pause or leave. It takes a controller set up as a drum kit first, then a
   standard pad, each in slot order.
 - Hits sound the kit like keyboard hits and score without velocity (accents and ghosts score as normal hits).
-- A controller without cymbals plays with **pro cymbals off**: cymbal notes land on its pads. A pause keeps
-  the controller's settings, so the score never restarts.
+- A controller without cymbals plays with **pro cymbals off**: cymbal notes land on its pads. Its settings
+  (pro cymbals, input offset) apply from its first pad hit in a song, so an idle pad never changes a kit
+  drummer's settings. They last through a pause (the score never restarts) and end with the song, when the
+  pad is unplugged while paused, or while a band lane is set.
 - Each controller has its own input offset (`drums.gamepad.settings.v1`); the timing meter's Apply sets
   that one while a controller plays. Bindings are stored in `drums.gamepad.bindings.v1`.
 - Without core's gamepad-input domain (an older core) nothing changes.

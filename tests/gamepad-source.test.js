@@ -312,3 +312,16 @@ test('current().standardLayout: true for the built-in pad layout, false for a st
     k.src.setWanted(true);
     assert.equal(k.src.current().standardLayout, false);
 }));
+
+test('a parked controller that disconnects is forgotten: current() null, onChange fired', () => withStorage(() => {
+    const { gi, src, calls } = harness([XBOX, XBOX]);
+    src.setWanted(true);
+    src.setWanted(false);
+    assert.equal(src.current().controllerKey, 'Xbox#1');
+    const before = calls.change;
+    gi.change('disconnect', 1);   // another slot: still parked
+    assert.equal(src.current().controllerKey, 'Xbox#1');
+    gi.change('disconnect', 0);
+    assert.equal(src.current(), null);
+    assert.ok(calls.change > before);
+}));

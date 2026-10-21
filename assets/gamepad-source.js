@@ -164,6 +164,12 @@
                     return;
                 }
             } else {
+                // The parked controller unplugged: forget it (current() null), so its
+                // settings stop applying.
+                if (parked && ev.type === 'disconnect' && info && ev.index === info.index) {
+                    parked = false; info = null; binding = null; connected = false;
+                    curKey = null; curKind = null; cymbals = false;
+                }
                 tryClaim();   // a controller came, went, or was claimed or released
             }
             if (onChange) onChange();

@@ -7,8 +7,8 @@ All notable changes to the Drum Highway plugin. The format follows
 
 - **Play drums on a controller.** An Xbox-style pad (LB / RB / LT / RT red / yellow / blue / green, A kick,
   Y star power, Start play / pause) or a plastic kit drums through core's gamepad-input domain. The view
-  claims it only while a drum part plays, sounds the kit on each hit, and plays a controller without
-  cymbals with pro cymbals off. Each controller keeps its own input offset; the timing meter's Apply
+  claims it only while a drum part plays, sounds the kit on each hit, and, from its first pad hit in a
+  song, plays a controller without cymbals with pro cymbals off. Each controller keeps its own input offset; the timing meter's Apply
   sets it. Nothing changes on a core without the domain.
 - **Band API:** `feedBackDrums.setController(controllerKey, canvas)` / `clearController(canvas)` pin a
   lane to one controller (no kit or keyboard hits there, no personal best; Start and a held Back go out as
