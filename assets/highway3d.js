@@ -943,9 +943,9 @@
             if (!hctx) return;
             const ctx = hctx;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
-            diffRect = null; timingRect = null; timingSuggest = null;   // no stale click targets while hidden
             ctx.clearRect(0, 0, hud.width, hud.height);
-            if (frame.hideScore) return;
+            // hideScore (band mode: the band HUD shows the score): only the difficulty badge is drawn.
+            const hideScore = !!frame.hideScore;
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             const Wc = cssW, Hc = cssH;
             const m = hudModel(state);
@@ -971,60 +971,62 @@
             const meterW = 190 * scale, meterH = 14 * scale;
             const mx = align === 'right' ? lx - meterW : lx;
             const my = ly;
-            ctx.font = `700 ${11 * scale}px ${FONT}`;
-            ctx.fillStyle = m.spActive ? '#8fe6ff' : (m.spReady ? '#bff0ff' : '#8a93b0');
-            const label = m.spActive ? 'STAR POWER ACTIVE' : (m.spReady ? 'STAR POWER READY' : 'STAR POWER');
-            ctx.fillText(label, align === 'right' ? lx : lx, my - 6 * scale);
-            ctx.shadowBlur = 0;
-            ctx.fillStyle = 'rgba(10,14,30,0.85)';
-            ctx.fillRect(mx, my, meterW, meterH);
-            const pulse = m.spReady || m.spActive ? 0.75 + 0.25 * Math.sin(wall / 120) : 1;
-            const fillW = meterW * m.spAmount;
-            const grad = ctx.createLinearGradient(mx, 0, mx + meterW, 0);
-            grad.addColorStop(0, `rgba(90,190,255,${pulse})`);
-            grad.addColorStop(1, `rgba(225,245,255,${pulse})`);
-            ctx.fillStyle = grad;
-            ctx.fillRect(mx, my, fillW, meterH);
-            ctx.strokeStyle = m.spReady || m.spActive ? '#bfefff' : '#3d4a70';
-            ctx.lineWidth = 1.5;
-            ctx.strokeRect(mx + 0.5, my + 0.5, meterW - 1, meterH - 1);
-            ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-            for (let q = 1; q < 4; q++) {
-                const x = mx + meterW * q / 4;
-                ctx.beginPath(); ctx.moveTo(x, my + 1); ctx.lineTo(x, my + meterH - 1); ctx.stroke();
-            }
-
-            // score
-            ctx.shadowColor = 'rgba(0,0,0,0.85)';
-            ctx.shadowBlur = 8;
-            ctx.font = `italic 800 ${40 * scale}px ${FONT}`;
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(m.score, lx, my + meterH + 46 * scale);
-            // stars
-            const sr = 11 * scale;
-            const starY = my + meterH + 72 * scale;
-            for (let i = 0; i < 5; i++) {
-                const cx = align === 'right'
-                    ? lx - sr - (4 - i) * (sr * 2.3)
-                    : lx + sr + i * (sr * 2.3);
-                const full = i < m.stars;
-                const partial = i === m.stars ? m.starFrac : 0;
-                drawStar(ctx, cx, starY, sr, 'rgba(40,44,64,0.9)', null);
-                if (full) drawStar(ctx, cx, starY, sr, m.gold ? '#ffcf3a' : '#f4f6ff', null);
-                else if (partial > 0) {
-                    ctx.save();
-                    ctx.beginPath();
-                    ctx.rect(cx - sr, starY + sr - 2 * sr * partial, 2 * sr, 2 * sr * partial);
-                    ctx.clip();
-                    drawStar(ctx, cx, starY, sr, 'rgba(244,246,255,0.55)', null);
-                    ctx.restore();
+            const starY = my + meterH + 72 * scale;   // the badge sits under the stars, drawn or not
+            if (!hideScore) {
+                ctx.font = `700 ${11 * scale}px ${FONT}`;
+                ctx.fillStyle = m.spActive ? '#8fe6ff' : (m.spReady ? '#bff0ff' : '#8a93b0');
+                const label = m.spActive ? 'STAR POWER ACTIVE' : (m.spReady ? 'STAR POWER READY' : 'STAR POWER');
+                ctx.fillText(label, align === 'right' ? lx : lx, my - 6 * scale);
+                ctx.shadowBlur = 0;
+                ctx.fillStyle = 'rgba(10,14,30,0.85)';
+                ctx.fillRect(mx, my, meterW, meterH);
+                const pulse = m.spReady || m.spActive ? 0.75 + 0.25 * Math.sin(wall / 120) : 1;
+                const fillW = meterW * m.spAmount;
+                const grad = ctx.createLinearGradient(mx, 0, mx + meterW, 0);
+                grad.addColorStop(0, `rgba(90,190,255,${pulse})`);
+                grad.addColorStop(1, `rgba(225,245,255,${pulse})`);
+                ctx.fillStyle = grad;
+                ctx.fillRect(mx, my, fillW, meterH);
+                ctx.strokeStyle = m.spReady || m.spActive ? '#bfefff' : '#3d4a70';
+                ctx.lineWidth = 1.5;
+                ctx.strokeRect(mx + 0.5, my + 0.5, meterW - 1, meterH - 1);
+                ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+                for (let q = 1; q < 4; q++) {
+                    const x = mx + meterW * q / 4;
+                    ctx.beginPath(); ctx.moveTo(x, my + 1); ctx.lineTo(x, my + meterH - 1); ctx.stroke();
                 }
-                drawStar(ctx, cx, starY, sr, null, m.gold ? '#ffcf3a' : 'rgba(200,210,255,0.6)');
+
+                // score
+                ctx.shadowColor = 'rgba(0,0,0,0.85)';
+                ctx.shadowBlur = 8;
+                ctx.font = `italic 800 ${40 * scale}px ${FONT}`;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillText(m.score, lx, my + meterH + 46 * scale);
+                // stars
+                const sr = 11 * scale;
+                for (let i = 0; i < 5; i++) {
+                    const cx = align === 'right'
+                        ? lx - sr - (4 - i) * (sr * 2.3)
+                        : lx + sr + i * (sr * 2.3);
+                    const full = i < m.stars;
+                    const partial = i === m.stars ? m.starFrac : 0;
+                    drawStar(ctx, cx, starY, sr, 'rgba(40,44,64,0.9)', null);
+                    if (full) drawStar(ctx, cx, starY, sr, m.gold ? '#ffcf3a' : '#f4f6ff', null);
+                    else if (partial > 0) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.rect(cx - sr, starY + sr - 2 * sr * partial, 2 * sr, 2 * sr * partial);
+                        ctx.clip();
+                        drawStar(ctx, cx, starY, sr, 'rgba(244,246,255,0.55)', null);
+                        ctx.restore();
+                    }
+                    drawStar(ctx, cx, starY, sr, null, m.gold ? '#ffcf3a' : 'rgba(200,210,255,0.6)');
+                }
+                // accuracy
+                ctx.font = `600 ${13 * scale}px ${FONT}`;
+                ctx.fillStyle = '#c3cbe6';
+                ctx.fillText('Accuracy ' + m.accuracy + '   ' + m.hitsText, lx, starY + 30 * scale);
             }
-            // accuracy
-            ctx.font = `600 ${13 * scale}px ${FONT}`;
-            ctx.fillStyle = '#c3cbe6';
-            ctx.fillText('Accuracy ' + m.accuracy + '   ' + m.hitsText, lx, starY + 30 * scale);
 
             // difficulty badge (screen.js puts a clickable button over diffRect)
             diffRect = null;
@@ -1061,6 +1063,12 @@
                 ctx.textBaseline = 'alphabetic';
                 ctx.textAlign = align;
                 diffRect = { x: px, y: py, w: pw, h: ph };
+            }
+            if (hideScore) {
+                // The timing meter, multiplier, feeds, solo meter, score pops and toasts belong to the score display.
+                timingRect = null; timingSuggest = null;
+                ctx.shadowBlur = 0;
+                return;
             }
 
             // Early/late meter (score column, under the difficulty badge): the last hits as ticks

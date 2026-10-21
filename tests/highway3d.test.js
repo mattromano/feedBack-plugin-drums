@@ -223,13 +223,28 @@ test('3D view: spark bursts grow with the streak, combo rings / milestone bursts
     } finally { h.done(); }
 });
 
-test('drawHud stops after clearing when frame.hideScore', () => {
-    const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'assets', 'highway3d.js'), 'utf8');
-    const start = src.indexOf('function drawHud(frame, state, wall) {');
-    assert.ok(start >= 0, 'drawHud found');
-    const body = src.slice(start, src.indexOf('\n        }\n', start));
-    const clear = body.indexOf('clearRect');
-    const stop = body.indexOf('if (frame.hideScore) return;');
-    assert.ok(clear >= 0, 'drawHud clears the HUD canvas');
-    assert.ok(stop > clear, 'hideScore returns after the clear');
+test('drawHud with frame.hideScore draws only the difficulty badge and keeps its click target', () => {
+    const texts = [];
+    const ctx = stub();
+    ctx.fillText = (t) => texts.push(String(t));
+    ctx.measureText = (t) => ({ width: String(t).length * 7 });
+    const hudCanvas = stub();
+    hudCanvas.getContext = () => ctx;
+    const h = sceneHarness([{ t: 1, s: 1, f: 14 }], { hudCanvas });
+    try {
+        const difficulty = { text: 'EXPERT', color: '#fff' };
+        const frame = (hideScore) => ({ time: 0.5, session: h.s, wallNow: 500, difficulty, hideScore, message: 'msg' });
+        h.view.render(frame(false));
+        assert.ok(texts.includes('EXPERT'));
+        assert.ok(texts.some(t => t.startsWith('STAR POWER')), 'score column drawn');
+        assert.ok(texts.some(t => t.startsWith('Accuracy')));
+        assert.ok(h.view.difficultyRect, 'badge click target');
+        texts.length = 0;
+        h.view.render(frame(true));
+        assert.deepEqual(texts, ['EXPERT'], 'only the badge');
+        const r = h.view.difficultyRect;
+        assert.ok(r && r.w > 0 && r.h > 0, 'the badge click target stays valid');
+        assert.equal(h.view.timingRect, null);
+        assert.equal(h.view.timingSuggest, null);
+    } finally { h.done(); }
 });

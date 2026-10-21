@@ -321,8 +321,8 @@ Click "Reset Map" to return to standard GM mapping.
 - `clearDifficulty(canvas)` forgets the canvas's remembered difficulty; its instance follows the global difficulty again.
 - `setMidiInput(logicalSourceKey)` picks the MIDI input like the settings dropdown does, saved as a manual choice. `''` is "None". Non-strings are ignored.
 - `setScoreHudHidden(canvas, hidden)` hides (`true`) or shows (`false`) that lane's own score display: the 2D
-  score HUD, the 3D HUD overlay and the end-of-song card. Scoring carries on, and the 2D view keeps its difficulty
-  badge (the 3D view draws its badge on the HUD overlay, so it hides with it). The switch
+  score HUD, the 3D HUD's score, meters and toasts, and the end-of-song card. Scoring carries on, the difficulty
+  badge stays (2D and 3D), and the run's personal best is still recorded (not in split view). The switch
   is remembered per canvas, so it survives a re-init on the same canvas, and is not saved. Returns `true` when
   applied, `false` (changing nothing) unless `canvas` is an object and `hidden` a boolean.
 - `isScoreHudHidden(canvas)` returns whether that canvas's score display is hidden.

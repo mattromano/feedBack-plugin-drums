@@ -2058,6 +2058,8 @@ function _scoreHudHiddenFor(canvas) {
 function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && !hidden); }
 // Pure: the end card needs a session, no split view and the lane not hidden.
 function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && !hidden); }
+// Pure: a hidden lane (single view) skips the card but still records its personal best.
+function _shouldRecordBestOnly({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && hidden); }
 // Pure: which difficulty this instance pins for itself (null = follow global).
 // A split panel's own pick wins in split view; otherwise the band pin.
 function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
@@ -2707,11 +2709,14 @@ function createFactory(forceView) {
                     } catch (_) { /* listeners only */ }
                 });
                 // Judgments and star power on core's bus (drums:hit, drums:miss, ...).
-                _session.setOnEvent((d) => {
-                    const bus = _bus();
-                    if (!bus || typeof bus.emit !== 'function' || !d || !_BAND_EVENT_TYPES.has(d.type)) return;
-                    try { bus.emit('drums:' + d.type, _bandEventDetail(d, _highwayCanvas)); } catch (_) { /* listeners only */ }
-                });
+                // Listening only with a bus that can emit, so solo drums without one pays nothing per hit.
+                const bus = _bus();
+                if (bus && typeof bus.emit === 'function') {
+                    _session.setOnEvent((d) => {
+                        if (!d || !_BAND_EVENT_TYPES.has(d.type)) return;
+                        try { bus.emit('drums:' + d.type, _bandEventDetail(d, _highwayCanvas)); } catch (_) { /* listeners only */ }
+                    });
+                }
             }
         }).catch((e) => console.warn('[Drums] scoring unavailable (engine/session failed to load):', e));
     }
@@ -4475,9 +4480,9 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
-                if (_shouldShowEndCard({ hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas) })) {
-                    _drumsEndCard(_session, _badge);
-                }
+                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas) };
+                if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
+                else if (_shouldRecordBestOnly(when)) _recordRunBest(_session, _badge);
             };
             if (_bus()) { try { _bus().on('song:ended', _onSongEnded); } catch (_) { _onSongEnded = null; } }
 
@@ -4962,18 +4967,34 @@ function _recordBest(key, total) {
     return { prev, isBest };
 }
 
+// The run's final score: engine score + session bonuses, with the song and
+// difficulty text the best score is keyed by. null when nothing was played
+// (watching a chart scores nothing).
+function _drumsRunTotal(session, badge) {
+    const st = session && session.getState ? session.getState() : null;
+    if (!st || !(st.notesHit > 0)) return null;
+    const b = (session.getBonus && session.getBonus()) || null;
+    const host = window.feedBack || window.slopsmith;
+    const song = (host && host.currentSong) || {};
+    const diff = badge && badge.text ? badge.text : 'EXPERT';
+    return { song, diff, total: Math.round((st.score || 0) + ((b && b.total) || 0)) };
+}
+// Record the run's personal best without a card (band mode hides the card).
+// -> _recordBest's {prev, isBest}, or null when nothing was played.
+function _recordRunBest(session, badge) {
+    const run = _drumsRunTotal(session, badge);
+    return run ? _recordBest(_bestKey(run.song, run.diff), run.total) : null;
+}
+
 let _endCardAt = 0;
 function _drumsEndCard(session, badge) {
-    const st = session && session.getState ? session.getState() : null;
-    // Only after the player actually played (watching a chart scores nothing).
-    if (!st || !(st.notesHit > 0)) return;
+    const run = _drumsRunTotal(session, badge);
+    if (!run) return;
     if (performance.now() - _endCardAt < 2000) return;   // splitscreen: one card
     _endCardAt = performance.now();
+    const st = session.getState();
     const b = (session.getBonus && session.getBonus()) || { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, runs: [], solos: [] };
-    const host = window.feedBack || window.slopsmith;
-    const cs = (host && host.currentSong) || {};
-    const diff = badge && badge.text ? badge.text : 'EXPERT';
-    const total = Math.round((st.score || 0) + (b.total || 0));
+    const cs = run.song, diff = run.diff, total = run.total;
     const { prev, isBest } = _recordBest(_bestKey(cs, diff), total);
     const n = (x) => Math.round(x || 0).toLocaleString('en-US');
     const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -5383,7 +5404,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
-        _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard,
+        _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,

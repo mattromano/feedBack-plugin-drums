@@ -941,3 +941,30 @@ test('_shouldDrawScoreHud and _shouldShowEndCard follow the hide switch', () => 
     assert.equal(mod._shouldShowEndCard({ hasSession: true, ssActive: true, hidden: false }), false);
     assert.equal(mod._shouldShowEndCard({ hasSession: false, ssActive: false, hidden: false }), false);
 });
+
+test('hidden score display: the run still records its personal best (not in split view)', () => {
+    const store = {};
+    global.window = {};
+    global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+    global.document = { addEventListener: () => {} };
+    const file = path.join(__dirname, '..', 'screen.js');
+    delete require.cache[require.resolve(file)];
+    const mod = require(file);
+    window.feedBack = { on() {}, currentSong: { filename: 'song.sloppak', title: 'Song' } };
+    const session = (notesHit, score, bonus) => ({ getState: () => ({ notesHit, notesMissed: 0, score }), getBonus: () => ({ total: bonus }) });
+    const badge = { text: 'HARD' };
+    // When: a hidden lane in single view skips the card but records the best; split view does neither.
+    assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: true }), true);
+    assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: false }), false, 'the card records it');
+    assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: true, hidden: true }), false, 'split view unchanged');
+    assert.equal(mod._shouldRecordBestOnly({ hasSession: false, ssActive: false, hidden: true }), false);
+    // What: engine score + bonuses, under the card's key.
+    assert.deepEqual(mod._drumsRunTotal(session(5, 1000, 50), badge), { song: window.feedBack.currentSong, diff: 'HARD', total: 1050 });
+    assert.equal(mod._drumsRunTotal(session(0, 0, 0), badge), null, 'nothing played');
+    assert.deepEqual(mod._recordRunBest(session(5, 1000, 50), badge), { prev: null, isBest: true });
+    assert.equal(store['drums_best_v1:song.sloppak|HARD'], '1050');
+    assert.deepEqual(mod._recordRunBest(session(5, 900, 0), badge), { prev: 1050, isBest: false });
+    assert.equal(store['drums_best_v1:song.sloppak|HARD'], '1050');
+    assert.equal(mod._recordRunBest(session(0, 0, 0), badge), null);
+    assert.equal(mod._drumsRunTotal(session(3, 10, 0), null).diff, 'EXPERT');
+});
