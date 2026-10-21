@@ -10,12 +10,15 @@ All notable changes to the Drum Highway plugin. The format follows
   claims it only while a drum part plays, sounds the kit on each hit, and, from its first pad hit in a
   song, plays a controller without cymbals with pro cymbals off. Each controller keeps its own input offset; the timing meter's Apply
   sets it. Nothing changes on a core without the domain.
+- **Controllers card on the Drums screen.** Set up a controller as a drum kit (Skip for cymbals / star
+  power), pick the gamepad layout, rebind one action, and set a per-controller input offset (−250 to
+  250 ms). Pad lights stay silent. While the card is open, the free controller stands down.
 - **Band API:** `feedBackDrums.setController(controllerKey, canvas)` / `clearController(canvas)` pin a
   lane to one controller (no kit or keyboard hits there, no personal best; Start and a held Back go out as
   `drums:band-pause` / `drums:band-back-hold`), `listControllers()` and `createMapper(controllerKey)`
   (Promises) and `openControls({ returnTo })`.
 - `plugin.json` declares the `gamepad-input` capability. Asset version bumped (new `gamepad.js`,
-  `gamepad-source.js`).
+  `gamepad-source.js`, `gamepad-controls.js`).
 
 ## 4.5.3
 
