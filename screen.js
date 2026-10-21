@@ -2048,6 +2048,16 @@ const _bandDifficulty = new WeakMap();
 function _bandDifficultyFor(canvas) {
     return (canvas && typeof canvas === 'object' && _bandDifficulty.get(canvas)) || null;
 }
+// Band mode hides a lane's own score display (2D/3D HUD, end card); the
+// band HUD shows the score instead. Per canvas, like the band difficulty.
+const _bandScoreHidden = new WeakMap();
+function _scoreHudHiddenFor(canvas) {
+    return !!(canvas && typeof canvas === 'object' && _bandScoreHidden.get(canvas));
+}
+// Pure: draw the score HUD only with hit detection on and the lane not hidden.
+function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && !hidden); }
+// Pure: the end card needs a session, no split view and the lane not hidden.
+function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && !hidden); }
 // Pure: which difficulty this instance pins for itself (null = follow global).
 // A split panel's own pick wins in split view; otherwise the band pin.
 function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
@@ -2664,7 +2674,8 @@ function createFactory(forceView) {
         const hint = meta && meta.activation.length
             ? 'Hit the marked note at the end of the fill to activate'
             : 'Press Enter' + (_spPadName() ? ' or hit ' + _spPadName() : '') + ' to activate star power';
-        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _cfg.inputOffsetMs });
+        _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _cfg.inputOffsetMs,
+            hideScore: _scoreHudHiddenFor(_highwayCanvas) });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -3923,7 +3934,7 @@ function createFactory(forceView) {
         }
 
         let hudLeft = null;
-        if (_cfg.hitDetection) {
+        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: _scoreHudHiddenFor(_highwayCanvas) })) {
             if (_session) hudLeft = _drawScoreHud(ctx, W);
             else if ((_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
         }
@@ -4463,7 +4474,11 @@ function createFactory(forceView) {
             setTimeout(() => { try { if (_isReady) _ensurePanelDiffSelect(); } catch (_) { /* ignore */ } }, 300);
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
-            _onSongEnded = () => { if (_session && !_ssActive()) _drumsEndCard(_session, _badge); };
+            _onSongEnded = () => {
+                if (_shouldShowEndCard({ hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas) })) {
+                    _drumsEndCard(_session, _badge);
+                }
+            };
             if (_bus()) { try { _bus().on('song:ended', _onSongEnded); } catch (_) { _onSongEnded = null; } }
 
             // Kick off MIDI + synth. One-time init — subsequent
@@ -4786,6 +4801,15 @@ if (typeof window !== 'undefined') {
             _saveCfg('midiManual', key ? '1' : '');
             _midiConnect(key).catch((e) => console.warn('[Drums] midi connect failed:', e));
         },
+        // Hide (true) or show (false) that lane's own score HUD and end card.
+        // false (changing nothing) unless canvas is an object and hidden a boolean.
+        setScoreHudHidden: (canvas, hidden) => {
+            if (!canvas || typeof canvas !== 'object' || typeof hidden !== 'boolean') return false;
+            if (hidden) _bandScoreHidden.set(canvas, true);
+            else _bandScoreHidden.delete(canvas);
+            return true;
+        },
+        isScoreHudHidden: (canvas) => _scoreHudHiddenFor(canvas),
         getInstanceState: (canvas) => {
             const inst = _instanceForCanvas(canvas);
             try { return inst && inst._engineState ? inst._engineState() : null; } catch (_) { return null; }
@@ -5359,6 +5383,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _difficultyPref: () => _cfg.difficulty, _cfg: () => _cfg,
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
+        _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,

@@ -278,11 +278,12 @@
     /**
      * createView(THREE, canvas, {hudCanvas, context}) -> view.
      *   view.resize(cssW, cssH, pixelRatio)
-     *   view.render({time, session, wallNow, lookahead, loading, message, hint, difficulty, inputOffsetMs})
+     *   view.render({time, session, wallNow, lookahead, loading, message, hint, difficulty, inputOffsetMs, hideScore})
      *     difficulty: difficultyBadge() output, drawn as a pill in the HUD; view.difficultyRect is
      *     its css-px rect after the frame (screen.js overlays a clickable button there)
      *     inputOffsetMs: the player's input offset, for the early/late meter's suggestion; the
      *     meter's Apply pill is at view.timingRect, for the offset view.timingSuggest
+     *     hideScore: true leaves the HUD overlay empty (band mode shows the score itself)
      *   view.dispose()
      *   view.fxSnapshot(): the hit FX of the last frame ({trail: [{state, kind, alpha, z}], sparksLive,
      *     sparksBorn, flash, flashHit, pops, popPool, bursts, ring, breakWash}) for tests and debugging
@@ -942,7 +943,9 @@
             if (!hctx) return;
             const ctx = hctx;
             ctx.setTransform(1, 0, 0, 1, 0, 0);
+            diffRect = null; timingRect = null; timingSuggest = null;   // no stale click targets while hidden
             ctx.clearRect(0, 0, hud.width, hud.height);
+            if (frame.hideScore) return;
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             const Wc = cssW, Hc = cssH;
             const m = hudModel(state);

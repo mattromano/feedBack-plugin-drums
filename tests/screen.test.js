@@ -910,3 +910,34 @@ test('_bandEventDetail adds the canvas and keeps the payload', () => {
     assert.equal(out.canvas, c);
     assert.deepEqual(d, { type: 'hit', points: 60 }, 'the input is not mutated');
 });
+
+// ── Band score display switch (setScoreHudHidden) ──
+test('band API: setScoreHudHidden remembers per canvas and refuses junk', () => {
+    const mod = freshPlugin();
+    const api = window.feedBackDrums;
+    const c = {}, other = {};
+    assert.equal(api.isScoreHudHidden(c), false);
+    assert.equal(api.setScoreHudHidden(c, true), true);
+    assert.equal(api.isScoreHudHidden(c), true);
+    assert.equal(mod._scoreHudHiddenFor(c), true);
+    assert.equal(api.isScoreHudHidden(other), false);
+    assert.equal(api.setScoreHudHidden(c, 'yes'), false);
+    assert.equal(api.isScoreHudHidden(c), true, 'junk changes nothing');
+    assert.equal(api.setScoreHudHidden(null, true), false);
+    assert.equal(api.setScoreHudHidden('canvas', true), false);
+    assert.equal(api.isScoreHudHidden(null), false);
+    assert.equal(api.setScoreHudHidden(c, false), true);
+    assert.equal(api.isScoreHudHidden(c), false);
+    assert.equal(mod._scoreHudHiddenFor(c), false);
+});
+
+test('_shouldDrawScoreHud and _shouldShowEndCard follow the hide switch', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._shouldDrawScoreHud({ hitDetection: true, hidden: false }), true);
+    assert.equal(mod._shouldDrawScoreHud({ hitDetection: true, hidden: true }), false);
+    assert.equal(mod._shouldDrawScoreHud({ hitDetection: false, hidden: false }), false);
+    assert.equal(mod._shouldShowEndCard({ hasSession: true, ssActive: false, hidden: false }), true);
+    assert.equal(mod._shouldShowEndCard({ hasSession: true, ssActive: false, hidden: true }), false);
+    assert.equal(mod._shouldShowEndCard({ hasSession: true, ssActive: true, hidden: false }), false);
+    assert.equal(mod._shouldShowEndCard({ hasSession: false, ssActive: false, hidden: false }), false);
+});

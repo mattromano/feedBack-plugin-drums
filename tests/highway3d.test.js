@@ -222,3 +222,14 @@ test('3D view: spark bursts grow with the streak, combo rings / milestone bursts
         assert.ok(br.breakWash, 'streak-break wash');
     } finally { h.done(); }
 });
+
+test('drawHud stops after clearing when frame.hideScore', () => {
+    const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'assets', 'highway3d.js'), 'utf8');
+    const start = src.indexOf('function drawHud(frame, state, wall) {');
+    assert.ok(start >= 0, 'drawHud found');
+    const body = src.slice(start, src.indexOf('\n        }\n', start));
+    const clear = body.indexOf('clearRect');
+    const stop = body.indexOf('if (frame.hideScore) return;');
+    assert.ok(clear >= 0, 'drawHud clears the HUD canvas');
+    assert.ok(stop > clear, 'hideScore returns after the clear');
+});

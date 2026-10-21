@@ -320,6 +320,12 @@ Click "Reset Map" to return to standard GM mapping.
 - `setDifficulty(id, canvas)` sets the difficulty for that lane only (`easy`, `medium`, `hard`, `expert`, `expert_plus`). Without a canvas it sets the global difficulty. A canvas with no instance yet never changes the global difficulty; the pick is remembered for it. The memory is per canvas, so a lane that re-inits on the same canvas keeps its band difficulty (in split view a panel's own pick still wins). Unknown ids are ignored and not remembered.
 - `clearDifficulty(canvas)` forgets the canvas's remembered difficulty; its instance follows the global difficulty again.
 - `setMidiInput(logicalSourceKey)` picks the MIDI input like the settings dropdown does, saved as a manual choice. `''` is "None". Non-strings are ignored.
+- `setScoreHudHidden(canvas, hidden)` hides (`true`) or shows (`false`) that lane's own score display: the 2D
+  score HUD, the 3D HUD overlay and the end-of-song card. Scoring carries on, and the 2D view keeps its difficulty
+  badge (the 3D view draws its badge on the HUD overlay, so it hides with it). The switch
+  is remembered per canvas, so it survives a re-init on the same canvas, and is not saved. Returns `true` when
+  applied, `false` (changing nothing) unless `canvas` is an object and `hidden` a boolean.
+- `isScoreHudHidden(canvas)` returns whether that canvas's score display is hidden.
 - `getInstanceState(canvas)` returns that lane's scoring state, or `null`.
 
 ## Events for other plugins
