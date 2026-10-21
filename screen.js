@@ -2081,14 +2081,31 @@ function _instanceForCanvas(canvas) {
     return null;
 }
 
-// True while a modal dialog is open (band results, Settings overlay, a confirm
-// dialog). Drum, star power and difficulty keys stand down so they can't leak
-// into it.
+// True while a VISIBLE modal dialog is open (band results, Settings overlay, a
+// confirm dialog). Drum, star power and difficulty keys stand down so they can't
+// leak into it. Dialogs that stay mounted but hidden (a closed drawer, a plugin's
+// hidden summary) don't count, or solo play would lose its keys.
 function _modalOpen(doc) {
     try {
-        return !!(doc && typeof doc.querySelector === 'function'
-            && doc.querySelector('[aria-modal="true"], .feedBack-modal'));
-    } catch (_) { return false; }
+        if (!doc || typeof doc.querySelectorAll !== 'function') return false;
+        const nodes = doc.querySelectorAll('[aria-modal="true"], .feedBack-modal');
+        const win = doc.defaultView || (typeof window !== 'undefined' ? window : null);
+        for (let i = 0; nodes && i < nodes.length; i++) {
+            const n = nodes[i];
+            if (!n) continue;
+            if (n.hidden === true) continue;
+            if (typeof n.closest === 'function' && n.closest('[hidden]')) continue;
+            if (typeof n.getClientRects === 'function') {
+                if (n.getClientRects().length === 0 && n.offsetParent === null) continue;
+            } else if (n.offsetParent === null) continue;
+            if (win && typeof win.getComputedStyle === 'function') {
+                const cs = win.getComputedStyle(n);
+                if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+            }
+            return true;
+        }
+    } catch (_) { /* ignore */ }
+    return false;
 }
 
 // Which drum view gets kit hits. In split view focus starts on panel 1 and
@@ -2605,11 +2622,11 @@ function createFactory(forceView) {
             .catch((e) => console.warn('[Drums] keyboard input unavailable:', e));
         _onKeyDown = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_cfg.keyboard) return;
-            if (_modalOpen(document)) return;
             if (!_V || !_h || !_session) return;
             if (_h.isTypingTarget(e.target) || _h.isTypingTarget(document.activeElement)) return;
             const m = _V.keyToPad(e);
             if (!m) return;
+            if (_modalOpen(document)) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             if (e.repeat) return;
@@ -3141,7 +3158,6 @@ function createFactory(forceView) {
         if (_onSpKey) return;
         _onSpKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h || !_session) return;
-            if (_modalOpen(document)) return;
             if (e.code !== 'Enter' && e.code !== 'NumpadEnter' && e.key !== 'Enter') return;
             if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
             const H = _h;
@@ -3151,6 +3167,7 @@ function createFactory(forceView) {
             const eng = _session.engine;
             const st = _session.getState();
             if (!eng || !eng.manualActivation || !st || !st.starPower || !st.starPower.canActivate || st.starPower.active) return;
+            if (_modalOpen(document)) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             _session.activate(_inputTime(e.timeStamp));
@@ -3163,11 +3180,11 @@ function createFactory(forceView) {
         if (_onDiffKey) return;
         _onDiffKey = (e) => {
             if (_instanceDestroyed || !_isReady || !_isFocused || !_hwVisible || !_h) return;
-            if (_modalOpen(document)) return;
             const H = _h;
             if (H.isTypingTarget(e.target) || H.isTypingTarget(document.activeElement)) return;
             const k = H.isDifficultyKey(e);
             if (!k) return;
+            if (_modalOpen(document)) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             if (e.repeat) return;

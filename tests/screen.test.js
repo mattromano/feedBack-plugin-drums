@@ -972,12 +972,30 @@ test('hidden score display: the run still records its personal best (not in spli
 test('_modalOpen finds an open modal dialog', () => {
     const mod = freshPlugin();
     let seen = null;
-    assert.equal(mod._modalOpen({ querySelector: (s) => { seen = s; return {}; } }), true);
+    const docOf = (nodes) => ({ querySelectorAll: (s) => { seen = s; return nodes; } });
+    assert.equal(mod._modalOpen(docOf([{}])), true);
     assert.equal(seen, '[aria-modal="true"], .feedBack-modal');
-    assert.equal(mod._modalOpen({ querySelector: () => null }), false);
+    assert.equal(mod._modalOpen(docOf([])), false);
     assert.equal(mod._modalOpen(null), false);
     assert.equal(mod._modalOpen({}), false);
-    assert.equal(mod._modalOpen({ querySelector: () => { throw new Error('boom'); } }), false);
+    assert.equal(mod._modalOpen({ querySelectorAll: () => { throw new Error('boom'); } }), false);
+});
+
+test('_modalOpen ignores hidden modals and counts visible ones', () => {
+    const mod = freshPlugin();
+    const docOf = (nodes, style) => ({
+        querySelectorAll: () => nodes,
+        defaultView: { getComputedStyle: () => style || {} },
+    });
+    const vis = (extra) => Object.assign({ getClientRects: () => [1], offsetParent: {} }, extra);
+    assert.equal(mod._modalOpen(docOf([vis()])), true, 'visible');
+    assert.equal(mod._modalOpen(docOf([vis({ hidden: true })])), false, 'hidden attribute');
+    assert.equal(mod._modalOpen(docOf([vis({ closest: () => ({}) })])), false, 'hidden ancestor');
+    assert.equal(mod._modalOpen(docOf([vis({ getClientRects: () => [], offsetParent: null })])), false, 'no box');
+    assert.equal(mod._modalOpen(docOf([vis()], { display: 'none' })), false, 'display:none');
+    assert.equal(mod._modalOpen(docOf([vis()], { visibility: 'hidden' })), false, 'visibility:hidden');
+    assert.equal(mod._modalOpen(docOf([vis({ hidden: true }), vis()])), true, 'one visible among hidden');
+    assert.equal(mod._modalOpen(docOf([vis({ getClientRects: () => [], offsetParent: {} })])), true, 'offsetParent alone is enough');
 });
 
 test('drum, star power and difficulty keys stand down under a modal', () => {
