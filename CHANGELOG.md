@@ -6,7 +6,7 @@ All notable changes to the Drum Highway plugin. The format follows
 ## [Unreleased]
 
 ### Added
-- **Play as** entry for core's library menus (`libraryCardActions`, placement `play-as`): Drums, on any song with a drum chart or a Drums arrangement. It plays on the Drum Highway for that play only; a connected kit or game controller plays it as usual.
+- **Play as** entry for core's library menus (`libraryCardActions`, placement `play-as`): Drums, on any song with a drum chart or a Drums arrangement. It asks for the difficulty first (Easy … Expert+, the saved one focused) and plays on the Drum Highway for that play only; a connected kit or game controller plays it as usual.
 
 ### Changed
 - Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).

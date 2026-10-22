@@ -1884,3 +1884,16 @@ test('_registerDrumsPlayAs registers a play-as entry that plays through core pla
     assert.deepEqual(plays, [['x y', { viz: 'drums', arrangement: 2 }]]);
     assert.equal(mod._registerDrumsPlayAs({}), null);   // older core: nothing to register with
 });
+
+test('the drums play-as entry asks for the difficulty and saves the pick', () => {
+    const mod = freshPlugin();
+    const specs = [];
+    const fb = { libraryCardActions: { register: (spec) => { specs.push(spec); return () => {}; } }, ui: { playSongAs: () => true } };
+    mod._registerDrumsPlayAs(fb);
+    const c = specs[0].choices();
+    assert.deepEqual(c.items.map((i) => i.key), ['easy', 'medium', 'hard', 'expert', 'expert_plus']);
+    assert.equal(c.default, mod._difficultyPref());
+    specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' });
+    assert.equal(mod._difficultyPref(), 'hard');
+    assert.equal(specs[0].choices().default, 'hard');
+});

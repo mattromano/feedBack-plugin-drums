@@ -5179,9 +5179,16 @@ function _registerDrumsPlayAs(fb) {
         id: 'drums.play-as', pluginId: 'drums', label: 'Drums', hint: 'kit or controller', group: 'Drums',
         placement: 'play-as', order: 30,
         applies: (song) => _drumsPlayAs(song) !== null,
-        run: (song) => {
+        // The difficulty, asked first (the saved one focused); picking one saves it like the panel.
+        choices: () => ({
+            title: 'Difficulty', default: _cfg.difficulty,
+            items: DIFFICULTY_IDS.map((id) => ({ key: id, label: DIFFICULTY_NAMES[id], hint: id === 'expert_plus' ? '2x kick' : '' })),
+        }),
+        run: (song, ctx) => {
             const how = _drumsPlayAs(song);
             if (!how) return false;
+            const diff = ctx && ctx.choice;
+            if (diff != null && _VALID_DIFFICULTIES.has(diff)) _setDifficulty(diff);
             const ui = fb.ui;
             if (ui && typeof ui.playSongAs === 'function') return ui.playSongAs(song.filename, how);
             if (typeof window.setViz === 'function') window.setViz(how.viz);
