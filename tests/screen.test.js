@@ -1581,12 +1581,12 @@ test('openControls shows plugin-drums and Back returns to returnTo once', () => 
     window.showScreen = (id) => shown.push(id);
     let scrolled = 0;
     document.querySelector = (sel) => (sel === 'section[aria-labelledby="dr-h-pads"]' ? { scrollIntoView: () => { scrolled++; } } : null);
-    window.feedBackDrums.openControls({ returnTo: 'plugin-build_a_band' });
+    window.feedBackDrums.openControls({ returnTo: 'plugin-rockherosmith' });
     assert.deepEqual(shown, ['plugin-drums']);
     assert.equal(scrolled, 1);
     mod._pageBack();
     mod._pageBack();
-    assert.deepEqual(shown, ['plugin-drums', 'plugin-build_a_band', 'home']);
+    assert.deepEqual(shown, ['plugin-drums', 'plugin-rockherosmith', 'home']);
     window.feedBackDrums.openControls();
     mod._pageBack();
     assert.deepEqual(shown.slice(-2), ['plugin-drums', 'home'], 'default home');

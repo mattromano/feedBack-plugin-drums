@@ -3,6 +3,11 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## [Unreleased]
+
+### Changed
+- Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).
+
 ## 4.6.0
 
 - **Play drums on a controller.** An Xbox-style pad (LB / RB / LT / RT red / yellow / blue / green, A kick,

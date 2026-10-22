@@ -349,7 +349,7 @@ Click "Reset Map" to return to standard GM mapping.
 
 ## Band API
 
-`window.feedBackDrums` lets the Build-a-Band stage drive a drum lane. Lanes are identified by their highway canvas.
+`window.feedBackDrums` lets the RockHeroSmith stage drive a drum lane. Lanes are identified by their highway canvas.
 
 - `setInputTarget(canvas)` pins kit hits to that lane's canvas (`null` restores the default routing).
 - `setDifficulty(id, canvas)` sets the difficulty for that lane only (`easy`, `medium`, `hard`, `expert`, `expert_plus`). Without a canvas it sets the global difficulty. A canvas with no instance yet never changes the global difficulty; the pick is remembered for it. The memory is per canvas, so a lane that re-inits on the same canvas keeps its band difficulty (in split view a panel's own pick still wins). Unknown ids are ignored and not remembered.
