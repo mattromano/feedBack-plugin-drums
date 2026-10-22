@@ -5153,6 +5153,64 @@ function _isDrumsArrangement(si) {
     return false;
 }
 
+// "Play as" (core's libraryCardActions, placement 'play-as'): how a library
+// song plays on drums, or null when it has none. A drum chart (has_drum_tab)
+// is drawn on whatever part loads, so it needs no arrangement; a Drums-named
+// arrangement without one (drums as guitar notes) is played by its index.
+// The Drum Highway is set for that play only (core's feedBack.ui.playSongAs);
+// a connected kit or a game controller plays it, as in any drums play.
+function _drumsPlayAs(song) {
+    if (!song || !song.filename) return null;
+    if (song.has_drum_tab === true) return { viz: 'drums' };
+    const arrs = Array.isArray(song.arrangements) ? song.arrangements : [];
+    for (let i = 0; i < arrs.length; i++) {
+        const a = arrs[i];
+        const name = a && typeof a === 'object' ? a.name : a;
+        if (DRUMS_PATTERNS.test(String(name || ''))) {
+            return { viz: 'drums', arrangement: a && Number.isInteger(a.index) ? a.index : i };
+        }
+    }
+    return null;
+}
+// RockHeroSmith's public API (solo play on its stage), or null.
+function _rockHeroSmith() {
+    const r = typeof window !== 'undefined' ? window.rockHeroSmith : null;
+    return r && r.version === 1 && typeof r.playSolo === 'function' ? r : null;
+}
+function _registerDrumsPlayAs(fb) {
+    const reg = fb && fb.libraryCardActions;
+    if (!reg || typeof reg.register !== 'function') return null;
+    return reg.register({
+        id: 'drums.play-as', pluginId: 'drums', label: 'Drums', hint: 'kit or controller', group: 'Drums',
+        placement: 'play-as', order: 30,
+        applies: (song) => _drumsPlayAs(song) !== null,
+        // The difficulty, asked first (the saved one focused); picking one saves it like the panel.
+        // RockHeroSmith's stage has no Expert+, so it's offered only without it.
+        choices: () => {
+            const ids = _rockHeroSmith() ? DIFFICULTY_IDS.filter((id) => id !== 'expert_plus') : DIFFICULTY_IDS;
+            return {
+                title: 'Difficulty', default: ids.includes(_cfg.difficulty) ? _cfg.difficulty : 'expert',
+                items: ids.map((id) => ({ key: id, label: DIFFICULTY_NAMES[id], hint: id === 'expert_plus' ? '2x kick' : '' })),
+            };
+        },
+        run: (song, ctx) => {
+            const how = _drumsPlayAs(song);
+            if (!how) return false;
+            const diff = ctx && ctx.choice;
+            if (diff != null && _VALID_DIFFICULTIES.has(diff)) _setDifficulty(diff);
+            // With RockHeroSmith installed, the song plays on its stage as a one-player band
+            // (a game controller or plastic kit; stems drop out on misses, its HUD and results).
+            const rhs = _rockHeroSmith();
+            if (rhs) return rhs.playSolo(song, { kind: 'drums', difficulty: diff === 'expert_plus' ? 'expert' : diff });
+            const ui = fb.ui;
+            if (ui && typeof ui.playSongAs === 'function') return ui.playSongAs(song.filename, how);
+            if (typeof window.setViz === 'function') window.setViz(how.viz);
+            if (typeof window.playSong === 'function') window.playSong(encodeURIComponent(song.filename), how.arrangement);
+            return true;
+        },
+    });
+}
+
 // What the drum view says on a part that isn't drums: pick the song's
 // Drums part, or the song simply has none.
 function _notDrumsMessage(si) {
@@ -5285,6 +5343,7 @@ if (typeof window !== 'undefined') {
         diag: () => Object.assign({}, _midiDiag),
         routeTarget: () => _routeTarget(),
     };
+    _registerDrumsPlayAs(window.feedBack);
     // Public API for the band stage: pin kit hits and difficulty to one lane.
     window.feedBackDrums = {
         setInputTarget: (canvas) => _setInputTarget(canvas),
@@ -6016,7 +6075,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoSchedule, _autoSched, _autoCancel,
-        _isDrumsArrangement, _notDrumsMessage, _drumTabFor,
+        _isDrumsArrangement, _notDrumsMessage, _drumTabFor, _drumsPlayAs, _registerDrumsPlayAs,
         _midiAutoChoice, _kitSource, _applyKitMapping, _baseMapping, _belowKitThreshold, _mapSourceText, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
         // Test seam: a fake audio context / buses / sampled kit + player.
         _testSynth: (o) => {
