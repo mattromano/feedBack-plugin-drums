@@ -5172,6 +5172,11 @@ function _drumsPlayAs(song) {
     }
     return null;
 }
+// RockHeroSmith's public API (solo play on its stage), or null.
+function _rockHeroSmith() {
+    const r = typeof window !== 'undefined' ? window.rockHeroSmith : null;
+    return r && r.version === 1 && typeof r.playSolo === 'function' ? r : null;
+}
 function _registerDrumsPlayAs(fb) {
     const reg = fb && fb.libraryCardActions;
     if (!reg || typeof reg.register !== 'function') return null;
@@ -5180,15 +5185,23 @@ function _registerDrumsPlayAs(fb) {
         placement: 'play-as', order: 30,
         applies: (song) => _drumsPlayAs(song) !== null,
         // The difficulty, asked first (the saved one focused); picking one saves it like the panel.
-        choices: () => ({
-            title: 'Difficulty', default: _cfg.difficulty,
-            items: DIFFICULTY_IDS.map((id) => ({ key: id, label: DIFFICULTY_NAMES[id], hint: id === 'expert_plus' ? '2x kick' : '' })),
-        }),
+        // RockHeroSmith's stage has no Expert+, so it's offered only without it.
+        choices: () => {
+            const ids = _rockHeroSmith() ? DIFFICULTY_IDS.filter((id) => id !== 'expert_plus') : DIFFICULTY_IDS;
+            return {
+                title: 'Difficulty', default: ids.includes(_cfg.difficulty) ? _cfg.difficulty : 'expert',
+                items: ids.map((id) => ({ key: id, label: DIFFICULTY_NAMES[id], hint: id === 'expert_plus' ? '2x kick' : '' })),
+            };
+        },
         run: (song, ctx) => {
             const how = _drumsPlayAs(song);
             if (!how) return false;
             const diff = ctx && ctx.choice;
             if (diff != null && _VALID_DIFFICULTIES.has(diff)) _setDifficulty(diff);
+            // With RockHeroSmith installed, the song plays on its stage as a one-player band
+            // (a game controller or plastic kit; stems drop out on misses, its HUD and results).
+            const rhs = _rockHeroSmith();
+            if (rhs) return rhs.playSolo(song, { kind: 'drums', difficulty: diff === 'expert_plus' ? 'expert' : diff });
             const ui = fb.ui;
             if (ui && typeof ui.playSongAs === 'function') return ui.playSongAs(song.filename, how);
             if (typeof window.setViz === 'function') window.setViz(how.viz);

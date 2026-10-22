@@ -1897,3 +1897,15 @@ test('the drums play-as entry asks for the difficulty and saves the pick', () =>
     assert.equal(mod._difficultyPref(), 'hard');
     assert.equal(specs[0].choices().default, 'hard');
 });
+
+test('with RockHeroSmith installed, Drums plays solo on its stage without Expert+', () => {
+    const mod = freshPlugin();
+    const specs = [];
+    const solo = [];
+    global.window.rockHeroSmith = { version: 1, playSolo: (item, o) => { solo.push([item.filename, o]); return 'started'; } };
+    mod._registerDrumsPlayAs({ libraryCardActions: { register: (s) => { specs.push(s); return () => {}; } }, ui: { playSongAs: () => { throw new Error('direct'); } } });
+    assert.deepEqual(specs[0].choices().items.map((i) => i.key), ['easy', 'medium', 'hard', 'expert']);
+    specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' });
+    assert.deepEqual(solo, [['x', { kind: 'drums', difficulty: 'hard' }]]);
+    delete global.window.rockHeroSmith;
+});
