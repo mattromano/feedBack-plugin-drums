@@ -1,7 +1,7 @@
 # Licensing notice for the drums plugin
 
 Most of this plugin is original code under the **MIT** license (see `README.md`). That includes
-`screen.js`, `assets/session.js`, `assets/highway3d.js` (the 3D view), `assets/kits.js`, `tools/`, `plugin.json`, the other assets and the tests other than
+`screen.js`, `assets/session.js`, `assets/gamepad.js` (controller profiles, adapted from the MIT five-fret plugin's `assets/profiles.js`), `assets/gamepad-source.js` and `assets/gamepad-controls.js` (MIT, adapted from the five-fret plugin at 686bb98, like `gamepad.js`), `assets/highway3d.js` (the 3D view), `assets/kits.js`, `tools/`, `plugin.json`, the other assets and the tests other than
 `tests/engine.test.js`. The bundled drum sounds have their own licences (below).
 
 Two files are ports of [YARG.Core](https://github.com/YARC-Official/YARG.Core) and are licensed under the
