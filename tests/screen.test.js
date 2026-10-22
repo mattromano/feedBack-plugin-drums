@@ -1863,7 +1863,6 @@ test('_drumsPlayAs: a drum chart plays any part on the Drum Highway; a Drums arr
         { viz: 'drums', arrangement: 1 });
     assert.equal(mod._drumsPlayAs({ filename: 'c', arrangements: [{ index: 0, name: 'Lead' }] }), null);
     assert.equal(mod._drumsPlayAs({ has_drum_tab: true }), null);   // no file to play
-    assert.equal(mod._drumsPlayAs({ filename: 'd', format: 'sloppak', arrangements: [{ index: 0, name: 'Lead' }, { index: 1, name: 'Drums' }] }), null);
 });
 
 test('_registerDrumsPlayAs registers a play-as entry that plays through core playSongAs', () => {

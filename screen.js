@@ -5156,16 +5156,12 @@ function _isDrumsArrangement(si) {
 // "Play as" (core's libraryCardActions, placement 'play-as'): how a library
 // song plays on drums, or null when it has none. A drum chart (has_drum_tab)
 // is drawn on whatever part loads, so it needs no arrangement; a Drums-named
-// arrangement without one (drums as guitar notes, not a sloppak) is played
-// by its index.
+// arrangement without one (drums as guitar notes) is played by its index.
 // The Drum Highway is set for that play only (core's feedBack.ui.playSongAs);
 // a connected kit or a game controller plays it, as in any drums play.
 function _drumsPlayAs(song) {
     if (!song || !song.filename) return null;
     if (song.has_drum_tab === true) return { viz: 'drums' };
-    // A sloppak's Drums-named entry without a drum tab is dropped at load
-    // (lib/sloppak.py), so its index would play some other part.
-    if (song.format === 'sloppak') return null;
     const arrs = Array.isArray(song.arrangements) ? song.arrangements : [];
     for (let i = 0; i < arrs.length; i++) {
         const a = arrs[i];
