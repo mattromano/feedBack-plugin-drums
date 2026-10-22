@@ -1855,3 +1855,32 @@ test('a pinned lane re-resolves its binding when the card saves one (instance _r
     assert.equal(s.pro[s.pro.length - 1], false, 'the lane now plays with pro drums off');
     pinned.destroy();
 });
+
+test('_drumsPlayAs: a drum chart plays any part on the Drum Highway; a Drums arrangement by index', () => {
+    const mod = freshPlugin();
+    assert.deepEqual({ ...mod._drumsPlayAs({ filename: 'a', has_drum_tab: true, arrangements: [{ index: 0, name: 'Lead' }] }) }, { viz: 'drums' });
+    assert.deepEqual({ ...mod._drumsPlayAs({ filename: 'b', arrangements: [{ index: 0, name: 'Lead' }, { index: 1, name: 'Drums' }] }) },
+        { viz: 'drums', arrangement: 1 });
+    assert.equal(mod._drumsPlayAs({ filename: 'c', arrangements: [{ index: 0, name: 'Lead' }] }), null);
+    assert.equal(mod._drumsPlayAs({ has_drum_tab: true }), null);   // no file to play
+});
+
+test('_registerDrumsPlayAs registers a play-as entry that plays through core playSongAs', () => {
+    const mod = freshPlugin();
+    const specs = [];
+    const plays = [];
+    const fb = {
+        libraryCardActions: { register: (spec) => { specs.push(spec); return () => {}; } },
+        ui: { playSongAs: (fn, o) => { plays.push([fn, o]); return true; } },
+    };
+    mod._registerDrumsPlayAs(fb);
+    assert.equal(specs.length, 1);
+    const s = specs[0];
+    assert.equal(s.id, 'drums.play-as');
+    assert.equal(s.placement, 'play-as');
+    assert.equal(s.applies({ filename: 'x', has_drum_tab: true }), true);
+    assert.equal(s.applies({ filename: 'x', arrangements: [{ index: 0, name: 'Bass' }] }), false);
+    s.run({ filename: 'x y', arrangements: [{ index: 2, name: 'Drums' }] });
+    assert.deepEqual(plays, [['x y', { viz: 'drums', arrangement: 2 }]]);
+    assert.equal(mod._registerDrumsPlayAs({}), null);   // older core: nothing to register with
+});
