@@ -27,10 +27,10 @@ function withStorage(storage, fn) {
     }
 }
 
-test('standard profile maps LB, RB, LT, RT, A to red, yellow, blue, green, kick; Y to star_power; Start to pause', () => {
+test('standard profile matches 5-Fret: LB, RB, RT, LT, A to red, yellow, blue, green, kick; Y to star_power; Start to pause', () => {
     const S = G.STANDARD_GAMEPAD;
     assert.equal(S.kind, 'gamepad');
-    const expected = { red_pad: 4, yellow_pad: 5, blue_pad: 6, green_pad: 7, kick: 0, star_power: 3, pause: 9 };
+    const expected = { red_pad: 4, yellow_pad: 5, blue_pad: 7, green_pad: 6, kick: 0, star_power: 3, pause: 9 };
     assert.deepEqual(Object.keys(S.map).sort(), Object.keys(expected).sort());
     const m = G.createMapper(S);
     for (const [action, index] of Object.entries(expected)) {
@@ -55,15 +55,15 @@ test('PADS match DrumsEngine.PAD', () => {
 
 test('trigger hysteresis: 0.6 presses once, 0.4 holds, 0.2 releases, 0.6 presses again', () => {
     const m = G.createMapper(G.STANDARD_GAMEPAD);
-    assert.deepEqual(m.map(btn(6, 0.6)), [{ action: 'blue_pad', value: 1 }]);
+    assert.deepEqual(m.map(btn(6, 0.6)), [{ action: 'green_pad', value: 1 }]);
     assert.deepEqual(m.map(btn(6, 0.7)), []);
     assert.deepEqual(m.map(btn(6, 0.4)), []);
-    assert.deepEqual(m.map(btn(6, 0.2)), [{ action: 'blue_pad', value: 0 }]);
+    assert.deepEqual(m.map(btn(6, 0.2)), [{ action: 'green_pad', value: 0 }]);
     assert.deepEqual(m.map(btn(6, 0.4)), []);
-    assert.deepEqual(m.map(btn(6, 0.6)), [{ action: 'blue_pad', value: 1 }]);
+    assert.deepEqual(m.map(btn(6, 0.6)), [{ action: 'green_pad', value: 1 }]);
     // reset forgets held state: a trigger held through a disconnect is a fresh press
     m.reset();
-    assert.deepEqual(m.map(btn(6, 0.9)), [{ action: 'blue_pad', value: 1 }]);
+    assert.deepEqual(m.map(btn(6, 0.9)), [{ action: 'green_pad', value: 1 }]);
 });
 
 test('standard gamepad has no cymbals; hitFor yellow_cymbal on it is a yellow pad hit', () => {

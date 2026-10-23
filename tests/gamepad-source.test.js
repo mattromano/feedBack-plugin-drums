@@ -144,12 +144,12 @@ test('pads claimed by another owner are skipped', () => withStorage(() => {
     assert.equal(src.current().controllerKey, 'Xbox#2');
 }));
 
-test('LT press hits blue with cymbal false and the event time in ms', () => withStorage(() => {
+test('RT press hits blue with cymbal false and the event time in ms', () => withStorage(() => {
     const { gi, src, calls } = harness([XBOX]);
     src.setWanted(true);
-    gi.button(6, 1, 0, 2.25);
+    gi.button(7, 1, 0, 2.25);
     assert.deepEqual(calls.hits, [[3, false, 2250]]);
-    gi.button(6, 0, 0, 2.3);
+    gi.button(7, 0, 0, 2.3);
     assert.equal(calls.hits.length, 1);
 }));
 

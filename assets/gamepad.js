@@ -35,10 +35,12 @@
     const SETTINGS_KEY = 'drums.gamepad.settings.v1';
 
     const b = (index) => Object.freeze({ type: 'button', index });
+    // The 5-Fret plugin's colours on the same buttons: green LT, red LB, yellow RB, blue RT, and A (5-fret
+    // orange) is the kick, which Rock Band draws orange. One pad plays both instruments the same way.
     const STANDARD_GAMEPAD = Object.freeze({
         kind: 'gamepad',
         map: Object.freeze({
-            red_pad: b(4), yellow_pad: b(5), blue_pad: b(6), green_pad: b(7), kick: b(0),
+            red_pad: b(4), yellow_pad: b(5), blue_pad: b(7), green_pad: b(6), kick: b(0),
             star_power: b(3), pause: b(9),
         }),
     });

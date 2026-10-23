@@ -1208,7 +1208,7 @@ test('free pad hit reaches the route target\'s _handlePadHit with pad, cymbal an
     const other = fakeInst({}, { _handlePadHit: (...a) => got.push(a), _activateSp: (t) => got.push(['sp', t]) });
     mod._instances.add(other);
     mod._setActiveInstance(other);
-    gi.button(6, 1, 0, 12.5);   // LT = blue pad
+    gi.button(7, 1, 0, 12.5);   // RT = blue pad (5-Fret blue)
     gi.button(0, 1, 0, 12.75);  // A = kick
     gi.button(3, 1, 0, 13);     // Y = star power
     assert.deepEqual(got, [[3, false, 12500], [0, false, 12750], ['sp', 13000]]);
