@@ -163,10 +163,15 @@ keeps their own. Change it in the settings panel, by clicking the difficulty bad
 or with **D** (harder) / **Shift+D** (easier) while the view is focused.
 
 - **Expert+** is the drum part as charted, double kicks included; **Expert** drops the double-kick notes
-  (`x2`). **Easy / Medium / Hard** come from the chart's own easier levels; the badge says **AUTO** when a
-  level was reduced by software rather than hand-charted.
-- A level the chart doesn't have is greyed out with the reason; a song without your saved level plays
-  Expert (the badge is dimmed) and your choice is kept for the next song.
+  (`x2`). **Easy / Medium / Hard** come from the chart's own easier levels when it has them. A chart without
+  them (drums encoded as guitar notes, or a tab without `levels`) gets them generated from Expert when it
+  loads, with feedBack's own reduction rule (core `lib/drumchart_gen.py`, fitted on 136 hand-authored
+  charts): 2x kicks and ghost notes dropped, notes kept on an 8th-note grid (Hard) or quarter-note grid
+  (Medium, Easy), at most 3 / 2 / 2 gems at once (snare and cymbals before toms), and on Easy never a kick
+  together with hand gems. Hand-charted levels always win; the badge says **AUTO** when a level was reduced
+  by software rather than hand-charted.
+- A level the chart can't offer (Expert+ without double kicks) is greyed out with the reason; a song without your
+  saved level plays Expert (the badge is dimmed) and your choice is kept for the next song.
 - Changing difficulty mid-song rebuilds the chart from the current position, like a seek.
 
 ### Where star power, fills and levels come from
@@ -176,7 +181,8 @@ They are part of the song's drum tab (`drum_tab.json`, feedpak 1.20.0 "drum game
 ranges, and `levels.easy|medium|hard` with their own `hits` and a `generated` marker. feedBack's Rock Band /
 Clone Hero / YARG chart importer writes them, and core streams them to the plugin with the tab
 (`bundle.drumTab`). A tab without them — an older tab, a core that doesn't stream them yet, or drums encoded
-as guitar notes — plays **Expert only, without star power**; everything else works the same.
+as guitar notes — plays **without star power**, with its Easy / Medium / Hard generated from Expert (see
+[Difficulty](#difficulty)); everything else works the same.
 
 ### Assists
 

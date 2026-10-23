@@ -192,6 +192,140 @@ test('nextDifficulty steps through the available levels and wraps', () => {
     assert.equal(H.nextDifficulty('expert', two, -1), 'expert_plus');
 });
 
+// ── generated difficulty levels (port of core lib/drumchart_gen.py reduce_level) ──
+
+// Pads as core's DrumHit (pad, cymbal) -> GM on the wire, and back (engine pads).
+const PAD_GM = { 'kick,false': 36, 'red,false': 38, 'yellow,true': 42, 'yellow,false': 48, 'blue,true': 51,
+    'blue,false': 45, 'green,true': 49, 'green,false': 41 };
+const PAD_NAME = ['kick', 'red', 'yellow', 'blue', 'green'];
+const hitNote = ([t, pad, cym, kick2x, dyn]) => w(t, kick2x ? 35 : PAD_GM[pad + ',' + cym],
+    dyn === 'accent' ? { ac: true } : (dyn === 'ghost' ? { mt: true } : {}));
+const asCore = (notes) => notes.map((n) => {
+    const p = E.padFromMidi(n.s * 24 + n.f);
+    return [n.t, PAD_NAME[p.pad], !!p.cymbal];
+}).sort((a, b) => (a[0] - b[0]) || a[1].localeCompare(b[1]) || (a[2] - b[2]));
+const sortCore = (xs) => xs.slice().sort((a, b) => (a[0] - b[0]) || a[1].localeCompare(b[1]) || (a[2] - b[2]));
+
+// Fixture run through core's reduce_level (feedBack branch custom); expected outputs copied from it.
+// 120 BPM, then 100 BPM from 4 s (a repeated beat time at 4 s), [time, pad, cymbal, kick2x, dyn].
+const REDUCE_BEATS = [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4, 4.6, 5.2, 5.8, 6.4, 7, 7.6, 8.2]
+    .map((time, i) => ({ time, measure: i % 4 === 0 ? i / 4 : -1 }));
+const REDUCE_HITS = [
+    [0, 'kick', false], [0, 'green', true], [0, 'yellow', true], [0, 'red', false],
+    [0.25, 'yellow', true], [0.25, 'kick', false, true],
+    [0.5, 'red', false], [0.5, 'yellow', true], [0.5, 'kick', false],
+    [0.625, 'red', false, false, 'ghost'],
+    [0.75, 'yellow', true], [0.75, 'blue', false],
+    [1, 'kick', false], [1, 'yellow', true],
+    [1.125, 'red', false],
+    [1.5, 'blue', true], [1.5, 'green', false], [1.5, 'yellow', false], [1.5, 'red', false],
+    [1.833, 'green', false],
+    [2.25, 'green', true],
+    [3, 'kick', false],
+    [3.5, 'yellow', true, false, 'accent'], [3.5, 'yellow', true],
+    [4.3, 'red', false], [4.6, 'kick', false], [4.6, 'blue', true], [4.9, 'green', false], [5.2, 'red', false], [5.5, 'yellow', false],
+];
+const REDUCE_EXPECTED = {
+    hard: [[0, 'kick', false], [0, 'red', false], [0, 'yellow', true], [0.25, 'yellow', true], [0.5, 'kick', false], [0.5, 'red', false],
+        [0.5, 'yellow', true], [0.75, 'yellow', true], [0.75, 'blue', false], [1, 'kick', false], [1, 'yellow', true], [1.5, 'red', false],
+        [1.5, 'blue', true], [1.5, 'yellow', false], [1.833, 'green', false], [2.25, 'green', true], [3, 'kick', false], [3.5, 'yellow', true],
+        [4.3, 'red', false], [4.6, 'kick', false], [4.6, 'blue', true], [4.9, 'green', false], [5.2, 'red', false], [5.5, 'yellow', false]],
+    medium: [[0, 'kick', false], [0, 'red', false], [0.5, 'kick', false], [0.5, 'red', false], [1, 'kick', false], [1, 'yellow', true],
+        [1.5, 'red', false], [1.5, 'blue', true], [2.25, 'green', true], [3, 'kick', false], [3.5, 'yellow', true], [4.6, 'kick', false],
+        [4.6, 'blue', true], [5.2, 'red', false]],
+    easy: [[0, 'red', false], [0, 'yellow', true], [0.5, 'red', false], [0.5, 'yellow', true], [1, 'yellow', true], [1.5, 'red', false],
+        [1.5, 'blue', true], [2.25, 'green', true], [3, 'kick', false], [3.5, 'yellow', true], [4.6, 'blue', true], [5.2, 'red', false]],
+};
+
+test('reduceLevel matches core reduce_level (grid, ghosts, 2x kicks, gem cap, hand priority, tempo change)', () => {
+    const notes = REDUCE_HITS.map(hitNote);
+    for (const lv of ['hard', 'medium', 'easy']) {
+        assert.deepEqual(asCore(H.reduceLevel(notes, [], REDUCE_BEATS, lv, E.padFromMidi)), sortCore(REDUCE_EXPECTED[lv]), lv);
+    }
+    // No beat map: core assumes 120 BPM (same result for this chart).
+    assert.deepEqual(asCore(H.reduceLevel(notes, [], [], 'hard', E.padFromMidi)), sortCore(REDUCE_EXPECTED.hard));
+    // Two of the same gem in one chord: core keeps the last one (here the plain hat, not the accent).
+    const hat = H.reduceLevel(notes, [], REDUCE_BEATS, 'hard', E.padFromMidi).find(n => n.t === 3.5);
+    assert.equal(!!hat.ac, false);
+    assert.deepEqual(Object.keys(H.REDUCE), ['hard', 'medium', 'easy']);
+    assert.deepEqual(H.reduceLevel(notes, [], REDUCE_BEATS, 'expert', E.padFromMidi), []);
+    assert.deepEqual(H.reduceLevel(notes, [], REDUCE_BEATS, 'hard', null), []);
+});
+
+test('reduceLevel: Easy never pairs a kick with hand gems', () => {
+    const notes = [];
+    for (let i = 0; i < 64; i++) {
+        const t = i * 0.25;
+        notes.push(w(t, 42));
+        if (i % 2 === 0) notes.push(w(t, 36));
+        if (i % 4 === 2) notes.push(w(t, 38));
+        if (i % 8 === 0) notes.push(w(t, 49));
+    }
+    const beats = Array.from({ length: 40 }, (_, i) => ({ time: i * 0.5, measure: -1 }));
+    const easy = H.reduceLevel(notes, [], beats, 'easy', E.padFromMidi);
+    const byT = new Map();
+    for (const n of easy) (byT.get(n.t) || byT.set(n.t, []).get(n.t)).push(E.padFromMidi(n.s * 24 + n.f).pad);
+    assert.ok(byT.size > 0);
+    for (const [t, pads] of byT) {
+        assert.ok(!(pads.includes(H.PAD.KICK) && pads.length > 1), 'kick with hands at ' + t);
+        assert.ok(pads.length <= 2);
+    }
+    // Medium keeps the kick with one hand gem: the hi-hat (yellow cymbal) before the crash (green).
+    const med = H.reduceLevel(notes, [], beats, 'medium', E.padFromMidi).filter(n => n.t === 0);
+    assert.deepEqual(med.map(n => n.s * 24 + n.f).sort(), [36, 42]);
+});
+
+test('withGeneratedLevels: a legacy chart with no metadata offers Easy / Medium / Hard as AUTO', () => {
+    // Drums as guitar notes (GM = string * 24 + fret), part of them in chords without their own time.
+    const notes = [w(0, 36), w(0.25, 42), w(0.5, 38), w(0.75, 42, { mt: true }), w(1.25, 35)];
+    const chords = [{ t: 1, notes: [{ s: 1, f: 12 }, { s: 1, f: 18 }, { s: 2, f: 1 }] }];
+    const beats = Array.from({ length: 8 }, (_, i) => ({ time: i * 0.5, measure: i % 4 ? -1 : i / 4 }));
+    const meta = H.withGeneratedLevels(null, notes, chords, beats, E.padFromMidi);
+    assert.deepEqual(meta.levelsGenerated, ['easy', 'medium', 'hard']);
+    const opts = H.difficultyOptions({ meta, has2x: H.hasKick2x(notes, chords) });
+    assert.deepEqual(opts.map(o => [o.id, o.available, o.generated]), [
+        ['easy', true, true], ['medium', true, true], ['hard', true, true], ['expert', true, false], ['expert_plus', true, false]]);
+    assert.equal(H.difficultyBadge(H.resolveDifficulty('easy', opts), opts).sub, 'AUTO');
+    const r = H.resolveDifficulty('medium', opts);
+    assert.deepEqual([r.id, r.fallback], ['medium', false]);
+    const easy = H.difficultyChart('easy', notes, chords, meta);
+    assert.deepEqual(easy.chords, []);
+    assert.deepEqual(easy.notes.map(n => [n.t, n.s * 24 + n.f]), [[0, 36], [0.5, 38], [1, 42], [1, 49]],
+        'no ghost, no 2x kick, nothing off the quarter grid, the chord capped to 2 hand gems without its kick');
+    assert.deepEqual(H.difficultyChart('medium', notes, chords, meta).notes.map(n => [n.t, n.s * 24 + n.f]),
+        [[0, 36], [0.5, 38], [1, 36], [1, 42]]);
+    // The level plays through a session like any chart.
+    const s = H.createSession(E, {});
+    s.load({ notes: easy.notes, chords: easy.chords, beats });
+    assert.equal(s.gems.length, 4);
+    // Nothing to reduce: still Expert only.
+    assert.equal(H.withGeneratedLevels(null, [], [], beats, E.padFromMidi), null);
+    assert.match(H.difficultyOptions({ meta: H.withGeneratedLevels(null, [], [], beats, E.padFromMidi) })[0].reason, /only has Expert/);
+});
+
+test('withGeneratedLevels: hand-charted tab levels win, only the missing ones are generated', () => {
+    const tab = {
+        hits: [{ t: 0, p: 'kick' }, { t: 0, p: 'hh_closed' }, { t: 0.25, p: 'hh_closed' }, { t: 0.5, p: 'snare' }, { t: 0.5, p: 'hh_closed' }],
+        star_power: [{ start_time: 0, end_time: 1 }],
+        levels: { easy: { hits: [{ t: 0, p: 'kick' }] }, hard: { hits: [{ t: 0, p: 'hh_closed' }, { t: 0.5, p: 'snare' }] } },
+    };
+    const notes = toNotes(tab.hits);
+    const meta = tabMeta(tab);
+    const out = H.withGeneratedLevels(meta, notes, [], [], E.padFromMidi);
+    assert.notEqual(out, meta, 'a copy: the parsed metadata is left alone');
+    assert.equal(meta.levels.medium, undefined);
+    assert.equal(out.levels.easy, meta.levels.easy);
+    assert.equal(out.levels.hard, meta.levels.hard);
+    assert.deepEqual(out.levelsGenerated, ['medium']);
+    assert.deepEqual(out.starPower, meta.starPower);
+    const opts = H.difficultyOptions({ meta: out });
+    assert.deepEqual(opts.slice(0, 3).map(o => [o.id, o.available, o.generated]), [['easy', true, false], ['medium', true, true], ['hard', true, false]]);
+    assert.deepEqual(H.difficultyChart('easy', notes, [], out).notes, meta.levels.easy);
+    // Every level hand-charted: the metadata is returned as it is.
+    const full = tabMeta(LEVELS_TAB);
+    assert.equal(H.withGeneratedLevels(full, toNotes(LEVELS_TAB.hits || []), [], [], E.padFromMidi), full);
+});
+
 test('difficultyLabel / difficultyBadge: HUD text, AUTO marker for generated levels, fallback tooltip', () => {
     assert.equal(H.difficultyLabel('hard'), 'HARD');
     assert.equal(H.difficultyLabel('expert_plus'), 'EXPERT+');
