@@ -9,6 +9,7 @@ All notable changes to the Drum Highway plugin. The format follows
 - **Play as** entry for core's library menus (`libraryCardActions`, placement `play-as`): Drums, on any song with a drum chart or a Drums arrangement. It asks for the difficulty first (Easy … Expert+, the saved one focused) and plays on the Drum Highway for that play only; a connected kit or game controller plays it as usual.
 
 ### Changed
+- The built-in Xbox-style pad layout matches the 5-Fret plugin's colours: blue is now RT and green LT (they were swapped), so one pad plays guitar and drums the same way. Red LB, yellow RB, kick A are unchanged. A layout saved on the controls screen is kept.
 - Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).
 
 ## 4.6.0

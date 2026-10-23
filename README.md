@@ -93,11 +93,12 @@ The drum keys, Enter (star power) and D are ignored while a modal dialog is open
 ### Controller
 
 An Xbox-style gamepad (any controller the browser reports with the `standard` mapping) or a plastic Rock Band
-kit can drum too, through core's gamepad-input domain:
+kit can drum too, through core's gamepad-input domain. The layout is the 5-Fret plugin's, colour for colour
+(green LT, red LB, yellow RB, blue RT, and A, 5-fret orange, is the kick):
 
 | Gamepad | Pad |
 |---|---|
-| LB / RB / LT / RT | red / yellow / blue / green pad |
+| LB / RB / RT / LT | red / yellow / blue / green pad |
 | A | kick |
 | Y | activate star power (when the chart has no fills) |
 | Start | play / pause |
