@@ -835,7 +835,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.6.1';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.6.2';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -2704,19 +2704,21 @@ function createFactory(forceView) {
 
     // ── Scoring (engine.js via session.js) ──
     // The chart (drum tab hits, or the legacy notes) is the full Expert+
-    // part; Easy/Medium/Hard come from the tab's `levels` (feedpak 1.20.0).
+    // part; Easy/Medium/Hard come from the tab's `levels` (feedpak 1.20.0),
+    // or are generated from Expert when the chart has none (badge AUTO).
     let _h = null;                  // DrumsSession (helpers + session factory) once loaded
     let _E = null;                  // DrumsEngine once loaded
     let _session = null;            // _h.createSession(...) for this instance
     let _chartRefs = null;          // [notes, chords, beats] identities loaded into the session
     let _metaKey;                   // drum tab the metadata was parsed from (undefined = none yet)
-    let _metaCache = null;          // _h.parseDrumTabMeta(...) for _metaKey (null = Expert only, no star power)
+    let _metaCache = null;          // _h.parseDrumTabMeta(...) for _metaKey (null = no tab metadata, no star power)
     const _clock = { time: NaN, wall: NaN, prevTime: NaN, prevWall: NaN };
     let _diffOptions = null;        // _h.difficultyOptions(...) for the loaded chart
     let _diff = null;               // _h.resolveDifficulty(...) in use: {id, requested, fallback, reason}
     let _badge = null;              // _h.difficultyBadge(...) drawn in the HUD
     let _diffUiKey = '';            // last difficulty state written to the DOM
     let _lvlMemo = null;            // {notes, chords, id, src, chart}: chart for the difficulty
+    let _genMemo = null;            // {notes, chords, beats, meta, val}: meta with the missing levels generated from Expert
     let _has2xMemo = null;          // {notes, chords, val}
     let _badgeBtn = null;           // clickable button over the HUD badge
     let _badgeRectKey = '';
@@ -3152,7 +3154,7 @@ function createFactory(forceView) {
     // rides on the drum tab core streams (feedpak 1.20.0). Parsed once per
     // tab: draw() only runs after `ready`, when every level chunk is in. A
     // legacy chart (GM-encoded notes, no tab) or a pre-1.20.0 tab has none:
-    // Expert only, no star power.
+    // no star power, and the lower levels are generated (_applyDifficulty).
     function _syncMeta(dt) {
         if (!_h || dt === _metaKey) return;
         _metaKey = dt;
@@ -3165,6 +3167,9 @@ function createFactory(forceView) {
     // Chart for the selected difficulty, memoised on the source arrays so
     // identities stay stable across frames (the session reloads only when
     // they change). Before session.js loads the chart plays as it is.
+    // Easy/Medium/Hard the chart lacks (a legacy Drums arrangement, a tab
+    // without levels) are generated from Expert once per chart and beat
+    // map (_genMemo); the tab's hand-charted levels win.
     function _applyDifficulty(bundle, notes, chords) {
         const H = _h;
         if (!H) return { notes, chords };
@@ -3172,14 +3177,22 @@ function createFactory(forceView) {
         if (!_has2xMemo || _has2xMemo.notes !== notes || _has2xMemo.chords !== chordKey) {
             _has2xMemo = { notes, chords: chordKey, val: H.hasKick2x(notes, chordKey) };
         }
-        _diffOptions = H.difficultyOptions({ meta: _metaCache, has2x: _has2xMemo.val });
+        const beats = bundle ? bundle.beats : null;
+        const g = _genMemo;
+        if (!g || g.notes !== notes || g.chords !== chordKey || g.beats !== beats || g.meta !== _metaCache) {
+            const val = _E && typeof _E.padFromMidi === 'function'
+                ? H.withGeneratedLevels(_metaCache, notes, chordKey || chords, beats, _E.padFromMidi) : _metaCache;
+            _genMemo = { notes, chords: chordKey, beats, meta: _metaCache, val };
+        }
+        const lvMeta = _genMemo.val;
+        _diffOptions = H.difficultyOptions({ meta: lvMeta, has2x: _has2xMemo.val });
         _diff = H.resolveDifficulty(_myDiff(), _diffOptions);
         const id = _diff.id;
-        const src = _metaCache && _metaCache.levels ? (_metaCache.levels[id] || null) : null;
+        const src = lvMeta && lvMeta.levels ? (lvMeta.levels[id] || null) : null;
         const m = _lvlMemo;
         if (!m || m.notes !== notes || m.chords !== chordKey || m.id !== id || m.src !== src) {
             const switched = !!(m && m.notes === notes && m.chords === chordKey && m.id !== id);
-            const chart = H.difficultyChart(id, notes, chordKey || chords, _metaCache);
+            const chart = H.difficultyChart(id, notes, chordKey || chords, lvMeta);
             _lvlMemo = { notes, chords: chordKey, id, src, chart };
             // Same song, other difficulty: the session reloads (scoring
             // from the current time, like a seek); clear the hit marks.
@@ -4776,6 +4789,7 @@ function createFactory(forceView) {
         _badge = null;
         _diffUiKey = '';
         _lvlMemo = null;
+        _genMemo = null;
         _has2xMemo = null;
         _clock.time = _clock.wall = _clock.prevTime = _clock.prevWall = NaN;
         _frameClock = null;
@@ -5001,7 +5015,8 @@ function createFactory(forceView) {
             }
             if (isReady) {
                 // Difficulty: Expert+ = the full chart, Expert drops the
-                // double kicks, Easy/Medium/Hard come from the tab's levels.
+                // double kicks, Easy/Medium/Hard come from the tab's levels
+                // or are generated from Expert.
                 _syncMeta((dt && Array.isArray(dt.hits)) ? dt : null);
                 const lv = _applyDifficulty(bundle, drumNotes, drumChords);
                 drumNotes = lv.notes;

@@ -3,6 +3,11 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.6.2
+
+### Fixed
+- **Easy / Medium / Hard on charts without lower levels.** Picking one on a chart that only has Expert (a legacy "Drums" arrangement encoded as guitar notes, or a drum tab without `levels`) silently played Expert. The missing levels are now generated from Expert when the chart loads, with core's reduction rule (`lib/drumchart_gen.py` `reduce_level`: feedBack's own rules, fitted on 136 hand-authored charts) ported to `session.js` (`reduceLevel`, `withGeneratedLevels`). They are marked as generated (the badge says **AUTO**) and drive scoring, auto kick / cymbals, both views, band lane difficulty and **Play as**. Hand-charted levels in the tab always win. Asset version bumped.
+
 ## 4.6.1
 
 ### Added

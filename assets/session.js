@@ -257,7 +257,7 @@
      * (star power activation), solos and the easier difficulty levels. `toNotes` converts drum_tab
      * hits into wire notes (screen.js _drumTabHitsToNotes) so a level plays exactly like the Expert
      * chart. Returns null when the tab carries none of it (a pre-1.20.0 tab, or a core that does not
-     * stream it yet): the song then plays Expert only, without star power.
+     * stream it yet): the song then plays without star power (lower levels: withGeneratedLevels).
      * Output is in DrumsEngine.create option shape: starPower / activation as [{start, end}].
      */
     function parseDrumTabMeta(tab, toNotes) {
@@ -293,7 +293,8 @@
     //
     // The drum tab's `hits[]` (or the legacy GM-encoded notes) are the full chart. Expert+ = all of
     // it; plain Expert drops the double-kick notes (drum_tab `x2`, GM 35 on the wire). Easy / Medium /
-    // Hard come from the tab's `levels` (parseDrumTabMeta) when the chart has them.
+    // Hard come from the tab's `levels` (parseDrumTabMeta) when the chart has them, otherwise they are
+    // generated from Expert (withGeneratedLevels, below).
 
     const DIFFICULTIES = Object.freeze(['easy', 'medium', 'hard', 'expert', 'expert_plus']);
     const LOWER_LEVELS = Object.freeze(['easy', 'medium', 'hard']);
@@ -457,6 +458,132 @@
         }
         const s = stripKick2x(notes, chords);
         return { id, notes: s.notes, chords: s.chords };
+    }
+
+    // ── Pure helpers: generated difficulty levels ───────────────────────────
+    //
+    // A chart without hand-charted Easy / Medium / Hard (drums encoded as guitar notes in a "Drums"
+    // arrangement, or a drum tab without `levels`) gets them by reducing Expert. Port of core's
+    // lib/drumchart_gen.py reduce_level: feedBack's own rules, fitted on 136 hand-authored Rock Band /
+    // Clone Hero charts (not from YARG / Harmonix). Keep the two in step.
+
+    // level: grid in beats, max gems per chord, kick kept together with hand gems.
+    const REDUCE = Object.freeze({
+        hard: Object.freeze({ grid: 0.5, maxGems: 3, kickWithHands: true }),
+        medium: Object.freeze({ grid: 1.0, maxGems: 2, kickWithHands: true }),
+        easy: Object.freeze({ grid: 1.0, maxGems: 2, kickWithHands: false }),
+    });
+
+    // Hand gems kept first when a chord has too many (core _HAND_PRIORITY): snare, yellow / green /
+    // blue cymbal, then yellow / blue / green tom. Indexed by pad * 2 + cymbal.
+    const _HAND_PRIORITY = Object.freeze([9, 9, 0, 9, 4, 1, 5, 3, 6, 2]);
+
+    function _handRank(h) {
+        const r = _HAND_PRIORITY[h.pad * 2 + (h.cymbal ? 1 : 0)];
+        return r === undefined ? 9 : r;
+    }
+
+    /** Fractional beat index of time t on the strictly increasing beat times bt (core _beat_pos). */
+    function _beatPos(bt, t) {
+        if (bt.length < 2) return t / 0.5;
+        let lo = 0, hi = bt.length;   // bisect_right
+        while (lo < hi) { const m = (lo + hi) >> 1; if (bt[m] <= t) lo = m + 1; else hi = m; }
+        const i = clamp(lo - 1, 0, bt.length - 2);
+        return i + (t - bt[i]) / (bt[i + 1] - bt[i]);
+    }
+
+    /**
+     * Reduce the full drum chart (wire notes + chords, as difficultyChart takes them) to 'easy' |
+     * 'medium' | 'hard'. `beats` is bundle.beats; `padFromMidi` maps a GM note to {pad, cymbal}
+     * (DrumsEngine.padFromMidi, so the level is judged on the same pads the engine scores).
+     * Drops 2x kicks (GM 35, as stripKick2x) and ghost notes (`mt` without `ac`, as the engine
+     * decodes them); keeps chords on the level's grid (8ths / quarters) first, then off-grid ones
+     * that leave a full grid step to both neighbours; caps gems per chord (snare and cymbals before
+     * toms; a kick is kept with the hands except on Easy). -> wire notes sorted by time (the chart's
+     * own note objects), [] for an unknown level.
+     */
+    function reduceLevel(notes, chords, beats, level, padFromMidi) {
+        const rule = Object.prototype.hasOwnProperty.call(REDUCE, level) ? REDUCE[level] : null;
+        if (!rule || typeof padFromMidi !== 'function') return [];
+        const { grid, maxGems, kickWithHands } = rule;
+        // Strictly increasing grid: a beat map can repeat a time (zero-length beat).
+        const bt = [];
+        for (const b of normalizeBeats(beats)) if (!bt.length || b.t - bt[bt.length - 1] > 1e-6) bt.push(b.t);
+        // Chords keyed by time rounded to the millisecond.
+        const groups = new Map();
+        for (const n of collectWireNotes(notes, chords)) {
+            const t = +n.t;
+            if (!Number.isFinite(t)) continue;
+            const midi = _wireGm(n);
+            if (midi === KICK2X_MIDI || (n.mt && !n.ac)) continue;   // 2x kick, ghost note
+            const p = padFromMidi(midi);
+            if (!p) continue;                                        // not a scored drum note
+            const key = Math.round(t * 1000);
+            let g = groups.get(key);
+            if (!g) groups.set(key, (g = []));
+            g.push({ n, pad: p.pad | 0, cymbal: !!p.cymbal && (p.pad | 0) !== PAD.RED });
+        }
+        const ts = Array.from(groups.keys()).sort((a, b) => a - b);
+        const pos = new Map();
+        for (const k of ts) pos.set(k, _beatPos(bt, k / 1000));
+        const kept = [];
+        for (const k of ts) {
+            const q = pos.get(k) / grid;
+            if (Math.abs(q - Math.round(q)) < 0.12) kept.push(k);
+        }
+        const on = new Set(kept);
+        for (const k of ts) {   // off-grid chords where they don't crowd the grid
+            if (on.has(k)) continue;
+            let lo = 0, hi = kept.length;   // bisect_left
+            while (lo < hi) { const m = (lo + hi) >> 1; if (kept[m] < k) lo = m + 1; else hi = m; }
+            const p = pos.get(k);
+            const prevOk = lo === 0 || p - pos.get(kept[lo - 1]) >= grid - 0.05;
+            const nextOk = lo === kept.length || pos.get(kept[lo]) - p >= grid - 0.05;
+            if (prevOk && nextOk) kept.splice(lo, 0, k);
+        }
+        const out = [];
+        for (const k of kept) {
+            // One gem per pad + cymbal (the chord's last such note, at the first one's place).
+            const hands = new Map();
+            let kick = null;
+            for (const h of groups.get(k)) {
+                if (h.pad === PAD.KICK) { if (!kick) kick = h; continue; }
+                hands.set(h.pad * 2 + (h.cymbal ? 1 : 0), h);
+            }
+            const hs = Array.from(hands.values()).sort((a, b) => _handRank(a) - _handRank(b));
+            if (kick && hs.length && kickWithHands) {
+                out.push(kick.n);
+                for (let i = 0; i < maxGems - 1 && i < hs.length; i++) out.push(hs[i].n);
+            } else if (hs.length) {
+                for (let i = 0; i < maxGems && i < hs.length; i++) out.push(hs[i].n);
+            } else if (kick) {
+                out.push(kick.n);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The chart's difficulty metadata with every missing lower level generated from Expert
+     * (reduceLevel) and listed in levelsGenerated, so difficultyOptions offers it (badge AUTO) and
+     * difficultyChart plays it. Hand-charted levels in `meta` always win. Returns `meta` itself when
+     * nothing was added; otherwise a copy (null meta -> {levels, levelsGenerated}). Not for
+     * session.setMeta: star power and fills stay the tab's.
+     */
+    function withGeneratedLevels(meta, notes, chords, beats, padFromMidi) {
+        const have = meta && meta.levels && typeof meta.levels === 'object' ? meta.levels : null;
+        const gen = meta && Array.isArray(meta.levelsGenerated) ? meta.levelsGenerated.slice() : [];
+        let levels = null;
+        for (const id of LOWER_LEVELS) {
+            if (have && Array.isArray(have[id]) && have[id].length) continue;
+            const lv = reduceLevel(notes, chords, beats, id, padFromMidi);
+            if (!lv.length) continue;
+            if (!levels) levels = Object.assign({}, have);
+            levels[id] = lv;
+            if (!gen.includes(id)) gen.push(id);
+        }
+        if (!levels) return meta;
+        return Object.assign({}, meta, { levels, levelsGenerated: gen });
     }
 
     // ── Pure helpers: input ─────────────────────────────────────────────────
@@ -1027,6 +1154,7 @@
         DIFFICULTIES, LOWER_LEVELS, DEFAULT_DIFFICULTY, DIFFICULTY_LABELS, DIFFICULTY_NAMES, DIFFICULTY_COLORS,
         normalizeDifficulty, hasKick2x, stripKick2x, difficultyOptions,
         resolveDifficulty, nextDifficulty, difficultyLabel, difficultyBadge, difficultyChart, isDifficultyKey,
+        REDUCE, reduceLevel, withGeneratedLevels,
         midiToPad, isTypingTarget, estimateTime, isSeek, createFrameClock, timingSummary, TIMING_DEAD_MS,
         formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, starPowerHint,
         normalizeInputOffset, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX,
