@@ -835,7 +835,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.6.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.6.1';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 

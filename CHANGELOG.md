@@ -3,7 +3,7 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
-## [Unreleased]
+## 4.6.1
 
 ### Added
 - **Play as** entry for core's library menus (`libraryCardActions`, placement `play-as`): Drums, on any song with a drum chart or a Drums arrangement. It asks for the difficulty first (Easy … Expert+, the saved one focused) and plays on the Drum Highway for that play only; a connected kit or game controller plays it as usual.
