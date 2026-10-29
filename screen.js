@@ -401,6 +401,21 @@ function _bus() {
     return b && typeof b.on === 'function' ? b : null;
 }
 
+// Core's player rail slot (feedBack.ui.playerControlSlot), or null.
+function _playerSlot() {
+    const fb = typeof window !== 'undefined' ? window.feedBack : null;
+    try {
+        return fb && fb.ui && typeof fb.ui.playerControlSlot === 'function' ? (fb.ui.playerControlSlot() || null) : null;
+    } catch (_) { return null; }
+}
+// Pure: where the gear button goes: the split panel's bar, else core's rail
+// slot, else #player-controls (before its close button). null: nowhere yet.
+function _gearPlacement({ split, ssAnchor, slot, controls }) {
+    if (split) { const a = ssAnchor || controls; return a ? { anchor: a, beforeClose: false } : null; }
+    if (slot) return { anchor: slot, beforeClose: false };
+    return controls ? { anchor: controls, beforeClose: true } : null;
+}
+
 // Save the drum difficulty (per browser) and apply it to every live
 // instance: each one resolves it against its own chart (falling back to
 // Expert for that song when the level is missing) and, mid-song, rebuilds
@@ -518,6 +533,264 @@ function _kitOptions(current) {
 }
 
 const _SEL_CSS = 'background:#1a1a2e;border:1px solid #333;border-radius:6px;padding:3px 6px;font-size:11px;color:#ccc;outline:none;';
+
+// ── Shared setting controls (gear panel + quick settings) ──
+// Markup and handlers for the settings both surfaces show. Classes, not ids,
+// so several panels coexist; the module setters keep every copy in sync.
+function _escHtml(v) {
+    return String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+// <option>s for the difficulty select. opts: the chart's difficultyOptions
+// (available / generated), or null before a chart loads.
+function _difficultyOptionsHtml(current, opts, ids) {
+    return (ids || DIFFICULTY_IDS).map((id) => {
+        const o = Array.isArray(opts) ? opts.find(x => x.id === id) : null;
+        const off = !!(o && !o.available);
+        const text = DIFFICULTY_NAMES[id] + (o && o.generated ? ' (auto)' : '') + (off ? ' – n/a' : '');
+        return `<option value="${id}"${id === current ? ' selected' : ''}${off ? ' disabled' : ''}`
+            + `${off && o.reason ? ` title="${_escHtml(o.reason)}"` : ''}>${_escHtml(text)}</option>`;
+    }).join('');
+}
+const _LBL_CSS = 'display:flex;align-items:center;gap:4px;font-size:10px;color:#666;';
+const _CHK_CSS = 'display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;';
+// One shared control. st: { pro, timing, offset, autoKick, autoCymbals, volume }.
+function _settingControlHtml(id, st) {
+    switch (id) {
+    case 'proCymbals': return `<label style="${_CHK_CSS}"
+                    title="On: pro drums, cymbals and toms of the same colour are separate notes. Off (4-lane): either the cymbal or the tom of a colour hits that colour's notes.">
+                    <input type="checkbox" class="drums-chk-pro" ${st.pro ? 'checked' : ''}
+                        style="accent-color:#eab308;"> Pro cymbals
+                </label>`;
+    case 'timing': return `<label style="${_LBL_CSS}"
+                    title="How early or late a hit can be and still count.">
+                    Timing
+                    <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(st.timing)}</select>
+                </label>`;
+    case 'inputOffset': return `<label style="${_LBL_CSS}"
+                    title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late).">
+                    Offset
+                    <input type="number" class="drums-offset-input" min="-250" max="250" step="5"
+                        value="${st.offset}" style="${_SEL_CSS}width:58px;"> ms
+                </label>`;
+    case 'controllerOffset': return `<label style="${_LBL_CSS}"
+                    title="This controller's input offset in ms (raise it if your hits register late).">
+                    Offset
+                    <input type="number" class="drums-ctl-offset-input" min="-250" max="250" step="5"
+                        value="${st.offset}" style="${_SEL_CSS}width:58px;"> ms
+                </label>`;
+    case 'autoKick': return `<label style="${_LBL_CSS}"
+                    title="Kick notes are played for you (no score, no misses) at the difficulties picked here.">
+                    Auto kick
+                    <select class="drums-auto-kick" aria-label="Auto kick" style="${_SEL_CSS}width:118px;">${_autoOptions(st.autoKick)}</select>
+                </label>`;
+    case 'autoCymbals': return `<label style="${_LBL_CSS}"
+                    title="Cymbal notes (hi-hat, ride, crash) are played for you at the difficulties picked here.">
+                    Auto cymbals
+                    <select class="drums-auto-cym" aria-label="Auto cymbals" style="${_SEL_CSS}width:118px;">${_autoOptions(st.autoCymbals)}</select>
+                </label>`;
+    case 'padVolume': return `<label style="${_LBL_CSS}" title="Volume of your pad sounds (and the kit's).">
+                    ${st.volumeLabel || 'Vol'}
+                    <input type="range" class="drums-vol-slider" min="0" max="100" aria-label="Pad volume"
+                        value="${Math.round(st.volume * 100)}"
+                        style="width:70px;accent-color:#ef4444;height:14px;">
+                </label>`;
+    default: return '';
+    }
+}
+// Handlers for the shared controls inside root. ctx.controllerKey: the
+// controller whose offset .drums-ctl-offset-input sets.
+function _wireSettingControls(root, ctx) {
+    ctx = ctx || {};
+    const on = (sel, ev, fn) => {
+        const el = root && root.querySelector(sel);
+        if (el) el[ev] = function () { fn(this); };
+    };
+    on('.drums-chk-pro', 'onchange', (el) => _setProCymbals(el.checked));
+    on('.drums-timing-select', 'onchange', (el) => _setAssist('timing', el.value));
+    on('.drums-auto-kick', 'onchange', (el) => _setAssist('autoKick', el.value));
+    on('.drums-auto-cym', 'onchange', (el) => _setAssist('autoCymbals', el.value));
+    on('.drums-offset-input', 'onchange', (el) => _setInputOffset(el.value));
+    on('.drums-ctl-offset-input', 'onchange', (el) => { _applyOffset(el.value, ctx.controllerKey); });
+    on('.drums-vol-slider', 'oninput', (el) => _setPadSound({ volume: parseInt(el.value, 10) / 100 }));
+}
+
+// An input offset for a controller (its own, saved by DrumsGamepad) or, with
+// no controllerKey, the global one; every live session picks it up.
+function _applyOffset(ms, controllerKey) {
+    if (!controllerKey) return _setInputOffset(ms);
+    const G = typeof window !== 'undefined' ? window.DrumsGamepad : null;
+    if (!G) return null;   // a controller lane never changes the global offset
+    const v = _normalizeOffsetMs(ms);
+    try { G.setOffset(controllerKey, v); } catch (_) { /* storage */ }
+    for (const inst of _instances) {
+        try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
+    }
+    return v;
+}
+// A controller's saved offset (0 without one).
+function _controllerOffset(controllerKey) {
+    const G = typeof window !== 'undefined' ? window.DrumsGamepad : null;
+    let offsets = null;
+    try { offsets = G ? G.loadSettings().offsetMs : null; } catch (_) { offsets = null; }
+    return _effectiveOffset({ cfgMs: _cfg.inputOffsetMs, controller: { controllerKey }, offsets });
+}
+
+// ── Quick settings (feedBackDrums.mountQuickSettings) ──
+// The in-song drum settings RockHeroSmith (or the fallback) mounts: difficulty,
+// auto kick / cymbals, pro cymbals / 4-lane, timing window, input offset with
+// the early/late Apply, pad volume and, given soundModes, the sound mode.
+const SOUND_MODE_LABELS = { rockband: 'Rock Band', song: 'Song + pads', kit: 'Kit only' };
+function _soundModeList(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const m of list) {
+        const id = typeof m === 'string' ? m : (m && typeof m === 'object' ? m.id : null);
+        if (typeof id !== 'string' || !id || out.some((x) => x.id === id)) continue;
+        const label = m && typeof m === 'object' && typeof m.label === 'string' && m.label ? m.label : (SOUND_MODE_LABELS[id] || id);
+        out.push({ id, label });
+    }
+    return out;
+}
+// Pure: which quick settings show. A MIDI kit (or the keyboard) has pro
+// cymbals and the global offset; a game controller has its own offset, and
+// one without cymbals plays 4-lane (no pro cymbals switch). A band lane
+// (canvas) has no Expert+ (RockHeroSmith's stage has none).
+function _quickSettingsModel({ controller, soundModes, canvas } = {}) {
+    const ctl = controller && typeof controller.controllerKey === 'string' && controller.controllerKey ? controller : null;
+    const proCapable = !ctl || ctl.hasCymbals !== false;
+    const modes = _soundModeList(soundModes);
+    const controls = ['difficulty', 'autoKick', 'autoCymbals', proCapable ? 'proCymbals' : 'fourLane', 'timing', 'inputOffset', 'padVolume'];
+    if (modes.length) controls.push('soundMode');
+    return {
+        input: ctl ? 'controller' : 'kit',
+        controllerKey: ctl ? ctl.controllerKey : null,
+        proCapable,
+        offsetScope: ctl ? 'controller' : 'global',
+        expertPlus: !canvas,
+        controls,
+        soundModes: modes,
+    };
+}
+// Pure: the quick settings markup for a model and the current values.
+// st: { difficulty, diffOptions, pro, timing, offset, autoKick, autoCymbals, volume, soundMode, timingSummary }.
+function _quickSettingsHtml(model, st, lane) {
+    const ids = model.expertPlus ? DIFFICULTY_IDS : DIFFICULTY_IDS.filter((id) => id !== 'expert_plus');
+    const row = (inner) => `<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">${inner}</div>`;
+    const parts = [];
+    for (const id of model.controls) {
+        if (id === 'difficulty') {
+            parts.push(`<label style="${_LBL_CSS}" title="Drum difficulty. Easy/Medium/Hard need a chart that has them (or one generated from Expert).">
+                    Difficulty
+                    <select class="${lane ? 'drums-qs-difficulty' : 'drums-difficulty-select'}" aria-label="Drum difficulty" style="${_SEL_CSS}width:128px;">${_difficultyOptionsHtml(st.difficulty, st.diffOptions, ids)}</select>
+                </label>`);
+        } else if (id === 'fourLane') {
+            parts.push(`<span style="font-size:10px;color:#888;" title="This controller has no cymbals: cymbal notes fall on its pads.">4-lane (no cymbals)</span>`);
+        } else if (id === 'inputOffset') {
+            const sum = st.timingSummary;
+            const sug = sum && Number.isFinite(sum.suggest) ? sum.suggest : null;
+            parts.push(_settingControlHtml(model.offsetScope === 'controller' ? 'controllerOffset' : 'inputOffset', st)
+                + `<span class="drums-qs-timing" style="font-size:10px;color:#8ab;">${_escHtml(sum && sum.word ? sum.word : '')}</span>`
+                + `<button type="button" class="drums-qs-apply" style="${_SEL_CSS}cursor:pointer;"${sug === null ? ' disabled' : ''}`
+                + ` title="Set the input offset to centre your hits (from the early/late meter)">`
+                + (sug === null ? 'Apply' : 'Apply ' + sug + ' ms') + '</button>');
+        } else if (id === 'soundMode') {
+            parts.push(`<div role="group" aria-label="Drum sound" style="display:flex;gap:4px;align-items:center;">`
+                + `<span style="font-size:10px;color:#666;">Sound</span>`
+                + model.soundModes.map((m) => `<button type="button" class="drums-qs-sound" data-mode="${_escHtml(m.id)}" aria-pressed="${m.id === st.soundMode ? 'true' : 'false'}"`
+                    + ` style="${_SEL_CSS}cursor:pointer;">${_escHtml(m.label)}</button>`).join('')
+                + '</div>');
+        } else {
+            parts.push(_settingControlHtml(id, Object.assign({ volumeLabel: 'Pad volume' }, st)));
+        }
+    }
+    return `<div class="drums-quick-settings" data-input="${model.input}" style="font-family:system-ui,sans-serif;">`
+        + row(parts.slice(0, 4).join('')) + row(parts.slice(4).join('')) + '</div>';
+}
+
+function _mountQuickSettings(el, opts) {
+    if (!el || typeof el !== 'object') return { destroy() {}, refresh() {} };
+    opts = opts && typeof opts === 'object' ? opts : {};
+    const canvas = opts.canvas && typeof opts.canvas === 'object' ? opts.canvas : null;
+    let soundMode = typeof opts.soundMode === 'string' ? opts.soundMode : null;
+    let model = null, modelKey = '', timer = null, dead = false;
+    const target = () => (canvas ? _instanceForCanvas(canvas) : _routeTarget());
+    const call = (inst, fn) => { try { return inst && typeof inst[fn] === 'function' ? inst[fn]() : null; } catch (_) { return null; } };
+    function controller() {
+        const c = call(target(), '_controllerInfo');
+        if (c) return c;
+        const k = canvas ? _bandControllerFor(canvas) : null;
+        return k ? { controllerKey: k } : null;
+    }
+    function state() {
+        const inst = target();
+        const d = call(inst, '_difficulty');
+        return {
+            difficulty: canvas ? (_bandDifficultyFor(canvas) || _cfg.difficulty) : _cfg.difficulty,
+            diffOptions: d && Array.isArray(d.options) ? d.options : null,
+            pro: _cfg.proCymbals, timing: _cfg.timing, autoKick: _cfg.autoKick, autoCymbals: _cfg.autoCymbals,
+            offset: model.controllerKey ? _controllerOffset(model.controllerKey) : _cfg.inputOffsetMs,
+            volume: _cfg.synthVolume, soundMode,
+            timingSummary: call(inst, '_timingSummary'),
+        };
+    }
+    function render() {
+        model = _quickSettingsModel({ controller: controller(), soundModes: opts.soundModes, canvas });
+        modelKey = model.input + '|' + model.controllerKey + '|' + model.proCapable;
+        el.innerHTML = _quickSettingsHtml(model, state(), !!canvas);
+        _wireSettingControls(el, { controllerKey: model.controllerKey });
+        const diff = el.querySelector(canvas ? '.drums-qs-difficulty' : '.drums-difficulty-select');
+        if (diff) diff.onchange = function () { _setDifficultyFor(this.value, canvas); };
+        const apply = el.querySelector('.drums-qs-apply');
+        if (apply) {
+            apply.onclick = () => {
+                const sum = call(target(), '_timingSummary');
+                if (!sum || !Number.isFinite(sum.suggest)) return;
+                const v = _applyOffset(sum.suggest, model.controllerKey);
+                const field = el.querySelector(model.controllerKey ? '.drums-ctl-offset-input' : '.drums-offset-input');
+                if (field && v != null) field.value = String(v);
+                refresh();
+            };
+        }
+        const btns = el.querySelectorAll ? Array.from(el.querySelectorAll('.drums-qs-sound')) : [];
+        for (const b of btns) {
+            b.onclick = function () {
+                const id = this.dataset ? this.dataset.mode : null;
+                if (!id) return;
+                soundMode = id;
+                for (const o of btns) o.setAttribute('aria-pressed', o === this ? 'true' : 'false');
+                if (typeof opts.onSoundMode === 'function') {
+                    try { opts.onSoundMode(id); } catch (e) { console.warn('[Drums] onSoundMode failed:', e); }
+                }
+            };
+        }
+    }
+    // The early/late meter and a controller change (a free pad engaged mid-song).
+    function refresh() {
+        if (dead) return;
+        const next = _quickSettingsModel({ controller: controller(), soundModes: opts.soundModes, canvas });
+        if (next.input + '|' + next.controllerKey + '|' + next.proCapable !== modelKey) { render(); return; }
+        const sum = call(target(), '_timingSummary');
+        const sug = sum && Number.isFinite(sum.suggest) ? sum.suggest : null;
+        const word = el.querySelector('.drums-qs-timing');
+        if (word) word.textContent = sum && sum.word ? sum.word : '';
+        const apply = el.querySelector('.drums-qs-apply');
+        if (apply) { apply.disabled = sug === null; apply.textContent = sug === null ? 'Apply' : 'Apply ' + sug + ' ms'; }
+    }
+    render();
+    if (typeof setInterval === 'function') {
+        timer = setInterval(refresh, 500);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+    return {
+        refresh,
+        destroy() {
+            if (dead) return;
+            dead = true;
+            if (timer) clearInterval(timer);
+            el.innerHTML = '';
+        },
+    };
+}
 
 // Auto lanes for a difficulty: each setting is a ceiling ('easy' = on at
 // Easy only, 'hard' = Easy..Hard, 'all' = always). Mirrors
@@ -1438,7 +1711,7 @@ function _hhPedalMove(value) {
     _hh.prevC = c; _hh.prevWall = wall;
     if (c < 0.45) _hh.openWall = wall;
     if (prevC == null || !(prevC < 0.85 && c >= 0.85)) return;
-    if (!_audioCtx || (typeof window !== 'undefined' && window.__drumsMutePads)) return;
+    if (!_audioCtx || _padMuted) return;
     const t = _audioCtx.currentTime;
     _chokeNotes([46, HH_SEMI_NOTE], t);
     // Chick: the pedal came down from open quickly, and the kit doesn't send its own pedal note.
@@ -1452,9 +1725,9 @@ function _hhPedalMove(value) {
 
 function _synthDrumHit(midiNote, velocity) {
     if (!_audioCtx || !_synthGain) return;
-    // A calibration song can mute the pad sounds: through Web Audio they reach the ears tens of
-    // ms after the stick and pull the player's timing.
-    if (typeof window !== 'undefined' && window.__drumsMutePads) return;
+    // Muted pads (setPadSound; a calibration song through window.__drumsMutePads; Rock Band
+    // sound): through Web Audio they reach the ears tens of ms after the stick.
+    if (_padMuted) return;
     _synthEnsureCtx();
     if (midiNote === 44) _hh.seen44 = true;
     _hhLearn(midiNote);
@@ -1501,6 +1774,22 @@ function _setAutoVolume(vol) {
     try {
         document.querySelectorAll('.drums-autovol-slider').forEach((el) => { el.value = String(Math.round(_cfg.autoVolume * 100)); });
     } catch (_) { /* no DOM */ }
+}
+
+// Pad sound for the play layer (feedBackDrums.setPadSound / getPadSound).
+// volume is the saved pad volume (synthVolume, the settings' Vol slider);
+// muted silences the pad hits, the hat chick and the auto notes without
+// touching it. window.__drumsMutePads is an alias of muted (calibration).
+let _padMuted = false;
+function _getPadSound() { return { muted: _padMuted, volume: _cfg.synthVolume }; }
+function _setPadSound(o) {
+    o = o && typeof o === 'object' ? o : {};
+    if (typeof o.volume === 'number' && Number.isFinite(o.volume)) _synthSetVolume(o.volume);
+    if (typeof o.muted === 'boolean' && o.muted !== _padMuted) {
+        _padMuted = o.muted;
+        if (_padMuted) _autoCancel();   // auto notes already queued
+    }
+    return _getPadSound();
 }
 
 // GM notes the auto settings play for the player (engine.js MIDI_MAP: kick
@@ -1622,7 +1911,7 @@ function _autoSchedule(notes, chords, auto, owner) {
     S.ownerWall = wall;
     let a = null;
     try { a = document.getElementById('audio'); } catch (_) { /* no DOM */ }
-    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0;
+    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0 && !_padMuted;
     if (!on || !a || a.paused) {
         if (S.pending.length || Number.isFinite(S.to)) _autoCancel();
         S.last = NaN;
@@ -1909,6 +2198,34 @@ function _midiAutoChoice(raw, inputs) {
     return raw == null ? inputs[0].key : null;
 }
 
+// Pure: the MIDI input the drums play from (feedBackDrums.midiInput): the open
+// one, else what auto-connect opens (the saved pick, or the kit), else a saved
+// pick that is unplugged (connected: false). null for None or nothing at all.
+function _midiInputInfo({ current, saved, sources, autoKey }) {
+    const list = Array.isArray(sources) ? sources : [];
+    if (current && current.key) return { key: current.key, name: current.name || '', connected: true };
+    if (saved === '') return null;
+    const src = autoKey ? list.find((x) => x.key === autoKey) : null;
+    if (src) return { key: src.key, name: src.name || '', connected: true };
+    if (typeof saved === 'string' && saved) return { key: saved, name: '', connected: false };
+    return null;
+}
+function _midiInputNow() {
+    const sources = _midiSources();
+    const saved = _readStore(STORE_KEYS.midiInputId);
+    let autoKey = null;
+    try { autoKey = _midiAutoChoice(saved, sources); } catch (_) { autoKey = null; }
+    return _midiInputInfo({ current: _midiInput, saved, sources, autoKey });
+}
+// Promise: MIDI discovered (core lists no sources before it), at most ~2 s.
+// Opens no session while no drum view is up (_midiConnect only remembers the pick).
+function _midiWarm() {
+    if (!_mi() || _midiReady) return Promise.resolve();
+    let p;
+    try { p = Promise.resolve(_midiInit()); } catch (_) { p = Promise.resolve(); }
+    return Promise.race([p.catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
+}
+
 // The drum kit among the inputs, or null: the device Clone Hero's profile is
 // named after (exact match, ignoring case, Clone Hero's " 0" index suffix and
 // the direct input's " · direct"), then a name that looks like a drum module.
@@ -2119,10 +2436,20 @@ function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection 
 // Pure: the end card needs a session, no split view and the lane not hidden.
 function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && !hidden); }
 // Pure: a hidden lane (single view) skips the card but still records its personal
-// best, except a controller-pinned band lane, which never records one.
-function _shouldRecordBestOnly({ hasSession, ssActive, hidden, controllerPinned }) {
-    return !!(hasSession && !ssActive && hidden && !controllerPinned);
+// best, except a controller-pinned band lane, which never records one, and a play
+// RockHeroSmith adopted (its results keep the history).
+function _shouldRecordBestOnly({ hasSession, ssActive, hidden, controllerPinned, adopted }) {
+    return !!(hasSession && !ssActive && hidden && !controllerPinned && !adopted);
 }
+// RockHeroSmith runs solo drum plays itself (its HUD, results and history): true
+// only when it says so (adoptsSolo(), off with its pref). The drums HUD, end card
+// and drums_best_v1 are the fallback for when it's absent or doesn't.
+function _rhsAdoptsSolo() {
+    const r = _rockHeroSmith();
+    try { return !!(r && typeof r.adoptsSolo === 'function' && r.adoptsSolo()); } catch (_) { return false; }
+}
+// The lane's own score display (HUD, end card) is off: band mode, or adopted.
+function _ownScoreHidden(canvas) { return _scoreHudHiddenFor(canvas) || _rhsAdoptsSolo(); }
 
 // ── Controller drumming (core gamepad-input, assets/gamepad*.js) ──
 // controller: a source's current() ({ controllerKey, hasCymbals, standardLayout, ... }) or null.
@@ -2267,9 +2594,19 @@ function _resolveOwnDifficulty({ inSplit, bandId, panelId }) {
 }
 // Public bus events: each session judgment / star power event goes out as
 // 'drums:<type>' with the lane's canvas, so listeners can filter by canvas.
-const _BAND_EVENT_TYPES = new Set(['hit', 'miss', 'overhit', 'sp-phrase', 'sp-phrase-fail', 'sp-ready', 'sp-activate', 'sp-end']);
+// 'bonus': a paid drum solo bonus ({points, reason: 'solo'}); timing and roll bonuses are in the hit points.
+const _BAND_EVENT_TYPES = new Set(['hit', 'miss', 'overhit', 'sp-phrase', 'sp-phrase-fail', 'sp-ready', 'sp-activate', 'sp-end', 'bonus']);
 function _bandEventDetail(detail, canvas) {
     return { ...detail, canvas };
+}
+// The difficulty for one lane (canvas: its band pin, remembered before an
+// instance owns it) or, with canvas == null, the global one.
+function _setDifficultyFor(id, canvas) {
+    if (!_VALID_DIFFICULTIES.has(id)) return;
+    if (canvas == null) { _setDifficulty(id); return; }
+    if (typeof canvas === 'object') _bandDifficulty.set(canvas, id);
+    const inst = _instanceForCanvas(canvas);
+    if (inst) inst._setOwnDifficulty(id);
 }
 function _instanceForCanvas(canvas) {
     if (!canvas) return null;
@@ -3065,7 +3402,7 @@ function createFactory(forceView) {
         }
         const hint = _spHintText(_session.meta);
         _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _offsetMs,
-            hideScore: _scoreHudHiddenFor(_highwayCanvas), message: _padStatus || null });
+            hideScore: _ownScoreHidden(_highwayCanvas), message: _padStatus || null });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -3306,15 +3643,7 @@ function createFactory(forceView) {
 
     function _optionsHtml() {
         const H = _h;
-        const opts = _diffOptions || (H ? H.difficultyOptions({}) : null);
-        const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-        return DIFFICULTY_IDS.map((id) => {
-            const o = opts ? opts.find(x => x.id === id) : null;
-            const off = !!(o && !o.available);
-            const text = DIFFICULTY_NAMES[id] + (o && o.generated ? ' (auto)' : '') + (off ? ' – n/a' : '');
-            return `<option value="${id}"${id === _myDiff() ? ' selected' : ''}${off ? ' disabled' : ''}`
-                + `${off && o.reason ? ` title="${esc(o.reason)}"` : ''}>${esc(text)}</option>`;
-        }).join('');
+        return _difficultyOptionsHtml(_myDiff(), _diffOptions || (H ? H.difficultyOptions({}) : null));
     }
 
     function _difficultyNote() {
@@ -3416,14 +3745,7 @@ function createFactory(forceView) {
     // The timing meter's suggestion goes to the controller driving this view
     // (its own offset), else to the global offset.
     function _applySuggestedOffset(ms) {
-        const key = (_padCtl && _padCtl.controllerKey) || _padKey;
-        const G = window.DrumsGamepad;
-        if (!key) { _setInputOffset(ms); return; }
-        if (!G) return;   // a controller lane never changes the global offset
-        try { G.setOffset(key, _normalizeOffsetMs(ms)); } catch (_) { /* storage */ }
-        for (const inst of _instances) {
-            try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
-        }
+        _applyOffset(ms, (_padCtl && _padCtl.controllerKey) || _padKey || null);
     }
 
     // rect: the badge in canvas css px (from the 2D draw / 3D HUD), or null to hide.
@@ -3910,10 +4232,13 @@ function createFactory(forceView) {
     // ── Settings panel + gear button (per-instance) ──
 
     function _injectSettingsGear() {
-        if (_settingsGear) return;
-        const anchor = _ssSettingsAnchor(_highwayCanvas) ||
-                       document.getElementById('player-controls');
-        if (!anchor) return;
+        if (_settingsGear && _settingsGear.isConnected !== false) return;
+        if (_settingsGear) _settingsGear = null;   // the slot was rebuilt without it
+        const split = _ssActive();
+        const place = _gearPlacement({ split, ssAnchor: _ssSettingsAnchor(_highwayCanvas),
+            slot: split ? null : _playerSlot(), controls: document.getElementById('player-controls') });
+        if (!place) return;
+        const anchor = place.anchor;
 
         const gear = document.createElement('button');
         gear.className = 'btn-drums-settings px-2 py-1.5 bg-dark-600 hover:bg-dark-500 rounded-lg text-xs text-gray-400 transition';
@@ -3930,8 +4255,8 @@ function createFactory(forceView) {
         gear.appendChild(glyph);
         gear.onclick = _toggleSettings;
 
-        if (_ssActive()) {
-            // Splitscreen: append to the panel bar.
+        if (!place.beforeClose) {
+            // Splitscreen: the panel bar; v3: core's player rail slot.
             anchor.appendChild(gear);
         } else {
             // Main-player: insert before the close button. Scope the
@@ -3986,6 +4311,9 @@ function createFactory(forceView) {
                 i === 9 ? '' : `<option value="${i}"${_cfg.midiChannel === i ? ' selected' : ''}>${i + 1}</option>`
             ).join('');
 
+        // The settings the quick settings share (same markup and handlers).
+        const sst = { pro: _cfg.proCymbals, timing: _cfg.timing, offset: _cfg.inputOffsetMs,
+            autoKick: _cfg.autoKick, autoCymbals: _cfg.autoCymbals, volume: _cfg.synthVolume };
         // All form controls use classes (not ids) so N panels don't
         // collide on getElementById lookups. Handlers bind via
         // panel.querySelector scoped to this specific panel.
@@ -3999,12 +4327,7 @@ function createFactory(forceView) {
                         <option value="">None</option>
                     </select>
                 </div>
-                <div style="display:flex;align-items:center;gap:4px;">
-                    <span style="font-size:10px;color:#666;">Vol</span>
-                    <input type="range" class="drums-vol-slider" min="0" max="100"
-                        value="${Math.round(_cfg.synthVolume * 100)}"
-                        style="width:70px;accent-color:#ef4444;height:14px;">
-                </div>
+                ${_settingControlHtml('padVolume', sst)}
                 <div style="display:flex;align-items:center;gap:4px;" title="Room ambience on the drum sounds (adds no delay)">
                     <span style="font-size:10px;color:#666;">Room</span>
                     <input type="range" class="drums-room-slider" min="0" max="100" aria-label="Room ambience"
@@ -4064,22 +4387,9 @@ function createFactory(forceView) {
                         ${_optionsHtml()}
                     </select>
                 </label>
-                <label style="display:flex;align-items:center;gap:3px;font-size:11px;color:#999;cursor:pointer;"
-                    title="On: pro drums, cymbals and toms of the same colour are separate notes. Off: either the cymbal or the tom of a colour hits that colour's notes.">
-                    <input type="checkbox" class="drums-chk-pro" ${_cfg.proCymbals ? 'checked' : ''}
-                        style="accent-color:#eab308;"> Pro cymbals
-                </label>
-                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
-                    title="How early or late a hit can be and still count.">
-                    Timing
-                    <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(_cfg.timing)}</select>
-                </label>
-                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
-                    title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late).">
-                    Offset
-                    <input type="number" class="drums-offset-input" min="-250" max="250" step="5"
-                        value="${_cfg.inputOffsetMs}" style="${_SEL_CSS}width:58px;"> ms
-                </label>
+                ${_settingControlHtml('proCymbals', sst)}
+                ${_settingControlHtml('timing', sst)}
+                ${_settingControlHtml('inputOffset', sst)}
                 <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
                     title="On charts without drum fills, star power is activated with the Enter key or this pad (it then does not score as a note).">
                     SP pad
@@ -4088,16 +4398,8 @@ function createFactory(forceView) {
                 <span class="drums-difficulty-note" style="font-size:10px;color:#a8946a;">${_difficultyNote()}</span>
             </div>
             <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
-                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
-                    title="Kick notes are played for you (no score, no misses) at the difficulties picked here.">
-                    Auto kick
-                    <select class="drums-auto-kick" aria-label="Auto kick" style="${_SEL_CSS}width:118px;">${_autoOptions(_cfg.autoKick)}</select>
-                </label>
-                <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
-                    title="Cymbal notes (hi-hat, ride, crash) are played for you at the difficulties picked here.">
-                    Auto cymbals
-                    <select class="drums-auto-cym" aria-label="Auto cymbals" style="${_SEL_CSS}width:118px;">${_autoOptions(_cfg.autoCymbals)}</select>
-                </label>
+                ${_settingControlHtml('autoKick', sst)}
+                ${_settingControlHtml('autoCymbals', sst)}
                 <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
                     title="Volume of the kick / cymbal notes played for you (so a muted drum stem has no holes).">
                     Auto vol
@@ -4128,9 +4430,6 @@ function createFactory(forceView) {
             _saveCfg('midiManual', this.value ? '1' : '');
             _midiConnect(this.value);
             _synthInit();
-        };
-        panel.querySelector('.drums-vol-slider').oninput = function () {
-            _synthSetVolume(parseInt(this.value) / 100);
         };
         panel.querySelector('.drums-room-slider').oninput = function () {
             _setRoom(parseInt(this.value, 10) / 100);
@@ -4193,19 +4492,13 @@ function createFactory(forceView) {
             _saveCfg('keyboard', this.checked);
             document.querySelectorAll('.drums-chk-keys').forEach(el => { el.checked = _cfg.keyboard; });
         };
-        panel.querySelector('.drums-chk-pro').onchange = function () {
-            _setProCymbals(this.checked);
-        };
         panel.querySelector('.drums-difficulty-select').onchange = function () {
             _setDifficulty(this.value, instance);
         };
-        panel.querySelector('.drums-offset-input').onchange = function () { _setInputOffset(this.value); };
         panel.querySelector('.drums-sp-pad').onchange = function () { _setSpPad(this.value); };
-        panel.querySelector('.drums-auto-kick').onchange = function () { _setAssist('autoKick', this.value); };
-        panel.querySelector('.drums-auto-cym').onchange = function () { _setAssist('autoCymbals', this.value); };
-        panel.querySelector('.drums-timing-select').onchange = function () { _setAssist('timing', this.value); };
         panel.querySelector('.drums-autovol-slider').oninput = function () { _setAutoVolume(parseInt(this.value, 10) / 100); };
         panel.querySelector('.drums-kit-select').onchange = function () { _synthSetKit(this.value); };
+        _wireSettingControls(panel);
 
         _wireLearnButtons(panel);
     }
@@ -4372,7 +4665,7 @@ function createFactory(forceView) {
         }
 
         let hudLeft = null;
-        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: _scoreHudHiddenFor(_highwayCanvas) })) {
+        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: _ownScoreHidden(_highwayCanvas) })) {
             if (_session) hudLeft = _drawScoreHud(ctx, W);
             else if ((_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
         }
@@ -4916,8 +5209,9 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
-                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _scoreHudHiddenFor(_highwayCanvas),
-                    controllerPinned: _controllerPinned() };
+                const adopted = _rhsAdoptsSolo();
+                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: adopted || _scoreHudHiddenFor(_highwayCanvas),
+                    controllerPinned: _controllerPinned(), adopted };
                 if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
                 else if (_shouldRecordBestOnly(when)) _recordRunBest(_session, _badge);
             };
@@ -5138,6 +5432,17 @@ function createFactory(forceView) {
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         _engineState() { return _session ? _session.getState() : null; },
+        // Quick settings: the controller driving this view ({controllerKey, hasCymbals}) or
+        // null, and the early/late meter ({word, suggest, ...}) or null.
+        _controllerInfo() {
+            const c = _padCtl || (_padKey ? { controllerKey: _padKey } : null);
+            return c && c.controllerKey ? { controllerKey: c.controllerKey, hasCymbals: c.hasCymbals !== false } : null;
+        },
+        _timingSummary() {
+            if (!_session || !_h || typeof _h.timingSummary !== 'function') return null;
+            const b = _session.getBonus ? _session.getBonus() : null;
+            return b ? _h.timingSummary(b.offsets, _offsetMs || 0) : null;
+        },
         _difficulty() { return _diff ? Object.assign({ options: _diffOptions }, _diff) : null; },
         _autoLanes() { return Object.assign({}, _auto); },
     };
@@ -5192,6 +5497,12 @@ function _rockHeroSmith() {
     const r = typeof window !== 'undefined' ? window.rockHeroSmith : null;
     return r && r.version === 1 && typeof r.playSolo === 'function' ? r : null;
 }
+// The solo kind for Play as: RockHeroSmith's pick ('kit' | 'drums'), 'drums' without one.
+function _soloKind(rhs, song) {
+    let k = null;
+    try { k = typeof rhs.soloKindFor === 'function' ? rhs.soloKindFor(song) : null; } catch (_) { k = null; }
+    return k === 'kit' || k === 'drums' ? k : 'drums';
+}
 function _registerDrumsPlayAs(fb) {
     const reg = fb && fb.libraryCardActions;
     if (!reg || typeof reg.register !== 'function') return null;
@@ -5215,8 +5526,15 @@ function _registerDrumsPlayAs(fb) {
             if (diff != null && _VALID_DIFFICULTIES.has(diff)) _setDifficulty(diff);
             // With RockHeroSmith installed, the song plays on its stage as a one-player band
             // (a game controller or plastic kit; stems drop out on misses, its HUD and results).
+            // soloKindFor picks the MIDI kit ('kit') or a controller ('drums'); it reads
+            // midiInput(), so MIDI is discovered first. null (neither): RockHeroSmith's setup.
             const rhs = _rockHeroSmith();
-            if (rhs) return rhs.playSolo(song, { kind: 'drums', difficulty: diff === 'expert_plus' ? 'expert' : diff });
+            if (rhs) {
+                const opts = { difficulty: diff === 'expert_plus' ? 'expert' : diff };
+                const go = () => rhs.playSolo(song, Object.assign({ kind: _soloKind(rhs, song) }, opts));
+                if (typeof rhs.soloKindFor === 'function' && _mi() && !_midiReady) return _midiWarm().then(go);
+                return go();
+            }
             const ui = fb.ui;
             if (ui && typeof ui.playSongAs === 'function') return ui.playSongAs(song.filename, how);
             if (typeof window.setViz === 'function') window.setViz(how.viz);
@@ -5348,6 +5666,15 @@ if (typeof window !== 'undefined') {
         for (const i of _instances) { try { if (i._assistsChanged) i._assistsChanged(); } catch (_) { /* ignore */ } }
     };
     window.__drumsSetPadVolume = (v) => { _synthSetVolume(v); return _cfg.synthVolume; };
+    // window.__drumsMutePads: kept as an alias of setPadSound({muted}) for calibration tools.
+    try {
+        if (window.__drumsMutePads) _padMuted = true;   // set before this plugin loaded
+        Object.defineProperty(window, '__drumsMutePads', {
+            configurable: true, enumerable: true,
+            get: () => _padMuted,
+            set: (v) => { _setPadSound({ muted: !!v }); },
+        });
+    } catch (_) { /* a frozen window: setPadSound still works */ }
     // Console / test hook: inject a MIDI message (optionally with its arrival time).
     window.__drumsDebug = {
         midi: (data, timeStamp) => _midiOnMessage({ data, timeStamp }),
@@ -5365,13 +5692,7 @@ if (typeof window !== 'undefined') {
         // With a canvas, sets that lane only; a canvas no instance owns (not
         // mounted yet, or torn down) is a no-op, never a global change. Only
         // canvas == null sets the global difficulty.
-        setDifficulty: (id, canvas) => {
-            if (!_VALID_DIFFICULTIES.has(id)) return;
-            if (canvas == null) { _setDifficulty(id); return; }
-            if (typeof canvas === 'object') _bandDifficulty.set(canvas, id);
-            const inst = _instanceForCanvas(canvas);
-            if (inst) inst._setOwnDifficulty(id);
-        },
+        setDifficulty: (id, canvas) => { _setDifficultyFor(id, canvas); },
         // Forget a canvas's band pin; its instance follows the global level again.
         clearDifficulty: (canvas) => {
             if (!canvas || typeof canvas !== 'object') return;
@@ -5440,6 +5761,20 @@ if (typeof window !== 'undefined') {
         // Show the Drums screen's Controllers card; for that visit its Back
         // button goes to returnTo (a screen id, default home).
         openControls: (opts) => _openControls(opts),
+        // Play layer (RockHeroSmith). The MIDI input the drums play from:
+        // { key, name, connected } or null (None / nothing saved or present).
+        // Core lists MIDI sources only after discovery: whenMidiReady() resolves
+        // once that ran (at most ~2 s), so midiInput() is accurate after it.
+        midiInput: () => _midiInputNow(),
+        whenMidiReady: () => _midiWarm().then(() => _midiInputNow()),
+        // Pad sound: volume 0..1 is the saved pad volume; muted silences the pads
+        // and the auto notes, keeping the volume. Junk values change nothing.
+        setPadSound: (o) => _setPadSound(o),
+        getPadSound: () => _getPadSound(),
+        // In-song drum settings in el (a band lane's with canvas); soundModes
+        // (ids or {id, label}) adds the sound switch, calling onSoundMode(id);
+        // soundMode marks the current one. Changes apply live. -> { destroy() }.
+        mountQuickSettings: (el, opts) => _mountQuickSettings(el, opts),
     };
     // Split view: every drum panel's results on screen (for a results card).
     window.__drumsPanelResults = () => {
@@ -6086,6 +6421,8 @@ if (typeof module !== 'undefined' && module.exports) {
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _modalOpen, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
+        _midiInputInfo, _rhsAdoptsSolo, _ownScoreHidden, _gearPlacement, _playerSlot, _synthDrumHit,
+        _quickSettingsModel, _quickSettingsHtml, _difficultyOptionsHtml, _settingControlHtml, _soundModeList, _applyOffset,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
