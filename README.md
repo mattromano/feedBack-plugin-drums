@@ -407,9 +407,10 @@ Click "Reset Map" to return to standard GM mapping.
   `rockband` / `song` / `kit` or `{ id, label }`) adds a sound switch (Rock Band / Song + pads / Kit only)
   that calls `onSoundMode(id)`; `soundMode` marks the current one. Changes apply at once and are saved
   like the ⚙ panel's, which shares the same controls.
-- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()` true), the drum view leaves the
-  score to it: no own score HUD, end-of-song card or `drums_best_v1` best. Without RockHeroSmith, or with
-  its adopt setting off, nothing changes.
+- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()` true), the main player's drum view
+  (`#highway`) leaves the score to it: no own score HUD, end-of-song card or `drums_best_v1` best. Split
+  view panels and any other canvas keep theirs. Without RockHeroSmith, or with its adopt setting off,
+  nothing changes.
 - **Play as → Drums** asks `rockHeroSmith.soloKindFor(song)` (`'kit'` for the MIDI kit, `'drums'` for a
   controller) and passes it to `playSolo` as `kind`; `'drums'` when it has no answer.
 

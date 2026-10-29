@@ -10,7 +10,7 @@ All notable changes to the Drum Highway plugin. The format follows
 - **`drums:bonus`** on the bus (`{ canvas, points, reason: 'solo' }`) when a drum solo's bonus is paid, so the band score counts it.
 
 ### Changed
-- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()`), the drum view shows no score HUD, end card or personal best of its own; RockHeroSmith's HUD and results take over. Without it nothing changes.
+- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()`), the main player's drum view (`#highway`) shows no score HUD, end card or personal best of its own; RockHeroSmith's HUD and results take over. Split view panels keep theirs. Without it nothing changes.
 - **Play as → Drums** plays your MIDI kit or a controller as RockHeroSmith's `soloKindFor` decides (MIDI is discovered first).
 - The ⚙ drum settings button sits in core's player rail slot (`feedBack.ui.playerControlSlot()`) when core has one.
 - Asset version bumped.

@@ -2448,8 +2448,16 @@ function _rhsAdoptsSolo() {
     const r = _rockHeroSmith();
     try { return !!(r && typeof r.adoptsSolo === 'function' && r.adoptsSolo()); } catch (_) { return false; }
 }
+// Pure: RockHeroSmith adopts only the main player's #highway view, never a
+// split-screen panel or another canvas; those keep the drums HUD.
+function _adoptedLane({ adopts, canvas, split }) {
+    return !!(adopts && !split && canvas && typeof canvas === 'object' && canvas.id === 'highway');
+}
+function _rhsAdoptsLane(canvas) {
+    return _adoptedLane({ adopts: _rhsAdoptsSolo(), canvas, split: _ssActive() });
+}
 // The lane's own score display (HUD, end card) is off: band mode, or adopted.
-function _ownScoreHidden(canvas) { return _scoreHudHiddenFor(canvas) || _rhsAdoptsSolo(); }
+function _ownScoreHidden(canvas) { return _scoreHudHiddenFor(canvas) || _rhsAdoptsLane(canvas); }
 
 // ── Controller drumming (core gamepad-input, assets/gamepad*.js) ──
 // controller: a source's current() ({ controllerKey, hasCymbals, standardLayout, ... }) or null.
@@ -5209,7 +5217,7 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
-                const adopted = _rhsAdoptsSolo();
+                const adopted = _rhsAdoptsLane(_highwayCanvas);
                 const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: adopted || _scoreHudHiddenFor(_highwayCanvas),
                     controllerPinned: _controllerPinned(), adopted };
                 if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
@@ -6421,7 +6429,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _modalOpen, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
-        _midiInputInfo, _rhsAdoptsSolo, _ownScoreHidden, _gearPlacement, _playerSlot, _synthDrumHit,
+        _midiInputInfo, _rhsAdoptsSolo, _adoptedLane, _rhsAdoptsLane, _ownScoreHidden, _gearPlacement, _playerSlot, _synthDrumHit,
         _quickSettingsModel, _quickSettingsHtml, _difficultyOptionsHtml, _settingControlHtml, _soundModeList, _applyOffset,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,

@@ -141,13 +141,32 @@ test('_rhsAdoptsSolo: only a RockHeroSmith that says it adopts solo plays', () =
     assert.equal(mod._rhsAdoptsSolo(), false);
 });
 
-test('with RockHeroSmith adopting solo plays, the lane has no own HUD, card or best', () => {
+test('_adoptedLane: RockHeroSmith adopts only the main #highway view, never split panels', () => {
     const { mod } = freshPlugin();
-    const c = {};
-    assert.equal(mod._ownScoreHidden(c), false);
+    const main = { id: 'highway' }, panel = { id: 'ss-highway-1' };
+    assert.equal(mod._adoptedLane({ adopts: true, canvas: main, split: false }), true);
+    assert.equal(mod._adoptedLane({ adopts: false, canvas: main, split: false }), false);
+    assert.equal(mod._adoptedLane({ adopts: true, canvas: main, split: true }), false, 'split view keeps its HUD');
+    assert.equal(mod._adoptedLane({ adopts: true, canvas: panel, split: false }), false, 'another canvas');
+    assert.equal(mod._adoptedLane({ adopts: true, canvas: {}, split: false }), false);
+    assert.equal(mod._adoptedLane({ adopts: true, canvas: null, split: false }), false);
+});
+
+test('with RockHeroSmith adopting solo plays, the main view has no own HUD, card or best', () => {
+    const { mod } = freshPlugin();
+    const main = { id: 'highway' }, other = {};
+    assert.equal(mod._ownScoreHidden(main), false);
     window.rockHeroSmith = { version: 1, playSolo() {}, adoptsSolo: () => true };
-    assert.equal(mod._ownScoreHidden(c), true);
-    assert.equal(mod._scoreHudHiddenFor(c), false, 'the band switch itself is unchanged');
+    assert.equal(mod._ownScoreHidden(main), true);
+    assert.equal(mod._rhsAdoptsLane(main), true);
+    assert.equal(mod._ownScoreHidden(other), false, 'a canvas other than #highway keeps the drums HUD');
+    assert.equal(mod._rhsAdoptsLane(other), false);
+    assert.equal(mod._scoreHudHiddenFor(main), false, 'the band switch itself is unchanged');
+    const f = () => {};
+    window.slopsmithSplitscreen = { isActive: () => true, isCanvasFocused: f, panelChromeFor: f, settingsAnchorFor: f, onFocusChange: f, offFocusChange: f };
+    assert.equal(mod._ownScoreHidden(main), false, 'split view: every panel keeps the drums HUD');
+    assert.equal(mod._rhsAdoptsLane(main), false);
+    delete window.slopsmithSplitscreen;
     assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: true, adopted: true }), false);
     assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: true, adopted: false }), true);
 });
