@@ -320,3 +320,21 @@ test('Play as asks RockHeroSmith which solo kind to play', async () => {
     await specs[0].run({ filename: 'x', has_drum_tab: true }, {});
     assert.equal(solo[2].kind, 'drums');
 });
+
+test('Play as awaits an async soloKindFor (RockHeroSmith returns a Promise)', async () => {
+    const { mod } = freshPlugin();
+    const specs = [];
+    const solo = [];
+    window.rockHeroSmith = { version: 1, playSolo: (item, o) => { solo.push(o); return 'started'; }, soloKindFor: () => Promise.resolve('kit') };
+    mod._registerDrumsPlayAs({ libraryCardActions: { register: (s) => { specs.push(s); return () => {}; } }, ui: {} });
+    assert.equal(await specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' }), 'started');
+    assert.deepEqual(solo, [{ kind: 'kit', difficulty: 'hard' }]);
+    window.rockHeroSmith.soloKindFor = () => Promise.resolve(null);
+    await specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' });
+    assert.equal(solo[1].kind, 'drums', 'null: RockHeroSmith setup');
+    window.rockHeroSmith.soloKindFor = () => Promise.reject(new Error('boom'));
+    await specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' });
+    assert.equal(solo[2].kind, 'drums', 'a failed lookup falls back to drums');
+    assert.equal(await mod._soloKind({ soloKindFor: () => 'kit' }, {}), 'kit', 'plain values still work');
+    assert.equal(await mod._soloKind({}, {}), 'drums');
+});

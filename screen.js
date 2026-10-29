@@ -5505,10 +5505,12 @@ function _rockHeroSmith() {
     const r = typeof window !== 'undefined' ? window.rockHeroSmith : null;
     return r && r.version === 1 && typeof r.playSolo === 'function' ? r : null;
 }
-// The solo kind for Play as: RockHeroSmith's pick ('kit' | 'drums'), 'drums' without one.
-function _soloKind(rhs, song) {
+// Promise of the solo kind for Play as: RockHeroSmith's pick ('kit' | 'drums'),
+// 'drums' without one. soloKindFor may return the kind or a Promise of it
+// (RockHeroSmith's awaits whenMidiReady); a throw or rejection counts as none.
+async function _soloKind(rhs, song) {
     let k = null;
-    try { k = typeof rhs.soloKindFor === 'function' ? rhs.soloKindFor(song) : null; } catch (_) { k = null; }
+    try { k = typeof rhs.soloKindFor === 'function' ? await Promise.resolve(rhs.soloKindFor(song)) : null; } catch (_) { k = null; }
     return k === 'kit' || k === 'drums' ? k : 'drums';
 }
 function _registerDrumsPlayAs(fb) {
@@ -5539,9 +5541,13 @@ function _registerDrumsPlayAs(fb) {
             const rhs = _rockHeroSmith();
             if (rhs) {
                 const opts = { difficulty: diff === 'expert_plus' ? 'expert' : diff };
-                const go = () => rhs.playSolo(song, Object.assign({ kind: _soloKind(rhs, song) }, opts));
-                if (typeof rhs.soloKindFor === 'function' && _mi() && !_midiReady) return _midiWarm().then(go);
-                return go();
+                // An older RockHeroSmith (no soloKindFor) plays a controller, synchronously as before.
+                if (typeof rhs.soloKindFor !== 'function') return rhs.playSolo(song, Object.assign({ kind: 'drums' }, opts));
+                return (async () => {
+                    if (_mi() && !_midiReady) await _midiWarm();
+                    const kind = await _soloKind(rhs, song);
+                    return rhs.playSolo(song, Object.assign({ kind }, opts));
+                })();
             }
             const ui = fb.ui;
             if (ui && typeof ui.playSongAs === 'function') return ui.playSongAs(song.filename, how);
@@ -6435,7 +6441,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoSchedule, _autoSched, _autoCancel,
-        _isDrumsArrangement, _notDrumsMessage, _drumTabFor, _drumsPlayAs, _registerDrumsPlayAs,
+        _isDrumsArrangement, _notDrumsMessage, _drumTabFor, _drumsPlayAs, _registerDrumsPlayAs, _soloKind,
         _midiAutoChoice, _kitSource, _applyKitMapping, _baseMapping, _belowKitThreshold, _mapSourceText, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
         // Test seam: a fake audio context / buses / sampled kit + player.
         _testSynth: (o) => {

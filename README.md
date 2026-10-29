@@ -412,7 +412,8 @@ Click "Reset Map" to return to standard GM mapping.
   view panels and any other canvas keep theirs. Without RockHeroSmith, or with its adopt setting off,
   nothing changes.
 - **Play as → Drums** asks `rockHeroSmith.soloKindFor(song)` (`'kit'` for the MIDI kit, `'drums'` for a
-  controller) and passes it to `playSolo` as `kind`; `'drums'` when it has no answer.
+  controller; the kind or a Promise of it) and passes it to `playSolo` as `kind`; `'drums'` when it has no
+  answer or the lookup fails.
 
 `listControllers` and `createMapper` return Promises (they load `assets/gamepad.js` on demand); check for the
 controller API with `typeof window.feedBackDrums.setController === 'function'`.
