@@ -894,6 +894,8 @@
                     : pct >= 70 ? 'SOLID SOLO' : pct >= 60 ? 'OKAY SOLO' : 'MESSY SOLO';
                 b.soloDone.push({ h: so.h, n: so.n, pct: Math.round(pct * 100) / 100, bonus: pts, rating });
                 push({ type: 'solo-end', text: rating, sub: pct.toFixed(2) + '%  ·  solo bonus +' + formatScore(pts), perfect });
+                // The paid bonus for listeners (band ledger): points only, not queued for the view.
+                if (s.engine) tell(s.engine, { type: 'bonus', points: pts, reason: 'solo', time });
             }
         }
 
@@ -1111,7 +1113,8 @@
              * Judgment / star power listener, or null. After each hit, miss, overhit, sp-phrase,
              * sp-phrase-fail, sp-ready, sp-activate and sp-end: the recorded event (no `wall`) plus
              * {multiplier, score, stars, combo, spActive, spAmount} from getState() after it; hits
-             * and misses also carry noteTime, hits their points.
+             * and misses also carry noteTime, hits their points. A paid drum solo bonus comes as
+             * {type: 'bonus', points, reason: 'solo', time} (the view's own event stays 'solo-end').
              */
             setOnEvent(fn) { s.onEvent = typeof fn === 'function' ? fn : null; return api; },
             /** Forget the early/late samples (after the input offset changed). */
