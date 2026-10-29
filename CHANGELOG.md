@@ -7,6 +7,7 @@ All notable changes to the Drum Highway plugin. The format follows
 
 ### Added
 - **Play layer APIs for RockHeroSmith** on `window.feedBackDrums`: `midiInput()` (the MIDI input the drums play from, `{ key, name, connected }`) and `whenMidiReady()`; `setPadSound({ muted, volume })` / `getPadSound()` (volume is the saved pad volume; muted silences pads and auto notes, keeping the volume; `window.__drumsMutePads` stays as an alias); `mountQuickSettings(el, { canvas, soundModes, soundMode, onSoundMode })`, the in-song drum settings (difficulty, auto kick / cymbals, pro cymbals or 4-lane, timing window, input offset with the early/late Apply, pad volume, and the Rock Band / Song + pads / Kit only switch when RockHeroSmith passes its sound modes). The ⚙ panel and the quick settings share one set of controls.
+- `feedBackDrums.getDifficulty(canvas?)` (the lane's pinned difficulty, else the global one), and `proDrums` (the effective pro cymbals state) in `getInstanceState` and every bus event.
 - **`drums:bonus`** on the bus (`{ canvas, points, reason: 'solo' }`) when a drum solo's bonus is paid, so the band score counts it.
 
 ### Changed

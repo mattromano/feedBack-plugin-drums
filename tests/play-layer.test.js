@@ -338,3 +338,18 @@ test('Play as awaits an async soloKindFor (RockHeroSmith returns a Promise)', as
     assert.equal(await mod._soloKind({ soloKindFor: () => 'kit' }, {}), 'kit', 'plain values still work');
     assert.equal(await mod._soloKind({}, {}), 'drums');
 });
+
+test('getDifficulty: the lane\'s pinned difficulty, else the global one', () => {
+    const { api } = freshPlugin({ drums_difficulty_v1: 'hard' });
+    assert.equal(api.getDifficulty(), 'hard');
+    const lane = {};
+    assert.equal(api.getDifficulty(lane), 'hard', 'no pin: global');
+    api.setDifficulty('easy', lane);
+    assert.equal(api.getDifficulty(lane), 'easy');
+    assert.equal(api.getDifficulty(), 'hard', 'the pin leaves the global one');
+    api.setDifficulty('expert_plus');
+    assert.equal(api.getDifficulty(), 'expert_plus');
+    assert.equal(api.getDifficulty('junk'), 'expert_plus');
+    api.clearDifficulty(lane);
+    assert.equal(api.getDifficulty(lane), 'expert_plus');
+});

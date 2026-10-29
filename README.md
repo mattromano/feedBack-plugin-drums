@@ -369,7 +369,10 @@ Click "Reset Map" to return to standard GM mapping.
   is remembered per canvas, so it survives a re-init on the same canvas, and is not saved. Returns `true` when
   applied, `false` (changing nothing) unless `canvas` is an object and `hidden` a boolean.
 - `isScoreHudHidden(canvas)` returns whether that canvas's score display is hidden.
-- `getInstanceState(canvas)` returns that lane's scoring state, or `null`.
+- `getInstanceState(canvas)` returns that lane's scoring state, or `null`. It includes `proDrums`, the lane's
+  effective pro cymbals (off for a controller without cymbals or a chart without cymbal markings).
+- `getDifficulty(canvas?)` returns the difficulty the player picked: the lane's pinned one with a canvas
+  (set by `setDifficulty(id, canvas)`), else the global setting.
 - `setController(controllerKey, canvas)` plays that lane with one game controller (`controllerKey` is core
   gamepad-input's `${id}#${n}`). The lane claims it at once (or when an instance inits on the canvas) and
   holds it, also while paused, until `clearController`. A controller lane takes no kit or keyboard hits
@@ -431,7 +434,7 @@ Each `detail` holds:
 - `type` (`hit`, `miss`, ...) and `time` (player seconds);
 - the engine state after the event: `multiplier` (doubled while star power is active), `score` (the
   engine's score, without the plugin's bonuses), `stars`, `combo`, `spActive` and `spAmount` (the star
-  power meter, 0..1);
+  power meter, 0..1), and `proDrums` (the lane's effective pro cymbals);
 - hits: `pad`, `cymbal`, `id`, `sp`, `bonus`, `offsetMs`, `noteTime` and `points` (what the hit added:
   engine score plus the plugin's timing / roll bonuses);
 - misses: `pad`, `cymbal`, `id` and `noteTime`; overhits: `pad` and `cymbal`;

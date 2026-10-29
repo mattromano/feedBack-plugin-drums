@@ -1044,3 +1044,19 @@ test('a solo with no notes reached pays nothing and sends no bonus event', () =>
     for (let t = 0; t <= 4; t += 0.25) s.update(t);
     assert.equal(got.filter(d => d.type === 'bonus').length, 0);
 });
+
+test('listener events carry the effective pro drums state', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    const got = [];
+    s.setOnEvent((d) => got.push(d));
+    s.update(0); s.update(1); s.hit(1, 1);
+    assert.equal(got.find(d => d.type === 'hit').proDrums, true, 'pro by default');
+    s.setProDrums(false);
+    s.update(1.9); s.update(2); s.hit(2, 1);
+    assert.equal(got.filter(d => d.type === 'hit').pop().proDrums, false);
+    s.setProDrums(true);
+    s.setMeta({ pro: false, starPower: [], activation: [], solos: [], levels: null, levelsGenerated: [] });
+    s.update(0.2); s.update(1); s.hit(1, 1);
+    assert.equal(got.filter(d => d.type === 'hit').pop().proDrums, false, 'a chart without cymbal markings plays 4-lane');
+});

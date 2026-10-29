@@ -5439,7 +5439,11 @@ function createFactory(forceView) {
         _inputOffsetChanged,
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
-        _engineState() { return _session ? _session.getState() : null; },
+        // Plus proDrums: the lane's effective pro cymbals (off for a cymbal-less controller or a chart without cymbal markings).
+        _engineState() {
+            const st = _session ? _session.getState() : null;
+            return st ? Object.assign({}, st, { proDrums: !!_session.proDrums }) : null;
+        },
         // Quick settings: the controller driving this view ({controllerKey, hasCymbals}) or
         // null, and the early/late meter ({word, suggest, ...}) or null.
         _controllerInfo() {
@@ -5707,6 +5711,8 @@ if (typeof window !== 'undefined') {
         // mounted yet, or torn down) is a no-op, never a global change. Only
         // canvas == null sets the global difficulty.
         setDifficulty: (id, canvas) => { _setDifficultyFor(id, canvas); },
+        // The difficulty the player picked: the lane's pinned one with a canvas, else the global setting.
+        getDifficulty: (canvas) => (canvas && typeof canvas === 'object' && _bandDifficultyFor(canvas)) || _cfg.difficulty,
         // Forget a canvas's band pin; its instance follows the global level again.
         clearDifficulty: (canvas) => {
             if (!canvas || typeof canvas !== 'object') return;
@@ -6441,7 +6447,7 @@ if (typeof module !== 'undefined' && module.exports) {
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
         _kitOptions, _optionalKits, KIT_VEL_LAW,
         _autoSchedule, _autoSched, _autoCancel,
-        _isDrumsArrangement, _notDrumsMessage, _drumTabFor, _drumsPlayAs, _registerDrumsPlayAs, _soloKind,
+        _isDrumsArrangement, _notDrumsMessage, _drumTabFor, _drumsPlayAs, _registerDrumsPlayAs, _soloKind, _setProCymbals,
         _midiAutoChoice, _kitSource, _applyKitMapping, _baseMapping, _belowKitThreshold, _mapSourceText, _tidyPanelSelect, _panelArrIndex, _drumsTakeover,
         // Test seam: a fake audio context / buses / sampled kit + player.
         _testSynth: (o) => {

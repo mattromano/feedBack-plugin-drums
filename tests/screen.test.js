@@ -1909,3 +1909,15 @@ test('with RockHeroSmith installed, Drums plays solo on its stage without Expert
     assert.deepEqual(solo, [['x', { kind: 'drums', difficulty: 'hard' }]]);
     delete global.window.rockHeroSmith;
 });
+
+test('_engineState reports the lane\'s effective pro drums state', async () => {
+    const { mod } = realPlugin();
+    const v = await liveView();
+    v.draw(drumBundle());
+    assert.equal(v._engineState().proDrums, true);
+    mod._setProCymbals(false);
+    v.draw(drumBundle({ currentTime: 1.1 }));
+    assert.equal(v._engineState().proDrums, false);
+    assert.equal(v._engineState().proDrums, false, 'a copy, not the engine\'s object');
+    v.destroy();
+});

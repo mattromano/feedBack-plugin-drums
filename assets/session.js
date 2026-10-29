@@ -935,6 +935,7 @@
                 d.combo = st.combo;
                 d.spActive = !!st.starPower.active;
                 d.spAmount = st.starPower.amount;
+                d.proDrums = effectivePro();
                 s.onEvent(d);
             } catch (_) { /* listener only */ }
         }
@@ -1112,7 +1113,8 @@
             /**
              * Judgment / star power listener, or null. After each hit, miss, overhit, sp-phrase,
              * sp-phrase-fail, sp-ready, sp-activate and sp-end: the recorded event (no `wall`) plus
-             * {multiplier, score, stars, combo, spActive, spAmount} from getState() after it; hits
+             * {multiplier, score, stars, combo, spActive, spAmount} from getState() after it and
+             * proDrums (the effective pro cymbals state); hits
              * and misses also carry noteTime, hits their points. A paid drum solo bonus comes as
              * {type: 'bonus', points, reason: 'solo', time} (the view's own event stays 'solo-end').
              */
