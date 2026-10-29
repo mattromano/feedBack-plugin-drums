@@ -1012,3 +1012,51 @@ test('a throwing listener never breaks scoring', () => {
     s.update(2); s.hit(2, 1);
     assert.equal(s.getState().notesHit, 2);
 });
+
+test('a paid drum solo bonus goes to the listener as a bonus event (reason solo)', () => {
+    let wall = 0;
+    const s = H.createSession(E, { now: () => wall });
+    const notes = [];
+    for (let i = 0; i < 4; i++) notes.push({ t: 1 + i * 0.5, s: 1, f: 14 });
+    const beats = [];
+    for (let i = 0; i < 12; i++) beats.push({ time: i * 0.5, measure: i % 4 === 0 ? i / 4 : -1 });
+    s.load({ notes, chords: [], beats });
+    s.setMeta(tabMeta({ solos: [{ start_time: 0.9, end_time: 3.0 }] }));
+    const got = [];
+    s.setOnEvent((d) => got.push(d));
+    playPerfect(s, 0, 3.5);
+    const bonus = got.filter(d => d.type === 'bonus');
+    assert.equal(bonus.length, 1, 'one bonus event per paid solo');
+    assert.equal(bonus[0].reason, 'solo');
+    assert.equal(bonus[0].points, s.getBonus().solos[0].bonus);
+    assert.equal(bonus[0].points, 4 * 100 * 2);
+    assert.ok(!('wall' in bonus[0]));
+    assert.ok(Number.isFinite(bonus[0].time));
+    assert.ok(!s.drainEvents().some(e => e.type === 'bonus'), 'the view keeps its solo-end; no extra queued event');
+});
+
+test('a solo with no notes reached pays nothing and sends no bonus event', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(5, 38)], chords: [], beats: [] });
+    s.setMeta(tabMeta({ solos: [{ start_time: 0.9, end_time: 3.0 }] }));
+    const got = [];
+    s.setOnEvent((d) => got.push(d));
+    for (let t = 0; t <= 4; t += 0.25) s.update(t);
+    assert.equal(got.filter(d => d.type === 'bonus').length, 0);
+});
+
+test('listener events carry the effective pro drums state', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    const got = [];
+    s.setOnEvent((d) => got.push(d));
+    s.update(0); s.update(1); s.hit(1, 1);
+    assert.equal(got.find(d => d.type === 'hit').proDrums, true, 'pro by default');
+    s.setProDrums(false);
+    s.update(1.9); s.update(2); s.hit(2, 1);
+    assert.equal(got.filter(d => d.type === 'hit').pop().proDrums, false);
+    s.setProDrums(true);
+    s.setMeta({ pro: false, starPower: [], activation: [], solos: [], levels: null, levelsGenerated: [] });
+    s.update(0.2); s.update(1); s.hit(1, 1);
+    assert.equal(got.filter(d => d.type === 'hit').pop().proDrums, false, 'a chart without cymbal markings plays 4-lane');
+});

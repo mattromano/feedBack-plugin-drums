@@ -1601,7 +1601,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.6.2', '/api/plugins/drums/assets/gamepad-source.js?v=4.6.2']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.7.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.7.0']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;
@@ -1908,4 +1908,16 @@ test('with RockHeroSmith installed, Drums plays solo on its stage without Expert
     specs[0].run({ filename: 'x', has_drum_tab: true }, { choice: 'hard' });
     assert.deepEqual(solo, [['x', { kind: 'drums', difficulty: 'hard' }]]);
     delete global.window.rockHeroSmith;
+});
+
+test('_engineState reports the lane\'s effective pro drums state', async () => {
+    const { mod } = realPlugin();
+    const v = await liveView();
+    v.draw(drumBundle());
+    assert.equal(v._engineState().proDrums, true);
+    mod._setProCymbals(false);
+    v.draw(drumBundle({ currentTime: 1.1 }));
+    assert.equal(v._engineState().proDrums, false);
+    assert.equal(v._engineState().proDrums, false, 'a copy, not the engine\'s object');
+    v.destroy();
 });
