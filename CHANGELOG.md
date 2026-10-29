@@ -3,6 +3,18 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.7.0
+
+### Added
+- **Play layer APIs for RockHeroSmith** on `window.feedBackDrums`: `midiInput()` (the MIDI input the drums play from, `{ key, name, connected }`) and `whenMidiReady()`; `setPadSound({ muted, volume })` / `getPadSound()` (volume is the saved pad volume; muted silences pads and auto notes, keeping the volume; `window.__drumsMutePads` stays as an alias); `mountQuickSettings(el, { canvas, soundModes, soundMode, onSoundMode })`, the in-song drum settings (difficulty, auto kick / cymbals, pro cymbals or 4-lane, timing window, input offset with the early/late Apply, pad volume, and the Rock Band / Song + pads / Kit only switch when RockHeroSmith passes its sound modes). The ⚙ panel and the quick settings share one set of controls.
+- **`drums:bonus`** on the bus (`{ canvas, points, reason: 'solo' }`) when a drum solo's bonus is paid, so the band score counts it.
+
+### Changed
+- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()`), the drum view shows no score HUD, end card or personal best of its own; RockHeroSmith's HUD and results take over. Without it nothing changes.
+- **Play as → Drums** plays your MIDI kit or a controller as RockHeroSmith's `soloKindFor` decides (MIDI is discovered first).
+- The ⚙ drum settings button sits in core's player rail slot (`feedBack.ui.playerControlSlot()`) when core has one.
+- Asset version bumped.
+
 ## 4.6.2
 
 ### Fixed

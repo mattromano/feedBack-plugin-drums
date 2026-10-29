@@ -305,6 +305,7 @@ controls*, plus:
 - **Reset drum settings** — back to the defaults, keeping your MIDI input, pad mapping and scores.
 
 The controls are the same per-browser settings as the ⚙ panel in the player and stay in sync with it.
+On core's v3 player the ⚙ button sits in the player's plugin rail (`feedBack.ui.playerControlSlot()`).
 
 ## End-of-song card
 
@@ -387,6 +388,31 @@ Click "Reset Map" to return to standard GM mapping.
 - `openControls({ returnTo })` shows the Drums screen at its Controllers card; for that visit its Back
   button goes to `returnTo` (a screen id, default `home`).
 
+### Play layer (RockHeroSmith)
+
+- `midiInput()` returns the MIDI input the drums play from, `{ key, name, connected }`, or `null` (None, or
+  nothing saved or present): the open input, else what auto-connect would open (the saved pick, or the
+  kit), else a saved pick that is unplugged (`connected: false`). Core lists MIDI devices only after
+  discovery, which runs when a drum view or the Drums screen first shows; `whenMidiReady()` runs it if
+  needed and resolves to `midiInput()` (at most ~2 s; it opens no device).
+- `setPadSound({ muted?, volume? })` / `getPadSound()` → `{ muted, volume }`. `volume` (0..1) is the saved
+  pad volume (the ⚙ panel's Vol). `muted` silences the pad sounds, the hi-hat chick and the auto notes
+  without changing the volume, and is not saved. Junk values change nothing. `window.__drumsMutePads`
+  stays an alias of `muted`.
+- `mountQuickSettings(el, { canvas?, soundModes?, soundMode?, onSoundMode? })` → `{ destroy(), refresh() }`
+  renders the in-song drum settings into `el`: difficulty, auto kick, auto cymbals, pro cymbals (a
+  controller without cymbals shows 4-lane instead), timing window, input offset with the early/late
+  meter's **Apply**, and pad volume. With `canvas` it works on that lane: the difficulty is the lane's band
+  difficulty (no Expert+) and a controller lane sets that controller's offset. `soundModes` (ids
+  `rockband` / `song` / `kit` or `{ id, label }`) adds a sound switch (Rock Band / Song + pads / Kit only)
+  that calls `onSoundMode(id)`; `soundMode` marks the current one. Changes apply at once and are saved
+  like the ⚙ panel's, which shares the same controls.
+- With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()` true), the drum view leaves the
+  score to it: no own score HUD, end-of-song card or `drums_best_v1` best. Without RockHeroSmith, or with
+  its adopt setting off, nothing changes.
+- **Play as → Drums** asks `rockHeroSmith.soloKindFor(song)` (`'kit'` for the MIDI kit, `'drums'` for a
+  controller) and passes it to `playSolo` as `kind`; `'drums'` when it has no answer.
+
 `listControllers` and `createMapper` return Promises (they load `assets/gamepad.js` on demand); check for the
 controller API with `typeof window.feedBackDrums.setController === 'function'`.
 
@@ -394,7 +420,7 @@ controller API with `typeof window.feedBackDrums.setController === 'function'`.
 
 Every drum view emits its judgments and star power on core's event bus (`window.feedBack.on(...)`):
 `drums:hit`, `drums:miss`, `drums:overhit`, `drums:sp-phrase`, `drums:sp-phrase-fail`, `drums:sp-ready`,
-`drums:sp-activate` and `drums:sp-end`. Several drum views can be live at once (split view, the band
+`drums:sp-activate`, `drums:sp-end` and `drums:bonus`. Several drum views can be live at once (split view, the band
 stage) and all emit on the same bus, so filter by `canvas`: `detail.canvas` is the emitting view's highway
 canvas.
 
@@ -406,7 +432,9 @@ Each `detail` holds:
   power meter, 0..1);
 - hits: `pad`, `cymbal`, `id`, `sp`, `bonus`, `offsetMs`, `noteTime` and `points` (what the hit added:
   engine score plus the plugin's timing / roll bonuses);
-- misses: `pad`, `cymbal`, `id` and `noteTime`; overhits: `pad` and `cymbal`.
+- misses: `pad`, `cymbal`, `id` and `noteTime`; overhits: `pad` and `cymbal`;
+- `bonus`: `points` and `reason` (`'solo'`): a drum solo's bonus, paid when the solo ends (timing and roll
+  bonuses are already in the hit points).
 
 `combo-break` is not emitted: the `combo` on each event shows a broken streak.
 
