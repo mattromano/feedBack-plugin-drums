@@ -2043,3 +2043,70 @@ test('song end: a lane RockHeroSmith owns gets no drums end card and no drums_be
     assert.equal((await run(() => ({ version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: () => false }))).best.length, 1,
         'RockHeroSmith on another canvas');
 });
+
+// ── Overhit setting, kick offset, results breakdown ─────────────────────────
+
+test('overhits setting: validated, and sent to the engine with the timing window', () => {
+    const mod = freshPlugin();
+    const cfg = mod._cfg();
+    assert.equal(cfg.overhits, 'penalize');
+    assert.equal(mod._timingParams(), null, 'defaults: engine defaults');
+    mod._saveCfg('overhits', 'ignore');
+    assert.deepEqual(mod._timingParams(), { overhits: 'ignore' });
+    mod._saveCfg('timing', 'forgiving');
+    mod._saveCfg('overhits', 'lenient');
+    assert.deepEqual(mod._timingParams(), { hitWindow: { maxWindow: 0.20, minWindow: 0.20, isDynamic: false }, overhits: 'lenient' });
+    mod._saveCfg('overhits', 'sometimes');
+    assert.equal(cfg.overhits, 'penalize');
+    assert.deepEqual(mod.OVERHIT_IDS, Object.keys(mod.OVERHIT_MODES));
+    mod._saveCfg('kickOffsetMs', -9000);
+    assert.equal(cfg.kickOffsetMs, -250);
+    mod._saveCfg('kickOffsetMs', 'x');
+    assert.equal(cfg.kickOffsetMs, 0);
+});
+
+test('overhits and kick offset controls render with the current values', () => {
+    const mod = freshPlugin();
+    const html = mod._settingControlHtml('overhits', { overhits: 'lenient' });
+    assert.match(html, /class="drums-overhits-select"/);
+    assert.match(html, /<option value="lenient" selected>/);
+    assert.match(mod._settingControlHtml('kickOffset', { kickOffset: -25 }), /class="drums-kick-offset-input"[^>]*value="-25"/);
+    const kit = mod._quickSettingsModel({});
+    assert.ok(kit.controls.includes('overhits') && kit.controls.includes('kickOffset'));
+});
+
+test('_overhitSummary: overhits by pad, the early-kick hint and whether the run counts', () => {
+    const mod = freshPlugin();
+    const st = (o) => Object.assign({ overhits: 0, overhitsIgnored: 0, overhitsByPad: { kick: 0, red: 0, yellow: 0, blue: 0, green: 0 }, overhitMode: 'penalize' }, o);
+    const pt = (gap, sug) => ({ kick: { count: 20, median: -40 }, hands: { count: 20, median: -40 - gap }, kickVsHands: gap, suggestKick: sug });
+    const a = mod._overhitSummary(st({ overhits: 15, overhitsByPad: { kick: 12, red: 3, yellow: 0, blue: 0, green: 0 } }), pt(-25, -25));
+    assert.equal(a.byPad, 'kick 12 · snare 3');
+    assert.equal(a.hint, 'Your kick lands 25 ms before your hands');
+    assert.equal(a.suggestKick, -25);
+    assert.equal(a.counts, true);
+    const late = mod._overhitSummary(st({}), pt(30, 10));
+    assert.equal(late.hint, 'Your kick lands 30 ms after your hands');
+    const off = mod._overhitSummary(st({ overhitMode: 'ignore', overhitsIgnored: 7 }), null);
+    assert.equal(off.counts, false);
+    assert.equal(off.note, 'Overhits off: 7 extra hits ignored, not counted toward your best');
+    assert.equal(off.hint, null);
+    const len = mod._overhitSummary(st({ overhitMode: 'lenient', overhitsIgnored: 4 }), null);
+    assert.equal(len.counts, true);
+    assert.equal(len.note, '4 flams / fill hits forgiven');
+    assert.equal(mod._overhitSummary(st({}), null).byPad, '');
+});
+
+test('a run with overhits off does not record a best score', () => {
+    const store = {};
+    global.window = {};
+    global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } };
+    global.document = { addEventListener: () => {} };
+    const file = path.join(__dirname, '..', 'screen.js');
+    delete require.cache[require.resolve(file)];
+    const mod = require(file);
+    window.feedBack = { on() {}, currentSong: { filename: 'song.sloppak', title: 'Song' } };
+    const session = (mode) => ({ getState: () => ({ notesHit: 5, notesMissed: 0, score: 1000, overhitMode: mode }), getBonus: () => ({ total: 0 }) });
+    assert.equal(mod._recordRunBest(session('ignore'), { text: 'HARD' }), null);
+    assert.equal(store['drums_best_v1:song.sloppak|HARD'], undefined);
+    assert.deepEqual(mod._recordRunBest(session('lenient'), { text: 'HARD' }), { prev: null, isBest: true });
+});

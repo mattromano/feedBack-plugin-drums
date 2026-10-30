@@ -1060,3 +1060,74 @@ test('listener events carry the effective pro drums state', () => {
     s.update(0.2); s.update(1); s.hit(1, 1);
     assert.equal(got.filter(d => d.type === 'hit').pop().proDrums, false, 'a chart without cymbal markings plays 4-lane');
 });
+
+// ── Kick offset + per-pad timing (early kick vs hands) ──────────────────────
+
+// Snare + kick together every 0.5 s from 1 s.
+function kickSnareChart(n) {
+    const notes = [];
+    for (let i = 0; i < n; i++) notes.push(w(1 + i * 0.5, 38), w(1 + i * 0.5, 36));
+    return { notes, beats: [] };
+}
+
+test('the kick offset moves kick hits only, on top of the input offset', () => {
+    const s = H.createSession(E, { now: () => 0, kickOffsetMs: -25 });
+    s.load(kickSnareChart(4));
+    s.update(0.9);
+    s.hit(1, 1); s.hit(1, 0);
+    s.update(1.4);
+    // The kick 80 ms early is a hit with the kick offset (judged 55 ms early), the snare on time.
+    assert.equal(s.hit(1.42, 0).type, 'hit');
+    assert.equal(s.hit(1.5, 1).type, 'hit');
+    // A snare 80 ms early is not moved.
+    s.update(1.9);
+    assert.notEqual(s.hit(1.92, 1).type, 'hit');
+    assert.equal(s.kickOffsetMs, -25);
+    s.setKickOffset(500);
+    assert.equal(s.kickOffsetMs, 250, 'clamped like the input offset');
+});
+
+test('padTiming: kick vs hands medians and the kick offset that lines them up', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load(kickSnareChart(20));
+    for (let i = 0; i < 20; i++) {
+        const t = 1 + i * 0.5;
+        s.update(t - 0.1);
+        s.hit(t - 0.04, 0);    // kick 40 ms early
+        s.hit(t - 0.015, 1);   // hands 15 ms early
+    }
+    const pt = s.padTiming();
+    assert.equal(pt.kick.count, 20);
+    assert.equal(pt.kick.median, -40);
+    assert.equal(pt.hands.median, -15);
+    assert.equal(pt.kickVsHands, -25);
+    assert.equal(pt.suggestKick, -25);
+    // Changing the kick offset starts the kick samples over.
+    s.setKickOffset(-25);
+    assert.equal(s.padTiming().kick.count, 0);
+    assert.equal(s.padTiming().suggestKick, null);
+});
+
+test('padTiming counts kicks that landed outside the window, and stays quiet when the gap is small', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load(kickSnareChart(20));
+    for (let i = 0; i < 20; i++) {
+        const t = 1 + i * 0.5;
+        s.update(t - 0.1);
+        s.hit(t - 0.08, 0);    // kick 80 ms early: an overhit, still measured
+        s.hit(t, 1);
+    }
+    assert.equal(s.padTiming().kick.median, -80);
+    assert.equal(s.padTiming().suggestKick, -80);
+
+    const q = H.createSession(E, { now: () => 0 });
+    q.load(kickSnareChart(20));
+    for (let i = 0; i < 20; i++) {
+        const t = 1 + i * 0.5;
+        q.update(t - 0.1);
+        q.hit(t - 0.02, 0);
+        q.hit(t - 0.01, 1);
+    }
+    assert.equal(q.padTiming().kickVsHands, -10);
+    assert.equal(q.padTiming().suggestKick, null, 'under 15 ms apart: nothing to fix');
+});

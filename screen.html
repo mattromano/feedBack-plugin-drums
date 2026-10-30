@@ -97,6 +97,11 @@
             <div class="dr-ctl"><select class="drums-timing-select" data-dr="timing" aria-label="Hit timing window"></select></div>
         </div>
         <div class="dr-row">
+            <div><div class="dr-t">Overhits</div>
+                <div class="dr-d">A pad hit that hits no note. Penalize breaks your streak (Rock Band / YARG). Lenient forgives a flam with a note on another pad (kick + cymbal) and hits inside a drum fill. Ignore never penalizes them, for freestyling; those runs don't set a best score.</div></div>
+            <div class="dr-ctl"><select class="drums-overhits-select" data-dr="overhits" aria-label="Overhits"></select></div>
+        </div>
+        <div class="dr-row">
             <div><div class="dr-t">Pro cymbals</div>
                 <div class="dr-d">On: cymbals and toms of the same colour are separate notes. Off: either pad of a colour counts.</div></div>
             <div class="dr-ctl"><label class="dr-sw"><input type="checkbox" class="drums-chk-pro" data-dr="proCymbals" aria-label="Pro cymbals"><span></span></label></div>
@@ -193,6 +198,11 @@
             <div><div class="dr-t">Input offset</div>
                 <div class="dr-d">Raise it if your hits register late, lower it if they register early.</div></div>
             <div class="dr-ctl"><input type="number" class="drums-offset-input" data-dr="offset" min="-250" max="250" step="5" aria-label="Input offset in milliseconds"> <span style="font-size:.75rem;color:#9ca3af;">ms</span></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Kick offset</div>
+                <div class="dr-d">Extra offset for the kick only, on top of the input offset. Lower it if your kick registers early compared with your hands; the score card suggests a value.</div></div>
+            <div class="dr-ctl"><input type="number" class="drums-kick-offset-input" data-dr="kickOffset" min="-250" max="250" step="5" aria-label="Kick offset in milliseconds"> <span style="font-size:.75rem;color:#9ca3af;">ms</span></div>
         </div>
         <div class="dr-row">
             <div><div class="dr-t">Star power pad</div>

@@ -3,6 +3,13 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.8.0
+
+### Added
+- **Overhits setting** (Penalize / Lenient / Ignore) next to the hit timing, in the ⚙ panel, the quick settings and Plugins → Drums. Penalize is YARG's rule (a pad hit that hits no note breaks the streak and fails the star power phrase). Lenient forgives a flam with a note on another pad, struck up to 70 ms outside that note's window or within 70 ms of hitting it (an early kick under a cymbal), and hits inside a drum fill. Ignore never penalizes them, for freestyling; such runs set no best score and their full combo is labelled "overhits off". The engine takes it as `params.overhits` (`params.overhitFlamWindow`, default 0.07 s).
+- **Kick offset**: an extra offset for kick hits only, on top of the input offset, for a kick trigger or foot that lands earlier than the hands. The session measures kick and hand timing separately, including strikes that landed just outside a note's window (`padTiming()`), and the end card shows "Your kick lands N ms before your hands" with a button that sets the kick offset when the gap is 15 ms or more.
+- The end card breaks overhits down by pad (kick, snare, yellow, blue, green). The engine state has `overhitsByPad`, `overhitsIgnored` and `overhitMode`; overhit results and events carry `nearOffset` (the offset to the nearest note on that lane within 250 ms).
+
 ## 4.7.1
 
 ### Added

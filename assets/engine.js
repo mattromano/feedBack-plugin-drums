@@ -110,6 +110,10 @@
 
     // Plugin-facing pad colours (shared with screen.js).
     const PAD = Object.freeze({ KICK: 0, RED: 1, YELLOW: 2, BLUE: 3, GREEN: 4 });
+    const PAD_NAMES = Object.freeze(['kick', 'red', 'yellow', 'blue', 'green']);
+    const OVERHIT_MODES = Object.freeze(['penalize', 'lenient', 'ignore']);
+    // An overhit reports how far it was from the nearest note on its own lane, within this (s).
+    const NEAR_NOTE_WINDOW = 0.25;
 
     // YARG FourLaneDrumPad (DrumNote.cs). These are the engine's internal "lanes".
     const LANE = Object.freeze({
@@ -198,6 +202,10 @@
             starMultiplierThresholds: [0.06, 0.12, 0.2, 0.45, 0.75, 1.09],
             waitCountdownSeconds: 9,
             activationType: 'rightmost', // 'rightmost' (YARG default) | 'all' (old YARG style)
+            // Not in YARG: 'penalize' (YARG), 'lenient' (no overhit for a flam with a note on another
+            // lane, or during a drum fill) or 'ignore' (a hit that hits no note is never an overhit).
+            overhits: 'penalize',
+            overhitFlamWindow: 0.07,   // lenient: how far (s) a flam may sit from the other lane's note
         };
     }
 
@@ -237,6 +245,8 @@
         hw.dynamicScale = clamp(hw.dynamicScale, 0.3, 3);
         hw.dynamicGamma = clamp(hw.dynamicGamma, 0.1, 10);
         if (!(p.songSpeed > 0)) p.songSpeed = 1;
+        if (OVERHIT_MODES.indexOf(p.overhits) < 0) p.overhits = 'penalize';
+        p.overhitFlamWindow = Number.isFinite(+p.overhitFlamWindow) ? clamp(+p.overhitFlamWindow, 0, 0.2) : 0.07;
         return p;
     }
 
@@ -564,7 +574,8 @@
         this.stats = {
             score: 0, noteScore: 0, multiplierScore: 0, starPowerScore: 0,
             combo: 0, maxCombo: 0, multiplier: 1, peakMultiplier: 1,
-            notesHit: 0, notesMissed: 0, overhits: 0, overhitsByLane: {},
+            notesHit: 0, notesMissed: 0, overhits: 0, overhitsByLane: {}, overhitsIgnored: 0,
+            overhitsByPad: { kick: 0, red: 0, yellow: 0, blue: 0, green: 0 },
             dynamicsBonus: 0, accentsHit: 0, ghostsHit: 0,
             totalOffset: 0, offsetSamples: 0,
             stars: 0, starIndex: 0,
@@ -889,11 +900,51 @@
         return ch[k].t - prevEnd >= this.params.waitCountdownSeconds && time >= prevEnd && time < ch[k].t;
     };
 
+    // First chord at or after time t (binary search).
+    Engine.prototype._chordAt = function (t) {
+        const ch = this.chords;
+        let lo = 0, hi = ch.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (ch[m].t < t) lo = m + 1; else hi = m; }
+        return lo;
+    };
+
+    // Strike time minus the time of the nearest note on `lane` within NEAR_NOTE_WINDOW, or null.
+    Engine.prototype._nearOffset = function (time, lane) {
+        let best = null;
+        for (let i = this._chordAt(time - NEAR_NOTE_WINDOW); i < this.chords.length; i++) {
+            const c = this.chords[i];
+            if (c.t > time + NEAR_NOTE_WINDOW) break;
+            if (!c.notes.some(n => n.lane === lane)) continue;
+            if (best === null || Math.abs(time - c.t) < Math.abs(best)) best = time - c.t;
+        }
+        return best;
+    };
+
+    // Lenient overhits: 'flam' when the hit sits next to a note on another lane (one hit within the
+    // flam window, or one still to come whose hit window opens within it), 'fill' inside a drum fill.
+    Engine.prototype._lenientReason = function (time, lane) {
+        const flam = this.params.overhitFlamWindow;
+        for (let i = this._chordAt(time - 0.5); i < this.chords.length; i++) {
+            const c = this.chords[i];
+            if (c.t > time + 0.5) break;
+            for (const n of c.notes) {
+                if (n.lane === lane) continue;
+                if (n.hit && !n.autoHit && Math.abs(n.hitTime - time) <= flam) return 'flam';
+                if (!n.hit && !n.missed && time >= c.t + c.front - flam && time <= c.t + c.back) return 'flam';
+            }
+        }
+        for (const w of this.activationWindows) if (time >= w.start && time <= w.end) return 'fill';
+        return null;
+    };
+
     // DrumsEngine.Overhit. Returns null if the overhit was counted, or the reason it was ignored.
-    Engine.prototype._overhit = function (time, lane, pad, cymbal) {
+    Engine.prototype._overhit = function (time, lane, pad, cymbal, nearOffset) {
         if (this.noteIndex === 0) return 'before-first-note';
         if (this.noteIndex > this.chords.length - 1) return 'after-last-note';
         if (this._inWaitCountdown(time)) return 'countdown';
+        const mode = this.params.overhits;
+        const why = mode === 'ignore' ? 'overhits-off' : (mode === 'lenient' ? this._lenientReason(time, lane) : null);
+        if (why) { this.stats.overhitsIgnored++; return why; }
 
         const c = this.chords[this.noteIndex];
         if (isSp(c) && c !== c.phrase.first) this._failPhrase(c.phrase, time);
@@ -901,8 +952,9 @@
         this._resetCombo(time, 'overhit');
         this.stats.overhits++;
         this.stats.overhitsByLane[lane] = (this.stats.overhitsByLane[lane] || 0) + 1;
+        this.stats.overhitsByPad[PAD_NAMES[pad]]++;
         this._updateMultiplier(time);
-        this._emit('overhit', { time, pad, cymbal, lane });
+        this._emit('overhit', { time, pad, cymbal, lane, nearOffset });
         return null;
     };
 
@@ -955,8 +1007,11 @@
             }
         }
 
-        const reason = this._overhit(time, lane, pad, cymbal);
-        if (reason === null) return { type: 'overhit' };
+        const nearOffset = this._nearOffset(time, lane);
+        const reason = this._overhit(time, lane, pad, cymbal, nearOffset);
+        if (reason === null) return { type: 'overhit', nearOffset };
+        // An overhit the overhit setting forgave still says where it landed (timing calibration).
+        if (reason === 'overhits-off' || reason === 'flam' || reason === 'fill') return { type: 'ignored', reason, nearOffset };
         return { type: 'ignored', reason };
     };
 
@@ -988,6 +1043,9 @@
             notesMissed: s.notesMissed,
             totalNotes: this.totalNotes,
             overhits: s.overhits,
+            overhitsIgnored: s.overhitsIgnored,
+            overhitsByPad: Object.assign({}, s.overhitsByPad),
+            overhitMode: this.params.overhits,
             accuracy: resolved > 0 ? s.notesHit / resolved : 1,
             percent: this.totalNotes === 0 ? 1 : s.notesHit / this.totalNotes,
             stars: s.stars,
@@ -1063,6 +1121,8 @@
 
     return {
         PAD,
+        PAD_NAMES,
+        OVERHIT_MODES,
         LANE,
         MIDI_MAP,
         PRESETS,

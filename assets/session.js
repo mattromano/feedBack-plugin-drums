@@ -73,6 +73,8 @@
     // Early/late meter: how many recent hits it keeps, and the "on time" dead zone (ms).
     const TIMING_SAMPLES = 24;
     const TIMING_DEAD_MS = 10;
+    // Kick vs hands timing: samples kept per side, how many each side needs, and the gap (ms) worth fixing.
+    const PAD_TIMING_SAMPLES = 64, PAD_TIMING_MIN = 8, PAD_TIMING_GAP_MS = 15;
     // Input offset range (ms), same as the settings panel.
     const INPUT_OFFSET_MIN = -250, INPUT_OFFSET_MAX = 250;
 
@@ -699,6 +701,26 @@
         };
     }
 
+    /**
+     * Kick vs hands timing. samples: {kick, hands} strike offsets (ms, + = late). Each side's count and
+     * median, the gap (kick - hands) once both have PAD_TIMING_MIN samples, and the kick offset that
+     * would close it (suggestKick, when the gap is >= PAD_TIMING_GAP_MS; currentKickMs: the kick
+     * offset the samples were measured with).
+     */
+    function padTimingSummary(samples, currentKickMs) {
+        const side = (arr) => {
+            const v = Array.isArray(arr) ? arr.filter(Number.isFinite).sort((a, b) => a - b) : [];
+            const m = v.length >> 1;
+            return { count: v.length, median: !v.length ? null : Math.round(v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2) };
+        };
+        const kick = side(samples && samples.kick), hands = side(samples && samples.hands);
+        const both = kick.count >= PAD_TIMING_MIN && hands.count >= PAD_TIMING_MIN;
+        const gap = both ? kick.median - hands.median : null;
+        const cur = Number.isFinite(currentKickMs) ? currentKickMs : 0;
+        return { kick, hands, kickVsHands: gap,
+            suggestKick: gap !== null && Math.abs(gap) >= PAD_TIMING_GAP_MS ? clamp(Math.round(cur + gap), INPUT_OFFSET_MIN, INPUT_OFFSET_MAX) : null };
+    }
+
     /** True when the playhead jumped (seek, loop restart) and the engine must be rebuilt. */
     function isSeek(prevTime, time) {
         if (!Number.isFinite(prevTime) || !Number.isFinite(time)) return false;
@@ -811,6 +833,8 @@
             params: opts.params || null,          // engine params override (hit window)
             bonus: null,                          // Rock Band-style extras on top of the engine score
             offset: normalizeInputOffset(opts.inputOffsetMs) / 1000,   // input offset (s)
+            kickOffset: normalizeInputOffset(opts.kickOffsetMs) / 1000,  // extra offset for kick hits (s)
+            padSamples: { kick: [], hands: [] },  // recent strike offsets (ms, + = late), kick vs the rest
         };
         // Highway time -> player time (the input offset applied).
         const playerTime = (t) => +t - s.offset;
@@ -1002,6 +1026,7 @@
                 s.lastTime = null;
                 s.events.length = 0;
                 s.bonus = null;   // a new chart: the early/late meter starts over too
+                s.padSamples = { kick: [], hands: [] };
                 build(undefined);
                 return api;
             },
@@ -1080,9 +1105,18 @@
                 // Pads the game plays for you: no score, no overhit.
                 if (isAutoNote(pad | 0, !!o.cymbal, s.auto)) return { type: 'ignored', reason: 'auto' };
                 if (!s.engine || !Number.isFinite(+time)) return { type: 'ignored', reason: 'no-chart' };
-                const t = playerTime(time);
+                const kick = (pad | 0) === 0;
+                const t = playerTime(time) - (kick ? s.kickOffset : 0);
                 if (s.lastTime != null && isSeek(s.lastTime, t)) return { type: 'ignored', reason: 'seek' };
-                return s.engine.hit(t, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
+                const r = s.engine.hit(t, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
+                // Per-pad timing: hits, and strikes that missed the window next to a note on their lane.
+                const off = r.type === 'hit' ? r.offset : r.nearOffset;
+                if (off != null && Number.isFinite(off)) {
+                    const arr = s.padSamples[kick ? 'kick' : 'hands'];
+                    arr.push(Math.round(off * 1000) || 0);
+                    if (arr.length > PAD_TIMING_SAMPLES) arr.shift();
+                }
+                return r;
             },
             /**
              * Activate star power at highway time `time` (the Enter key / star power pad). Only
@@ -1098,9 +1132,21 @@
                 if (v === s.offset) return api;
                 s.offset = v;
                 if (s.bonus) s.bonus.offsets = [];   // the meter measured the old offset
+                s.padSamples = { kick: [], hands: [] };
                 return api;
             },
             get inputOffsetMs() { return Math.round(s.offset * 1000); },
+            /** Kick offset in ms: subtracted from kick hits on top of the input offset (- = kick lands early). */
+            setKickOffset(ms) {
+                const v = normalizeInputOffset(ms) / 1000;
+                if (v === s.kickOffset) return api;
+                s.kickOffset = v;
+                s.padSamples.kick = [];
+                return api;
+            },
+            get kickOffsetMs() { return Math.round(s.kickOffset * 1000); },
+            /** Kick vs hands timing (padTimingSummary) from this chart's recent strikes. */
+            padTiming() { return padTimingSummary(s.padSamples, Math.round(s.kickOffset * 1000)); },
             drainEvents() {
                 if (!s.events.length) return [];
                 const out = s.events.slice();
@@ -1161,6 +1207,7 @@
         resolveDifficulty, nextDifficulty, difficultyLabel, difficultyBadge, difficultyChart, isDifficultyKey,
         REDUCE, reduceLevel, withGeneratedLevels,
         midiToPad, isTypingTarget, estimateTime, isSeek, createFrameClock, timingSummary, TIMING_DEAD_MS,
+        padTimingSummary, PAD_TIMING_MIN, PAD_TIMING_GAP_MS,
         formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, starPowerHint,
         normalizeInputOffset, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX,
         createSession,

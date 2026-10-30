@@ -202,7 +202,7 @@ test('_quickSettingsModel: kit, controller with cymbals, controller without', ()
     const { mod } = freshPlugin();
     const kit = mod._quickSettingsModel({});
     assert.equal(kit.input, 'kit');
-    assert.deepEqual(kit.controls, ['difficulty', 'autoKick', 'autoCymbals', 'proCymbals', 'timing', 'inputOffset', 'padVolume']);
+    assert.deepEqual(kit.controls, ['difficulty', 'autoKick', 'autoCymbals', 'proCymbals', 'timing', 'overhits', 'inputOffset', 'kickOffset', 'padVolume']);
     assert.equal(kit.offsetScope, 'global');
     assert.equal(kit.expertPlus, true, 'plain play offers Expert+');
     const pro = mod._quickSettingsModel({ controller: { controllerKey: 'pad#0', hasCymbals: true }, canvas: {} });

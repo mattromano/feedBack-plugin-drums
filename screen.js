@@ -98,6 +98,11 @@ const STORE_KEYS = {
     autoCymbals:    'drums_auto_cymbals_v1',
     // Hit window preset (TIMING_PRESETS).
     timing:         'drums_timing_v1',
+    // Overhit rule (OVERHIT_MODES).
+    overhits:       'drums_overhits_v1',
+    // Extra offset for kick hits only, in ms, on top of the input offset (a kick
+    // trigger that fires earlier than the hand pads, or a foot that leads).
+    kickOffsetMs:   'drums_kick_offset_ms',
     // Volume of the notes the auto kick / auto cymbals play for you (0..1),
     // separate from the pad volume so pads can be silent (the kit module
     // makes the sound) while the auto notes still fill in for a muted drum
@@ -170,6 +175,16 @@ const TIMING_PRESETS = {
         maxWindow: 0.13, minWindow: 0.05, isDynamic: true, dynamicScale: 1, dynamicSlope: 0.60615, dynamicGamma: 2 } } },
 };
 const TIMING_IDS = ['relaxed', 'forgiving', 'normal', 'precision'];
+// What a pad hit that hits no note does (engine params.overhits). Penalize is
+// YARG's rule (streak reset, star power phrase failed); Lenient forgives a flam
+// with a note on another lane (kick + cymbal) and hits inside a drum fill;
+// Ignore never penalizes them (freestyle), and such runs don't set a best score.
+const OVERHIT_MODES = {
+    penalize: { name: 'Penalize (breaks streak)' },
+    lenient:  { name: 'Lenient (flams, fills)' },
+    ignore:   { name: 'Ignore (freestyle)' },
+};
+const OVERHIT_IDS = ['penalize', 'lenient', 'ignore'];
 
 // Drum synth sound sets, all bundled in assets/sounds/ (works offline,
 // nothing loads from third-party sites; licences in NOTICE.md). type
@@ -270,6 +285,11 @@ const _cfg = {
     })(),
     autoVolume:     _readNum(STORE_KEYS.autoVolume, 0.8, 0, 1),
     inputOffsetMs:  Math.round(_readNum(STORE_KEYS.inputOffsetMs, 0, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX)),
+    kickOffsetMs:   Math.round(_readNum(STORE_KEYS.kickOffsetMs, 0, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX)),
+    overhits:       (function () {
+        const raw = _readStore(STORE_KEYS.overhits);
+        return Object.prototype.hasOwnProperty.call(OVERHIT_MODES, raw) ? raw : 'penalize';
+    })(),
     spPad:          Math.round(_readNum(STORE_KEYS.spPad, -1, -1, 127)),
     difficulty:     (function () {
         const raw = _readStore(STORE_KEYS.difficulty);
@@ -338,6 +358,9 @@ function _saveCfg(key, val) {
     if (key === 'timing' && !Object.prototype.hasOwnProperty.call(TIMING_PRESETS, val)) {
         val = 'normal';
     }
+    if (key === 'overhits' && !Object.prototype.hasOwnProperty.call(OVERHIT_MODES, val)) {
+        val = 'penalize';
+    }
     if (key === 'kit' && !Object.prototype.hasOwnProperty.call(DRUM_KITS, val)) {
         val = DEFAULT_KIT;
     }
@@ -351,7 +374,7 @@ function _saveCfg(key, val) {
     if (key === 'hhPedal' && val !== 'off') {
         val = 'auto';
     }
-    if (key === 'inputOffsetMs') val = _normalizeOffsetMs(val);
+    if (key === 'inputOffsetMs' || key === 'kickOffsetMs') val = _normalizeOffsetMs(val);
     if (key === 'spPad') {
         const n = Math.round(Number(val));
         val = Number.isFinite(n) && n >= 0 && n <= 127 ? n : -1;
@@ -444,12 +467,13 @@ function _setProCymbals(on) {
     }
 }
 
-// Save an assist setting (auto kick / auto cymbals / timing) and apply it
+// Save an assist setting (auto kick / auto cymbals / timing / overhits) and apply it
 // to every live instance (mid-song, scoring restarts from the current
 // position, like a difficulty change).
 function _setAssist(key, val) {
     _saveCfg(key, val);
-    const cls = { autoKick: '.drums-auto-kick', autoCymbals: '.drums-auto-cym', timing: '.drums-timing-select' }[key];
+    const cls = { autoKick: '.drums-auto-kick', autoCymbals: '.drums-auto-cym', timing: '.drums-timing-select',
+        overhits: '.drums-overhits-select' }[key];
     try {
         if (cls) document.querySelectorAll(cls).forEach((sel) => { sel.value = _cfg[key]; });
     } catch (_) { /* no DOM */ }
@@ -471,6 +495,18 @@ function _setInputOffset(ms) {
         try { if (inst._inputOffsetChanged) inst._inputOffsetChanged(); } catch (e) { console.warn('[Drums] input offset update failed:', e); }
     }
     return _cfg.inputOffsetMs;
+}
+
+// Save the kick offset (ms) and hand it to every live scoring session.
+function _setKickOffset(ms) {
+    _saveCfg('kickOffsetMs', ms);
+    try {
+        document.querySelectorAll('.drums-kick-offset-input').forEach((el) => { el.value = String(_cfg.kickOffsetMs); });
+    } catch (_) { /* no DOM */ }
+    for (const inst of _instances) {
+        try { if (inst._kickOffsetChanged) inst._kickOffsetChanged(); } catch (e) { console.warn('[Drums] kick offset update failed:', e); }
+    }
+    return _cfg.kickOffsetMs;
 }
 
 // Pads offered for star power activation: notes the engine does not score
@@ -518,6 +554,11 @@ function _optList(ids, names, current) {
     return ids.map(id => `<option value="${id}"${id === current ? ' selected' : ''}>${names[id]}</option>`).join('');
 }
 function _autoOptions(current) { return _optList(AUTO_LEVEL_IDS, AUTO_LEVEL_NAMES, current); }
+function _overhitOptions(current) {
+    const names = {};
+    for (const id of OVERHIT_IDS) names[id] = OVERHIT_MODES[id].name;
+    return _optList(OVERHIT_IDS, names, current);
+}
 function _timingOptions(current) {
     const names = {};
     for (const id of TIMING_IDS) names[id] = TIMING_PRESETS[id].name;
@@ -566,6 +607,17 @@ function _settingControlHtml(id, st) {
                     Timing
                     <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(st.timing)}</select>
                 </label>`;
+    case 'overhits': return `<label style="${_LBL_CSS}"
+                    title="A pad hit that hits no note. Penalize: it breaks your streak. Lenient: not when it is a flam with a note on another pad (kick + cymbal) or inside a drum fill. Ignore: never (freestyle; the run doesn't set a best score).">
+                    Overhits
+                    <select class="drums-overhits-select" aria-label="Overhits" style="${_SEL_CSS}width:150px;">${_overhitOptions(st.overhits)}</select>
+                </label>`;
+    case 'kickOffset': return `<label style="${_LBL_CSS}"
+                    title="Extra offset for the kick only, in ms, on top of the input offset. Lower it if your kick registers early compared with your hands (the score card suggests a value).">
+                    Kick
+                    <input type="number" class="drums-kick-offset-input" min="-250" max="250" step="5"
+                        value="${st.kickOffset || 0}" style="${_SEL_CSS}width:58px;"> ms
+                </label>`;
     case 'inputOffset': return `<label style="${_LBL_CSS}"
                     title="Input offset in ms, subtracted from each hit's time (raise it if your hits register late).">
                     Offset
@@ -607,6 +659,8 @@ function _wireSettingControls(root, ctx) {
     };
     on('.drums-chk-pro', 'onchange', (el) => _setProCymbals(el.checked));
     on('.drums-timing-select', 'onchange', (el) => _setAssist('timing', el.value));
+    on('.drums-overhits-select', 'onchange', (el) => _setAssist('overhits', el.value));
+    on('.drums-kick-offset-input', 'onchange', (el) => _setKickOffset(el.value));
     on('.drums-auto-kick', 'onchange', (el) => _setAssist('autoKick', el.value));
     on('.drums-auto-cym', 'onchange', (el) => _setAssist('autoCymbals', el.value));
     on('.drums-offset-input', 'onchange', (el) => _setInputOffset(el.value));
@@ -659,7 +713,9 @@ function _quickSettingsModel({ controller, soundModes, canvas } = {}) {
     const ctl = controller && typeof controller.controllerKey === 'string' && controller.controllerKey ? controller : null;
     const proCapable = !ctl || ctl.hasCymbals !== false;
     const modes = _soundModeList(soundModes);
-    const controls = ['difficulty', 'autoKick', 'autoCymbals', proCapable ? 'proCymbals' : 'fourLane', 'timing', 'inputOffset', 'padVolume'];
+    const controls = ['difficulty', 'autoKick', 'autoCymbals', proCapable ? 'proCymbals' : 'fourLane', 'timing', 'overhits', 'inputOffset'];
+    if (!ctl) controls.push('kickOffset');   // the kit's kick (a controller has its own offset)
+    controls.push('padVolume');
     if (modes.length) controls.push('soundMode');
     return {
         input: ctl ? 'controller' : 'kit',
@@ -728,6 +784,7 @@ function _mountQuickSettings(el, opts) {
             difficulty: canvas ? (_bandDifficultyFor(canvas) || _cfg.difficulty) : _cfg.difficulty,
             diffOptions: d && Array.isArray(d.options) ? d.options : null,
             pro: _cfg.proCymbals, timing: _cfg.timing, autoKick: _cfg.autoKick, autoCymbals: _cfg.autoCymbals,
+            overhits: _cfg.overhits, kickOffset: _cfg.kickOffsetMs,
             offset: model.controllerKey ? _controllerOffset(model.controllerKey) : _cfg.inputOffsetMs,
             volume: _cfg.synthVolume, soundMode,
             timingSummary: call(inst, '_timingSummary'),
@@ -815,7 +872,9 @@ function _timingParams() {
     const cw = typeof window !== 'undefined' ? +window.__drumsCalibrationWindow : NaN;
     if (cw > 0) return { hitWindow: { maxWindow: cw, minWindow: cw, isDynamic: false } };
     const p = TIMING_PRESETS[_cfg.timing];
-    return p && p.params ? JSON.parse(JSON.stringify(p.params)) : null;
+    const out = p && p.params ? JSON.parse(JSON.stringify(p.params)) : {};
+    if (_cfg.overhits !== 'penalize') out.overhits = _cfg.overhits;
+    return Object.keys(out).length ? out : null;
 }
 
 // ── Synth ─────────────────────────────────────────────────────────────
@@ -1108,7 +1167,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.7.1';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.8.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -3467,7 +3526,7 @@ function createFactory(forceView) {
                 _refreshPadCtl();
                 _offsetMs = _offsetNow();
                 _session = H.createSession(E, { proDrums: _effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }),
-                    auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs });
+                    auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs, kickOffsetMs: _cfg.kickOffsetMs });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
@@ -3603,6 +3662,10 @@ function createFactory(forceView) {
     function _assistsChanged() {
         _syncAuto();
         if (_session) _session.setParams(_timingParams());
+    }
+
+    function _kickOffsetChanged() {
+        if (_session && _session.setKickOffset) _session.setKickOffset(_cfg.kickOffsetMs);
     }
 
     // "Pro cymbals" changed, or this view's controller did (no cymbals: pro off).
@@ -4367,6 +4430,7 @@ function createFactory(forceView) {
 
         // The settings the quick settings share (same markup and handlers).
         const sst = { pro: _cfg.proCymbals, timing: _cfg.timing, offset: _cfg.inputOffsetMs,
+            overhits: _cfg.overhits, kickOffset: _cfg.kickOffsetMs,
             autoKick: _cfg.autoKick, autoCymbals: _cfg.autoCymbals, volume: _cfg.synthVolume };
         // All form controls use classes (not ids) so N panels don't
         // collide on getElementById lookups. Handlers bind via
@@ -4443,7 +4507,9 @@ function createFactory(forceView) {
                 </label>
                 ${_settingControlHtml('proCymbals', sst)}
                 ${_settingControlHtml('timing', sst)}
+                ${_settingControlHtml('overhits', sst)}
                 ${_settingControlHtml('inputOffset', sst)}
+                ${_settingControlHtml('kickOffset', sst)}
                 <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:#666;"
                     title="On charts without drum fills, star power is activated with the Enter key or this pad (it then does not score as a note).">
                     SP pad
@@ -5494,6 +5560,9 @@ function createFactory(forceView) {
         _proCymbalsChanged,
         _assistsChanged,
         _inputOffsetChanged,
+        _kickOffsetChanged,
+        // Kick vs hands timing ({kick, hands, kickVsHands, suggestKick}) or null.
+        _padTiming() { return _session && _session.padTiming ? _session.padTiming() : null; },
         // Read-only snapshots for debugging / tools: engine state
         // (DrumsEngine.getState()), the difficulty in use and auto lanes.
         // Plus proDrums: the lane's effective pro cymbals (off for a cymbal-less controller or a chart without cymbal markings).
@@ -6043,7 +6112,32 @@ function _drumsRunTotal(session, badge) {
 // -> _recordBest's {prev, isBest}, or null when nothing was played.
 function _recordRunBest(session, badge) {
     const run = _drumsRunTotal(session, badge);
-    return run ? _recordBest(_bestKey(run.song, run.diff), run.total) : null;
+    if (!run || !_runCounts(session)) return null;
+    return _recordBest(_bestKey(run.song, run.diff), run.total);
+}
+// A run played with overhits ignored is freestyle: no best score.
+function _runCounts(session) {
+    const st = session && session.getState ? session.getState() : null;
+    return !(st && st.overhitMode === 'ignore');
+}
+
+const _OVERHIT_PAD_NAMES = { kick: 'kick', red: 'snare', yellow: 'yellow', blue: 'blue', green: 'green' };
+// Pure: the end card's overhit lines. st: engine state; pt: the session's
+// padTiming() or null. -> {byPad, hint, suggestKick, counts, note}.
+function _overhitSummary(st, pt) {
+    st = st || {};
+    const by = st.overhitsByPad || {};
+    const byPad = Object.keys(_OVERHIT_PAD_NAMES).filter((k) => by[k] > 0).sort((a, b) => by[b] - by[a])
+        .map((k) => _OVERHIT_PAD_NAMES[k] + ' ' + by[k]).join(' · ');
+    const gap = pt && Number.isFinite(pt.kickVsHands) ? pt.kickVsHands : null;
+    const sug = pt && Number.isFinite(pt.suggestKick) ? pt.suggestKick : null;
+    const hint = sug === null || gap === null ? null
+        : 'Your kick lands ' + Math.abs(gap) + ' ms ' + (gap < 0 ? 'before' : 'after') + ' your hands';
+    const ign = st.overhitsIgnored || 0;
+    let note = null;
+    if (st.overhitMode === 'ignore') note = 'Overhits off: ' + ign + ' extra hit' + (ign === 1 ? '' : 's') + ' ignored, not counted toward your best';
+    else if (st.overhitMode === 'lenient' && ign) note = ign + ' flam' + (ign === 1 ? '' : 's') + ' / fill hit' + (ign === 1 ? '' : 's') + ' forgiven';
+    return { byPad, hint, suggestKick: sug, counts: st.overhitMode !== 'ignore', note };
 }
 
 let _endCardAt = 0;
@@ -6055,7 +6149,10 @@ function _drumsEndCard(session, badge) {
     const st = session.getState();
     const b = (session.getBonus && session.getBonus()) || { total: 0, timing: 0, rolls: 0, solo: 0, perfect: 0, runs: [], solos: [] };
     const cs = run.song, diff = run.diff, total = run.total;
-    const { prev, isBest } = _recordBest(_bestKey(cs, diff), total);
+    const oh = _overhitSummary(st, session.padTiming ? session.padTiming() : null);
+    let prev = null, isBest = false;
+    if (oh.counts) ({ prev, isBest } = _recordBest(_bestKey(cs, diff), total));
+    else { try { const v = Number(localStorage.getItem(_bestKey(cs, diff))); prev = Number.isFinite(v) && v > 0 ? v : null; } catch (_) { /* storage */ } }
     const n = (x) => Math.round(x || 0).toLocaleString('en-US');
     const esc = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
     const resolved = st.notesHit + st.notesMissed;
@@ -6085,16 +6182,20 @@ function _drumsEndCard(session, badge) {
         <div style="font-size:12px;letter-spacing:3px;color:#8b95a5">DRUMS · ${esc(diff)}</div>
         ${cs.title ? `<div style="font-size:17px;color:#f1f5f9;margin-top:2px">${esc(cs.title)}${cs.artist ? `<span style="color:#8b95a5"> — ${esc(cs.artist)}</span>` : ''}</div>` : ''}
         <div style="font:900 46px/1.1 system-ui;color:${isBest ? '#ffc531' : '#f1f5f9'};margin-top:12px">${n(total)}</div>
-        <div style="font-size:12px;color:#8b95a5">${isBest ? '<b style="color:#ffc531">NEW BEST SCORE</b>' + (prev != null ? ' · previous ' + n(prev) : '') : 'best ' + n(prev)}</div>
+        <div style="font-size:12px;color:#8b95a5">${isBest ? '<b style="color:#ffc531">NEW BEST SCORE</b>' + (prev != null ? ' · previous ' + n(prev) : '') : (prev != null ? 'best ' + n(prev) : '')}</div>
         <div style="font-size:26px;margin-top:6px;letter-spacing:4px">${starHtml}</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:14px 0">
             <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${acc.toFixed(2)}%</div><div style="font-size:11px;color:#8b95a5">accuracy</div></div>
             <div><div style="font-weight:800;font-size:20px;color:#f1f5f9">${st.notesHit} / ${st.totalNotes}</div><div style="font-size:11px;color:#8b95a5">notes hit</div></div>
-            <div><div style="font-weight:800;font-size:20px;color:${st.fullCombo ? '#ffc531' : '#f1f5f9'}">${st.fullCombo ? 'FC' : st.maxCombo}</div><div style="font-size:11px;color:#8b95a5">${st.fullCombo ? 'full combo!' : 'best streak'}</div></div>
+            <div><div style="font-weight:800;font-size:20px;color:${st.fullCombo && oh.counts ? '#ffc531' : '#f1f5f9'}">${st.fullCombo ? 'FC' : st.maxCombo}</div><div style="font-size:11px;color:#8b95a5">${st.fullCombo ? (oh.counts ? 'full combo!' : 'full combo (overhits off)') : 'best streak'}</div></div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:8px">${chips}</div>
         ${solos}
-        ${st.overhits ? `<div style="font-size:12px;color:#8b95a5;margin-top:4px">${st.overhits} overhit${st.overhits > 1 ? 's' : ''}</div>` : ''}
+        ${st.overhits ? `<div style="font-size:12px;color:#8b95a5;margin-top:4px">${st.overhits} overhit${st.overhits > 1 ? 's' : ''}${oh.byPad ? ': ' + esc(oh.byPad) : ''}</div>` : ''}
+        ${oh.note ? `<div style="font-size:12px;color:#8fb3d9;margin-top:4px">${esc(oh.note)}</div>` : ''}
+        ${oh.hint ? `<div class="drums-endcard-kick" style="font-size:12px;color:#ffc531;margin-top:6px">${esc(oh.hint)}.
+            <button type="button" class="drums-endcard-kick-apply" style="margin-left:6px;padding:2px 10px;border-radius:6px;border:1px solid #6b5a20;background:#2a2410;color:#ffd866;cursor:pointer"
+                title="Set the kick offset so your kick lines up with your hands">Set kick offset to ${oh.suggestKick} ms</button></div>` : ''}
         <button type="button" class="drums-endcard-close" style="margin-top:14px;padding:6px 22px;border-radius:8px;border:1px solid #3a4670;background:#1b2440;color:#f1f5f9;cursor:pointer">Close</button>
     </div>`;
     const onKey = (e) => { if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); close(); } };
@@ -6103,7 +6204,16 @@ function _drumsEndCard(session, badge) {
         document.removeEventListener('keydown', onKey, true);
         try { _bus().off('song:loading', close); } catch (_) { /* ignore */ }
     }
-    ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('.drums-endcard-close')) close(); });
+    ov.addEventListener('click', (e) => {
+        const kb = e.target.closest('.drums-endcard-kick-apply');
+        if (kb) {
+            const v = _setKickOffset(oh.suggestKick);
+            kb.disabled = true;
+            kb.textContent = 'Kick offset set to ' + v + ' ms';
+            return;
+        }
+        if (e.target === ov || e.target.closest('.drums-endcard-close')) close();
+    });
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(ov);
     const btn = ov.querySelector('.drums-endcard-close');
@@ -6276,6 +6386,8 @@ function _pageFill() {
     q('autoKick').innerHTML = _autoOptions(_cfg.autoKick);
     q('autoCymbals').innerHTML = _autoOptions(_cfg.autoCymbals);
     q('timing').innerHTML = _timingOptions(_cfg.timing);
+    if (q('overhits')) q('overhits').innerHTML = _overhitOptions(_cfg.overhits);
+    if (q('kickOffset')) q('kickOffset').value = String(_cfg.kickOffsetMs);
     q('kit').innerHTML = _kitOptions(_cfg.kit);
     _probeOptionalKits();
     q('channel').innerHTML = '<option value="-1">All channels</option>'
@@ -6314,6 +6426,8 @@ function _pageWire() {
     q('autoKick').onchange = function () { _setAssist('autoKick', this.value); };
     q('autoCymbals').onchange = function () { _setAssist('autoCymbals', this.value); };
     q('timing').onchange = function () { _setAssist('timing', this.value); };
+    if (q('overhits')) q('overhits').onchange = function () { _setAssist('overhits', this.value); };
+    if (q('kickOffset')) q('kickOffset').onchange = function () { _setKickOffset(this.value); };
     q('proCymbals').onchange = function () { _setProCymbals(this.checked); };
     q('kit').onchange = function () {
         const id = this.value;
@@ -6389,6 +6503,8 @@ function _resetDrumSettings() {
     _setAssist('autoKick', 'off');
     _setAssist('autoCymbals', 'off');
     _setAssist('timing', 'normal');
+    _setAssist('overhits', 'penalize');
+    _setKickOffset(0);
     _synthSetKit(DEFAULT_KIT);
     _synthSetVolume(0.7);
     _setAutoVolume(0.8);
@@ -6518,6 +6634,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _midiResolveSaved, DRUM_LANES, PIECE_DEFAULT_MIDI, KICK2X_MIDI,
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
+        OVERHIT_MODES, OVERHIT_IDS, _overhitSummary, _runCounts, _setKickOffset,
         _resolveView, _VALID_VIEWS,
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
