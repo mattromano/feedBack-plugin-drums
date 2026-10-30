@@ -373,6 +373,14 @@ Click "Reset Map" to return to standard GM mapping.
   `canvas` is an object and `hidden` a boolean or a `hudModes()` entry.
 - `isScoreHudHidden(canvas)` returns that canvas's mode: `true`, `false` or `'score'`.
 - `hudModes()` returns the partial modes `setScoreHudHidden` takes besides `true` / `false`: `['score']`.
+- `setInputOffset(ms, canvas?)` sets the input offset (a finite number of ms, clamped to ±250) and applies
+  it live (`session.setInputOffset`). Without a canvas it is the saved global offset, the same path as the
+  settings field (every session follows). With a canvas it targets that lane: a controller lane's
+  controller offset (saved, as `mountQuickSettings`), the main view's (`#highway`, split view off) global
+  offset, else that lane's session alone (not saved; it keeps it when the global offset changes). Returns
+  the offset applied, or `null` (junk, or a canvas with no drum view other than the main one).
+- `getInputOffset(canvas?)` returns the global offset, or with a canvas the offset that lane's session runs
+  with (the global one for the main view before it has a drum view); `null` for another canvas without one.
 - `getInstanceState(canvas)` returns that lane's scoring state, or `null`. It includes `proDrums`, the lane's
   effective pro cymbals (off for a controller without cymbals or a chart without cymbal markings).
 - `getDifficulty(canvas?)` returns the difficulty the player picked: the lane's pinned one with a canvas

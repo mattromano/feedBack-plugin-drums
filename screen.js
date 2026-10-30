@@ -2464,10 +2464,14 @@ function _rhsAdoptsSolo() {
     const r = _rockHeroSmith();
     try { return !!(r && typeof r.adoptsSolo === 'function' && r.adoptsSolo()); } catch (_) { return false; }
 }
+// Pure: the main player's view (core's #highway, split view off).
+function _mainLane({ canvas, split }) {
+    return !!(!split && canvas && typeof canvas === 'object' && canvas.id === 'highway');
+}
 // Pure: RockHeroSmith adopts only the main player's #highway view, never a
 // split-screen panel or another canvas; those keep the drums HUD.
 function _adoptedLane({ adopts, canvas, split }) {
-    return !!(adopts && !split && canvas && typeof canvas === 'object' && canvas.id === 'highway');
+    return !!(adopts && _mainLane({ canvas, split }));
 }
 function _rhsAdoptsLane(canvas) {
     return _adoptedLane({ adopts: _rhsAdoptsSolo(), canvas, split: _ssActive() });
@@ -3102,6 +3106,9 @@ function createFactory(forceView) {
     let _padWantNow = false;        // this view is in _padWanters
     let _playing = false;           // bundle.isPlaying on the last ready frame
     let _offsetMs = _cfg.inputOffsetMs;   // the input offset this view's session runs with
+    // feedBackDrums.setInputOffset(ms, canvas) on a lane that is neither the main
+    // view nor a controller's: this view's own offset (live, not saved), or null.
+    let _laneOffsetMs = null;
     let _onSongEnded = null;          // end-of-song card
     let _V = null;                  // DrumsHighway3D (keyboard helpers + 3D view factory) once loaded
 
@@ -3292,10 +3299,10 @@ function createFactory(forceView) {
         }
     }
     // The offset for this view: its controller's (a pinned lane's key counts
-    // before the claim), else the global one.
+    // before the claim), else its own lane offset, else the global one.
     function _offsetNow() {
         const c = _padCtl || (_padKey ? { controllerKey: _padKey } : null);
-        if (!c) return _cfg.inputOffsetMs;
+        if (!c) return _laneOffsetMs !== null ? _laneOffsetMs : _cfg.inputOffsetMs;
         const G = window.DrumsGamepad;
         let offsets = null;
         try { offsets = G ? G.loadSettings().offsetMs : null; } catch (_) { offsets = null; }
@@ -3771,6 +3778,17 @@ function createFactory(forceView) {
     // (its own offset), else to the global offset.
     function _applySuggestedOffset(ms) {
         _applyOffset(ms, (_padCtl && _padCtl.controllerKey) || _padKey || null);
+    }
+    // feedBackDrums.setInputOffset(ms, canvas): the controller's offset on a
+    // controller lane, the global one on the main view, else this view's own
+    // (live, not saved). Returns the offset applied, or null.
+    function _setLaneOffset(ms) {
+        const key = (_padCtl && _padCtl.controllerKey) || _padKey || null;
+        if (key) return _applyOffset(ms, key);
+        if (_mainLane({ canvas: _highwayCanvas, split: _ssActive() })) { _laneOffsetMs = null; return _setInputOffset(ms); }
+        _laneOffsetMs = _normalizeOffsetMs(ms);
+        _inputOffsetChanged();
+        return _laneOffsetMs;
     }
 
     // rect: the badge in canvas css px (from the 2D draw / 3D HUD), or null to hide.
@@ -5438,6 +5456,9 @@ function createFactory(forceView) {
         _clearController() { if (_padKey || _padSource) _unpinController(); },
         // The timing meter's Apply (3D HUD button): this view's controller offset, else the global one.
         _applyTimingSuggestion: (ms) => _applySuggestedOffset(ms),
+        // feedBackDrums.setInputOffset / getInputOffset with this view's canvas.
+        _setLaneOffset,
+        _inputOffset() { return _offsetMs; },
         // A binding or offset was saved on the Controllers card.
         _refreshPad() { if (_padSource) _padSource.refresh(); _padChanged(); },
         // Called by the module-level setters for every live instance.
@@ -5766,6 +5787,27 @@ if (typeof window !== 'undefined') {
         isScoreHudHidden: (canvas) => _scoreHudModeFor(canvas),
         // The partial modes setScoreHudHidden takes besides true / false.
         hudModes: () => _HUD_MODES.slice(),
+        // The input offset (ms, a finite number, clamped to +-250). No canvas:
+        // the saved global offset, as the settings field (every session follows).
+        // A canvas: that lane's live session: a controller lane's controller
+        // offset (saved, as mountQuickSettings), the main view's global offset,
+        // else that lane alone (not saved). Returns the offset applied, or null
+        // (junk, or a canvas with no drum view other than the main one).
+        setInputOffset: (ms, canvas) => {
+            if (typeof ms !== 'number' || !Number.isFinite(ms)) return null;
+            if (canvas == null) return _setInputOffset(ms);
+            const inst = _instanceForCanvas(canvas);
+            if (inst && inst._setLaneOffset) return inst._setLaneOffset(ms);
+            return _mainLane({ canvas, split: _ssActive() }) ? _setInputOffset(ms) : null;
+        },
+        // The offset setInputOffset sets: the global one, or the lane's live one
+        // (the global one for a main view with no drum view yet); null otherwise.
+        getInputOffset: (canvas) => {
+            if (canvas == null) return _cfg.inputOffsetMs;
+            const inst = _instanceForCanvas(canvas);
+            if (inst && inst._inputOffset) { try { return inst._inputOffset(); } catch (_) { return null; } }
+            return _mainLane({ canvas, split: _ssActive() }) ? _cfg.inputOffsetMs : null;
+        },
         getInstanceState: (canvas) => {
             const inst = _instanceForCanvas(canvas);
             try { return inst && inst._engineState ? inst._engineState() : null; } catch (_) { return null; }
