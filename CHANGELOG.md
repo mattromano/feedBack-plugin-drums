@@ -3,6 +3,15 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.7.1
+
+### Added
+- **HUD modes.** `feedBackDrums.setScoreHudHidden(canvas, 'score')` hides only the lane's score number, stars and accuracy line (and its end card); the streak, multiplier, score pops, combo rings and milestone bursts, FULL COMBO, the early/late meter, the star power meter, the difficulty badge and the hit effects stay, in the 3D and the 2D view. `true` / `false` work as before. `isScoreHudHidden(canvas)` returns the mode (`true`, `false` or `'score'`), and `hudModes()` returns `['score']`.
+
+### Changed
+- With RockHeroSmith adopting a solo play, the main player's drum view keeps its full lane HUD (4.7.0 hid it, which left an almost empty screen). It still skips its end card and `drums_best_v1` best, since RockHeroSmith shows the results.
+- Asset version bumped.
+
 ## 4.7.0
 
 ### Added

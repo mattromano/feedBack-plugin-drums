@@ -152,20 +152,25 @@ test('_adoptedLane: RockHeroSmith adopts only the main #highway view, never spli
     assert.equal(mod._adoptedLane({ adopts: true, canvas: null, split: false }), false);
 });
 
-test('with RockHeroSmith adopting solo plays, the main view has no own HUD, card or best', () => {
+test('with RockHeroSmith adopting solo plays, the main view keeps its HUD but has no card or best', () => {
     const { mod } = freshPlugin();
     const main = { id: 'highway' }, other = {};
-    assert.equal(mod._ownScoreHidden(main), false);
+    assert.equal(mod._ownHudMode(main), false);
     window.rockHeroSmith = { version: 1, playSolo() {}, adoptsSolo: () => true };
-    assert.equal(mod._ownScoreHidden(main), true);
+    assert.equal(mod._ownHudMode(main), false, 'the lane HUD always shows in solo');
     assert.equal(mod._rhsAdoptsLane(main), true);
-    assert.equal(mod._ownScoreHidden(other), false, 'a canvas other than #highway keeps the drums HUD');
-    assert.equal(mod._rhsAdoptsLane(other), false);
+    assert.equal(mod._endCardHidden({ mode: false, adopted: true }), true, 'RockHeroSmith shows the results');
+    assert.equal(mod._endCardHidden({ mode: false, adopted: false }), false);
+    assert.equal(mod._endCardHidden({ mode: 'score', adopted: false }), true, 'band score mode: the band shows results');
+    assert.equal(mod._endCardHidden({ mode: true, adopted: false }), true);
+    assert.equal(mod._rhsAdoptsLane(other), false, 'a canvas other than #highway is never adopted');
     assert.equal(mod._scoreHudHiddenFor(main), false, 'the band switch itself is unchanged');
+    // RockHeroSmith can still ask the adopted lane for a mode.
+    window.feedBackDrums.setScoreHudHidden(main, 'score');
+    assert.equal(mod._ownHudMode(main), 'score');
     const f = () => {};
     window.slopsmithSplitscreen = { isActive: () => true, isCanvasFocused: f, panelChromeFor: f, settingsAnchorFor: f, onFocusChange: f, offFocusChange: f };
-    assert.equal(mod._ownScoreHidden(main), false, 'split view: every panel keeps the drums HUD');
-    assert.equal(mod._rhsAdoptsLane(main), false);
+    assert.equal(mod._rhsAdoptsLane(main), false, 'split view is never adopted');
     delete window.slopsmithSplitscreen;
     assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: true, adopted: true }), false);
     assert.equal(mod._shouldRecordBestOnly({ hasSession: true, ssActive: false, hidden: true, adopted: false }), true);

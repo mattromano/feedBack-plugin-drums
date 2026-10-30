@@ -284,7 +284,8 @@
      *     inputOffsetMs: the player's input offset, for the early/late meter's suggestion; the
      *     meter's Apply pill is at view.timingRect, for the offset view.timingSuggest
      *     hideScore: true hides the score HUD (band mode shows the score itself); the difficulty
-     *     badge is still drawn
+     *     badge is still drawn. 'score' hides only the score number, stars and accuracy: the star
+     *     power meter, badge, early/late meter, multiplier, streak, feeds and score FX stay
      *   view.dispose()
      *   view.fxSnapshot(): the hit FX of the last frame ({trail: [{state, kind, alpha, z}], sparksLive,
      *     sparksBorn, flash, flashHit, pops, popPool, bursts, ring, breakWash}) for tests and debugging
@@ -946,7 +947,9 @@
             ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.clearRect(0, 0, hud.width, hud.height);
             // hideScore (band mode: the band HUD shows the score): only the difficulty badge is drawn.
-            const hideScore = !!frame.hideScore;
+            // 'score': only the score number, stars and accuracy are left out.
+            const scoreOnly = frame.hideScore === 'score';
+            const hideScore = !!frame.hideScore && !scoreOnly;
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             const Wc = cssW, Hc = cssH;
             const m = hudModel(state);
@@ -972,7 +975,8 @@
             const meterW = 190 * scale, meterH = 14 * scale;
             const mx = align === 'right' ? lx - meterW : lx;
             const my = ly;
-            const starY = my + meterH + 72 * scale;   // the badge sits under the stars, drawn or not
+            // The badge sits under the stars, drawn or not; with scoreOnly it moves up under the meter.
+            const starY = scoreOnly ? my + meterH - 32 * scale : my + meterH + 72 * scale;
             if (!hideScore) {
                 ctx.font = `700 ${11 * scale}px ${FONT}`;
                 ctx.fillStyle = m.spActive ? '#8fe6ff' : (m.spReady ? '#bff0ff' : '#8a93b0');
@@ -997,6 +1001,8 @@
                     ctx.beginPath(); ctx.moveTo(x, my + 1); ctx.lineTo(x, my + meterH - 1); ctx.stroke();
                 }
 
+            }
+            if (!hideScore && !scoreOnly) {
                 // score
                 ctx.shadowColor = 'rgba(0,0,0,0.85)';
                 ctx.shadowBlur = 8;

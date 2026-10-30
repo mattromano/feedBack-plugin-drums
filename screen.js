@@ -1108,7 +1108,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.7.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.7.1';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -2425,14 +2425,29 @@ const _bandDifficulty = new WeakMap();
 function _bandDifficultyFor(canvas) {
     return (canvas && typeof canvas === 'object' && _bandDifficulty.get(canvas)) || null;
 }
-// Band mode hides a lane's own score display (2D/3D HUD, end card); the
-// band HUD shows the score instead. Per canvas, like the band difficulty.
+// Band mode hides a lane's own score display; the band HUD shows the score
+// instead. Per canvas, like the band difficulty. The mode is true (the 2D/3D
+// HUD and end card are hidden, only the difficulty badge stays), 'score' (only
+// the score number, stars and accuracy are hidden; the streak, multiplier,
+// score pops, combo rings, early/late and star power meters stay) or false.
+const _HUD_MODES = ['score'];
 const _bandScoreHidden = new WeakMap();
-function _scoreHudHiddenFor(canvas) {
-    return !!(canvas && typeof canvas === 'object' && _bandScoreHidden.get(canvas));
+function _scoreHudModeFor(canvas) {
+    const v = canvas && typeof canvas === 'object' ? _bandScoreHidden.get(canvas) : undefined;
+    return v === true || _HUD_MODES.includes(v) ? v : false;
 }
-// Pure: draw the score HUD only with hit detection on and the lane not hidden.
-function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && !hidden); }
+// Fully hidden (mode true) only.
+function _scoreHudHiddenFor(canvas) { return _scoreHudModeFor(canvas) === true; }
+// Pure: draw the score HUD only with hit detection on and the lane not fully
+// hidden (hidden: a mode; 'score' still draws it, without the score).
+function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && hidden !== true); }
+// Pure: the 2D HUD's boxes, left to right, for a mode.
+function _hud2DBoxes(mode) {
+    return mode === 'score' ? ['mult', 'streak', 'sp'] : ['mult', 'score', 'streak', 'stars', 'sp'];
+}
+// Pure: the lane's end card is skipped (any band mode, or an adopted play:
+// RockHeroSmith shows the results).
+function _endCardHidden({ mode, adopted }) { return !!(adopted || mode); }
 // Pure: the end card needs a session, no split view and the lane not hidden.
 function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSession && !ssActive && !hidden); }
 // Pure: a hidden lane (single view) skips the card but still records its personal
@@ -2441,9 +2456,10 @@ function _shouldShowEndCard({ hasSession, ssActive, hidden }) { return !!(hasSes
 function _shouldRecordBestOnly({ hasSession, ssActive, hidden, controllerPinned, adopted }) {
     return !!(hasSession && !ssActive && hidden && !controllerPinned && !adopted);
 }
-// RockHeroSmith runs solo drum plays itself (its HUD, results and history): true
-// only when it says so (adoptsSolo(), off with its pref). The drums HUD, end card
-// and drums_best_v1 are the fallback for when it's absent or doesn't.
+// RockHeroSmith runs solo drum plays itself (its band HUD, results and history):
+// true only when it says so (adoptsSolo(), off with its pref). The lane HUD still
+// shows (RockHeroSmith can ask for a mode with setScoreHudHidden); the end card
+// and drums_best_v1 are the fallback for when it's absent or doesn't adopt.
 function _rhsAdoptsSolo() {
     const r = _rockHeroSmith();
     try { return !!(r && typeof r.adoptsSolo === 'function' && r.adoptsSolo()); } catch (_) { return false; }
@@ -2456,8 +2472,9 @@ function _adoptedLane({ adopts, canvas, split }) {
 function _rhsAdoptsLane(canvas) {
     return _adoptedLane({ adopts: _rhsAdoptsSolo(), canvas, split: _ssActive() });
 }
-// The lane's own score display (HUD, end card) is off: band mode, or adopted.
-function _ownScoreHidden(canvas) { return _scoreHudHiddenFor(canvas) || _rhsAdoptsLane(canvas); }
+// The lane's own HUD mode (true | 'score' | false): the band switch only; an
+// adopted solo keeps the full lane HUD unless RockHeroSmith asks otherwise.
+function _ownHudMode(canvas) { return _scoreHudModeFor(canvas); }
 
 // ── Controller drumming (core gamepad-input, assets/gamepad*.js) ──
 // controller: a source's current() ({ controllerKey, hasCymbals, standardLayout, ... }) or null.
@@ -3410,7 +3427,7 @@ function createFactory(forceView) {
         }
         const hint = _spHintText(_session.meta);
         _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _offsetMs,
-            hideScore: _ownScoreHidden(_highwayCanvas), message: _padStatus || null });
+            hideScore: _ownHudMode(_highwayCanvas), message: _padStatus || null });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -4673,9 +4690,10 @@ function createFactory(forceView) {
         }
 
         let hudLeft = null;
-        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: _ownScoreHidden(_highwayCanvas) })) {
-            if (_session) hudLeft = _drawScoreHud(ctx, W);
-            else if ((_hits + _misses) > 0) _drawAccuracyHUD(ctx, W, H);
+        const hudMode = _ownHudMode(_highwayCanvas);
+        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: hudMode })) {
+            if (_session) hudLeft = _drawScoreHud(ctx, W, hudMode);
+            else if ((_hits + _misses) > 0 && !hudMode) _drawAccuracyHUD(ctx, W, H);
         }
 
         // MIDI indicator — show on the focused panel only; non-focused
@@ -4924,8 +4942,9 @@ function createFactory(forceView) {
     }
 
     // Engine HUD: score, multiplier, streak, stars and the star power bar
-    // (top centre), plus the live drum-solo percentage.
-    function _drawScoreHud(ctx, W) {
+    // (top centre), plus the live drum-solo percentage. mode 'score' leaves
+    // out the score and the stars (_hud2DBoxes).
+    function _drawScoreHud(ctx, W, mode) {
         const st = _session.getState();
         if (!st || !_h) return;
         const m = _h.hudModel(st);
@@ -4939,7 +4958,9 @@ function createFactory(forceView) {
         ctx.font = 'bold 11px sans-serif';
         const streakW = ctx.measureText(streakText).width + 16;
         const multW = 34, spW = 80, starW = 66, gap = 6;
-        const total = scoreW + streakW + multW + spW + starW + gap * 4;
+        const boxes = _hud2DBoxes(mode);
+        const widths = { mult: multW, score: scoreW, streak: streakW, stars: starW, sp: spW };
+        const total = boxes.reduce((n, b) => n + widths[b], 0) + gap * (boxes.length - 1);
         let x = Math.max(120, (W - total) / 2);
         const left = x;
         const box = (w) => { ctx.fillStyle = 'rgba(8,8,20,0.78)'; _roundRect(ctx, x, y, w, h, 6); ctx.fill(); };
@@ -4952,11 +4973,13 @@ function createFactory(forceView) {
         ctx.fillText(m.multiplierText, x + multW / 2, y + h / 2);
         x += multW + gap;
         // score
-        box(scoreW);
-        ctx.font = 'bold 13px sans-serif';
-        ctx.fillStyle = '#f1f5f9';
-        ctx.fillText(score, x + scoreW / 2, y + h / 2);
-        x += scoreW + gap;
+        if (boxes.includes('score')) {
+            box(scoreW);
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillStyle = '#f1f5f9';
+            ctx.fillText(score, x + scoreW / 2, y + h / 2);
+            x += scoreW + gap;
+        }
         // streak
         box(streakW);
         ctx.font = 'bold 11px sans-serif';
@@ -4964,15 +4987,17 @@ function createFactory(forceView) {
         ctx.fillText(streakText, x + streakW / 2, y + h / 2);
         x += streakW + gap;
         // stars
-        box(starW);
-        ctx.font = '12px sans-serif';
-        ctx.textAlign = 'left';
-        for (let i = 0; i < 5; i++) {
-            ctx.fillStyle = m.gold ? '#ffcf3a' : (i < m.stars ? '#f4f6ff' : '#3a4060');
-            ctx.fillText('★', x + 5 + i * 12, y + h / 2);
+        if (boxes.includes('stars')) {
+            box(starW);
+            ctx.font = '12px sans-serif';
+            ctx.textAlign = 'left';
+            for (let i = 0; i < 5; i++) {
+                ctx.fillStyle = m.gold ? '#ffcf3a' : (i < m.stars ? '#f4f6ff' : '#3a4060');
+                ctx.fillText('★', x + 5 + i * 12, y + h / 2);
+            }
+            ctx.textAlign = 'center';
+            x += starW + gap;
         }
-        ctx.textAlign = 'center';
-        x += starW + gap;
         // star power bar
         box(spW);
         ctx.fillStyle = 'rgba(255,255,255,0.08)';
@@ -5218,7 +5243,7 @@ function createFactory(forceView) {
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
                 const adopted = _rhsAdoptsLane(_highwayCanvas);
-                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: adopted || _scoreHudHiddenFor(_highwayCanvas),
+                const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _endCardHidden({ mode: _scoreHudModeFor(_highwayCanvas), adopted }),
                     controllerPinned: _controllerPinned(), adopted };
                 if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
                 else if (_shouldRecordBestOnly(when)) _recordRunBest(_session, _badge);
@@ -5726,15 +5751,21 @@ if (typeof window !== 'undefined') {
             _saveCfg('midiManual', key ? '1' : '');
             _midiConnect(key).catch((e) => console.warn('[Drums] midi connect failed:', e));
         },
-        // Hide (true) or show (false) that lane's own score HUD and end card.
-        // false (changing nothing) unless canvas is an object and hidden a boolean.
+        // Hide (true) or show (false) that lane's own score HUD and end card, or
+        // hide only its score number, stars and accuracy ('score', a hudModes()
+        // entry; no end card either). false (changing nothing) unless canvas is
+        // an object and hidden a boolean or a known mode.
         setScoreHudHidden: (canvas, hidden) => {
-            if (!canvas || typeof canvas !== 'object' || typeof hidden !== 'boolean') return false;
-            if (hidden) _bandScoreHidden.set(canvas, true);
+            if (!canvas || typeof canvas !== 'object') return false;
+            if (typeof hidden !== 'boolean' && !_HUD_MODES.includes(hidden)) return false;
+            if (hidden) _bandScoreHidden.set(canvas, hidden);
             else _bandScoreHidden.delete(canvas);
             return true;
         },
-        isScoreHudHidden: (canvas) => _scoreHudHiddenFor(canvas),
+        // The lane's mode: true, false or 'score'.
+        isScoreHudHidden: (canvas) => _scoreHudModeFor(canvas),
+        // The partial modes setScoreHudHidden takes besides true / false.
+        hudModes: () => _HUD_MODES.slice(),
         getInstanceState: (canvas) => {
             const inst = _instanceForCanvas(canvas);
             try { return inst && inst._engineState ? inst._engineState() : null; } catch (_) { return null; }
@@ -6441,7 +6472,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _modalOpen, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
-        _midiInputInfo, _rhsAdoptsSolo, _adoptedLane, _rhsAdoptsLane, _ownScoreHidden, _gearPlacement, _playerSlot, _synthDrumHit,
+        _midiInputInfo, _rhsAdoptsSolo, _adoptedLane, _rhsAdoptsLane, _ownHudMode, _scoreHudModeFor, _hud2DBoxes, _endCardHidden, _gearPlacement, _playerSlot, _synthDrumHit,
         _quickSettingsModel, _quickSettingsHtml, _difficultyOptionsHtml, _settingControlHtml, _soundModeList, _applyOffset,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
