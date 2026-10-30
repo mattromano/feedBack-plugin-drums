@@ -688,3 +688,97 @@ test('stats: overhitsByLane counts per lane and resets', () => {
     eng.reset();
     assert.deepEqual(eng.stats.overhitsByLane, {});
 });
+
+// ── Overhit modes (params.overhits: 'penalize' | 'lenient' | 'ignore') ──────
+
+// Snares 0.5 s apart from 1 s, then kick + ride together at `at`.
+function flamChart(at) {
+    return snares(4).concat([w(at, KICK), w(at, RIDE)]);
+}
+
+test('overhits default to penalize, and an unknown mode falls back to it', () => {
+    assert.equal(D.defaultParams().overhits, 'penalize');
+    const eng = engineFor(snares(4), { params: { overhits: 'bogus' } });
+    eng.hit(1, PAD.RED);
+    assert.equal(eng.hit(1.5, PAD.BLUE).type, 'overhit');
+    assert.equal(eng.getState().overhitMode, 'penalize');
+});
+
+test('ignore: a pad hit that hits no note keeps the combo and fails nothing', () => {
+    const eng = engineFor(snares(4), { params: { overhits: 'ignore' }, starPower: [{ start: 1, end: 3 }] });
+    const log = collect(eng, ['overhit', 'combo-break', 'sp-phrase-fail']);
+    eng.hit(1, PAD.RED);
+    eng.hit(1.5, PAD.RED);
+    const r = eng.hit(1.7, PAD.BLUE);
+    assert.equal(r.type, 'ignored');
+    assert.equal(r.reason, 'overhits-off');
+    const s = eng.getState();
+    assert.equal(s.combo, 2);
+    assert.equal(s.overhits, 0);
+    assert.equal(s.overhitsIgnored, 1);
+    assert.equal(s.overhitMode, 'ignore');
+    assert.deepEqual(log, []);
+    eng.hit(2, PAD.RED); eng.hit(2.5, PAD.RED);
+    assert.equal(eng.getState().starPower.phrasesHit, 1, 'the phrase still counts');
+    // A note you don't play is still a miss.
+    const e2 = engineFor(snares(3), { params: { overhits: 'ignore' } });
+    e2.hit(1, PAD.RED);
+    e2.update(2.6);
+    assert.equal(e2.getState().notesMissed, 2);
+});
+
+test('lenient: an early kick before a kick + ride chord (outside the window) does not break the streak', () => {
+    // The ticket's case: the kick lands 80 ms early, the ride on time.
+    const eng = engineFor(flamChart(3), { params: { overhits: 'lenient' } });
+    for (const t of [1, 1.5, 2, 2.5]) eng.hit(t, PAD.RED);
+    const r = eng.hit(2.92, PAD.KICK);
+    assert.equal(r.type, 'ignored');
+    assert.equal(r.reason, 'flam');
+    assert.equal(eng.getState().combo, 4);
+    assert.equal(eng.hit(3, PAD.BLUE, { cymbal: true }).type, 'hit');
+    assert.equal(eng.getState().combo, 5);
+});
+
+test('lenient: a stray hit with nothing on another lane nearby is still an overhit', () => {
+    const eng = engineFor(snares(4), { params: { overhits: 'lenient' } });
+    eng.hit(1, PAD.RED);
+    assert.equal(eng.hit(1.25, PAD.KICK).type, 'overhit');
+    assert.equal(eng.getState().combo, 0);
+});
+
+test('lenient: a hit right after a note hit on another lane is a flam', () => {
+    const eng = engineFor(snares(4), { params: { overhits: 'lenient' } });
+    eng.hit(1, PAD.RED);
+    eng.hit(1.5, PAD.RED);
+    const r = eng.hit(1.55, PAD.KICK);
+    assert.equal(r.reason, 'flam');
+    assert.equal(eng.getState().combo, 2);
+    // ...but not a second hit on the same lane (a double trigger is still an overhit).
+    const e2 = engineFor(snares(4), { params: { overhits: 'lenient' } });
+    e2.hit(1, PAD.RED); e2.hit(1.5, PAD.RED);
+    assert.equal(e2.hit(1.53, PAD.RED).type, 'overhit');
+});
+
+test('lenient: hits during a drum fill are not overhits', () => {
+    const eng = engineFor(snares(6), { params: { overhits: 'lenient' }, activation: [{ start: 2.2, end: 3.2 }] });
+    for (const t of [1, 1.5, 2, 2.5]) eng.hit(t, PAD.RED);
+    assert.equal(eng.hit(2.75, PAD.GREEN).reason, 'fill');
+    assert.equal(eng.getState().combo, 4);
+});
+
+test('overhits are counted per pad and carry the offset to the nearest note on that lane', () => {
+    const eng = engineFor(flamChart(3).concat([w(4, SNARE)]));
+    for (const t of [1, 1.5, 2, 2.5]) eng.hit(t, PAD.RED);
+    const log = collect(eng, ['overhit']);
+    const r = eng.hit(2.92, PAD.KICK);
+    assert.equal(r.type, 'overhit');
+    assert.ok(Math.abs(r.nearOffset - -0.08) < 1e-9);
+    assert.ok(Math.abs(log[0][1].nearOffset - -0.08) < 1e-9);
+    eng.hit(3, PAD.KICK);
+    eng.hit(3.1, PAD.BLUE);
+    assert.deepEqual(eng.getState().overhitsByPad, { kick: 1, red: 0, yellow: 0, blue: 1, green: 0 });
+    // Nothing on that lane within 250 ms: no offset.
+    const e2 = engineFor(snares(4));
+    e2.hit(1, PAD.RED);
+    assert.equal(e2.hit(1.25, PAD.KICK).nearOffset, null);
+});
