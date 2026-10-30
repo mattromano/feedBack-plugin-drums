@@ -1995,3 +1995,51 @@ test('setInputOffset(ms, canvas) on a controller lane sets that controller\'s of
     assert.equal(api.getInputOffset(lane), 47);
     v.destroy();
 });
+
+// ── RockHeroSmith owns the lane: no drums end card or best (rockHeroSmith.ownsLane) ──
+test('_rhsOwnsLane: ownsLane(canvas) when RockHeroSmith has it, else the adoptsSolo fallback', () => {
+    const mod = freshPlugin();
+    const main = { id: 'highway' }, lane = {};
+    assert.equal(mod._rhsOwnsLane(lane), false, 'no RockHeroSmith');
+    window.rockHeroSmith = { version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: (c) => c === lane };
+    assert.equal(mod._rhsOwnsLane(lane), true, 'a one-player Band-setup session, or the adopt pref off');
+    assert.equal(mod._rhsOwnsLane(main), false);
+    window.rockHeroSmith.ownsLane = () => 1;
+    assert.equal(mod._rhsOwnsLane(lane), true, 'truthy');
+    window.rockHeroSmith.ownsLane = () => { throw new Error('boom'); };
+    window.rockHeroSmith.adoptsSolo = () => true;
+    assert.equal(mod._rhsOwnsLane(main), true, 'a throwing ownsLane falls back to adoptsSolo');
+    delete window.rockHeroSmith.ownsLane;
+    assert.equal(mod._rhsOwnsLane(main), true, 'older RockHeroSmith: adoptsSolo on the main view');
+    assert.equal(mod._rhsOwnsLane(lane), false);
+    window.rockHeroSmith.adoptsSolo = () => false;
+    assert.equal(mod._rhsOwnsLane(main), false);
+});
+
+test('song end: a lane RockHeroSmith owns gets no drums end card and no drums_best_v1 write', async () => {
+    const run = async (rhs) => {
+        const gi = fakeGi([XBOX]);
+        const store = memStore();
+        const { api, fire } = realPlugin({ gi, store });
+        window.feedBack.currentSong = { filename: 'song.sloppak', title: 'Song' };
+        const lane = fakeCanvas();
+        const v = await liveView(lane);
+        api.setScoreHudHidden(lane, 'score');   // no card either way: the best-only path
+        if (rhs) window.rockHeroSmith = rhs(lane);
+        v.draw(drumBundle({ currentTime: 1.9 }));
+        await tick();
+        v.draw(drumBundle({ currentTime: 1.98 }));
+        gi.button(4, 1);
+        v.draw(drumBundle({ currentTime: 2.2 }));
+        v.draw(drumBundle({ currentTime: 2.4 }));
+        assert.ok(v._engineState().notesHit >= 1, 'a scored hit');
+        fire('song:ended', {});
+        v.destroy();
+        return { best: [...store.m.keys()].filter((k) => k.startsWith('drums_best_v1')) };
+    };
+    assert.equal((await run(null)).best.length, 1, 'no RockHeroSmith: the best is recorded');
+    assert.equal((await run((lane) => ({ version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: (c) => c === lane }))).best.length, 0,
+        'RockHeroSmith scores on the lane: no drums best');
+    assert.equal((await run(() => ({ version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: () => false }))).best.length, 1,
+        'RockHeroSmith on another canvas');
+});

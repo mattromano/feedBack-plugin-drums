@@ -10,7 +10,8 @@ All notable changes to the Drum Highway plugin. The format follows
 - **`feedBackDrums.setInputOffset(ms, canvas?)` / `getInputOffset(canvas?)`**, applied live. Without a canvas: the saved global offset, as the settings field. With a canvas: that lane's live session (a controller lane's controller offset, the main view's global offset, else that lane alone, not saved). Scorecard's timing Apply uses them.
 
 ### Changed
-- With RockHeroSmith adopting a solo play, the main player's drum view keeps its full lane HUD (4.7.0 hid it, which left an almost empty screen). It still skips its end card and `drums_best_v1` best, since RockHeroSmith shows the results.
+- With RockHeroSmith adopting a solo play, the main player's drum view keeps its full lane HUD (4.7.0 hid it, which left an almost empty screen).
+- The drums end card and `drums_best_v1` best are skipped on any canvas RockHeroSmith scores on (`rockHeroSmith.ownsLane(canvas)`), so a one-player Band setup or a solo with the adopt setting off no longer shows them on top of RockHeroSmith's results. Without `ownsLane` (an older RockHeroSmith) the `adoptsSolo()` gate on the main view still applies.
 - Asset version bumped.
 
 ## 4.7.0

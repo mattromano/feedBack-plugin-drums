@@ -423,9 +423,11 @@ Click "Reset Map" to return to standard GM mapping.
   that calls `onSoundMode(id)`; `soundMode` marks the current one. Changes apply at once and are saved
   like the ⚙ panel's, which shares the same controls.
 - With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()` true), the main player's drum view
-  (`#highway`) keeps its full lane HUD (RockHeroSmith can ask for `'score'` with `setScoreHudHidden`) but
-  leaves the results to it: no end-of-song card or `drums_best_v1` best. Split view panels and any other
-  canvas keep their card and best. Without RockHeroSmith, or with its adopt setting off, nothing changes.
+  (`#highway`) keeps its full lane HUD (RockHeroSmith can ask for `'score'` with `setScoreHudHidden`).
+- Any canvas RockHeroSmith scores on (`rockHeroSmith.ownsLane(canvas)` true: a solo, a one-player Band
+  setup or a band, adopted or not) leaves the results to it: no end-of-song card or `drums_best_v1` best.
+  An older RockHeroSmith without `ownsLane` falls back to `adoptsSolo()` on the main view. Without
+  RockHeroSmith nothing changes.
 - **Play as → Drums** asks `rockHeroSmith.soloKindFor(song)` (`'kit'` for the MIDI kit, `'drums'` for a
   controller; the kind or a Promise of it) and passes it to `playSolo` as `kind`; `'drums'` when it has no
   answer or the lookup fails.

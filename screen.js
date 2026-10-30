@@ -2476,6 +2476,17 @@ function _adoptedLane({ adopts, canvas, split }) {
 function _rhsAdoptsLane(canvas) {
     return _adoptedLane({ adopts: _rhsAdoptsSolo(), canvas, split: _ssActive() });
 }
+// RockHeroSmith scores on this canvas, so its results replace the drums end card
+// and drums_best_v1: rockHeroSmith.ownsLane(canvas) (any RockHeroSmith session,
+// one player or a band, adopted or not) when it has it; else (an older
+// RockHeroSmith, or ownsLane throws) the adoptsSolo gate on the main view.
+function _rhsOwnsLane(canvas) {
+    const r = _rockHeroSmith();
+    if (r && typeof r.ownsLane === 'function') {
+        try { return !!r.ownsLane(canvas); } catch (_) { /* fall back */ }
+    }
+    return _rhsAdoptsLane(canvas);
+}
 // The lane's own HUD mode (true | 'score' | false): the band switch only; an
 // adopted solo keeps the full lane HUD unless RockHeroSmith asks otherwise.
 function _ownHudMode(canvas) { return _scoreHudModeFor(canvas); }
@@ -5260,7 +5271,7 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
-                const adopted = _rhsAdoptsLane(_highwayCanvas);
+                const adopted = _rhsOwnsLane(_highwayCanvas);
                 const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _endCardHidden({ mode: _scoreHudModeFor(_highwayCanvas), adopted }),
                     controllerPinned: _controllerPinned(), adopted };
                 if (_shouldShowEndCard(when)) _drumsEndCard(_session, _badge);
@@ -6514,7 +6525,7 @@ if (typeof module !== 'undefined' && module.exports) {
         _setDifficulty, _setAssist, _saveCfg, _routeTarget, _modalOpen, _setInputTarget, PANEL_DIFF_PREFIX,
         _bandDifficultyFor, _resolveOwnDifficulty, _bandEventDetail, _BAND_EVENT_TYPES,
         _scoreHudHiddenFor, _shouldDrawScoreHud, _shouldShowEndCard, _shouldRecordBestOnly, _drumsRunTotal, _recordRunBest,
-        _midiInputInfo, _rhsAdoptsSolo, _adoptedLane, _rhsAdoptsLane, _ownHudMode, _scoreHudModeFor, _hud2DBoxes, _endCardHidden, _gearPlacement, _playerSlot, _synthDrumHit,
+        _midiInputInfo, _rhsAdoptsSolo, _adoptedLane, _rhsAdoptsLane, _rhsOwnsLane, _ownHudMode, _scoreHudModeFor, _hud2DBoxes, _endCardHidden, _gearPlacement, _playerSlot, _synthDrumHit,
         _quickSettingsModel, _quickSettingsHtml, _difficultyOptionsHtml, _settingControlHtml, _soundModeList, _applyOffset,
         _instances, _setActiveInstance: (i) => { _activeInstance = i; },
         VEL_CURVES, _curveVelocity, _soundNote, LANE_SOUND_NOTE, GM_NOTE_DB, _gmNoteGain, _gmDuration,
