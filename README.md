@@ -366,9 +366,21 @@ Click "Reset Map" to return to standard GM mapping.
 - `setScoreHudHidden(canvas, hidden)` hides (`true`) or shows (`false`) that lane's own score display: the 2D
   score HUD, the 3D HUD's score, meters and toasts, and the end-of-song card. Scoring carries on, the difficulty
   badge stays (2D and 3D), and the run's personal best is still recorded (not in split view). The switch
-  is remembered per canvas, so it survives a re-init on the same canvas, and is not saved. Returns `true` when
-  applied, `false` (changing nothing) unless `canvas` is an object and `hidden` a boolean.
-- `isScoreHudHidden(canvas)` returns whether that canvas's score display is hidden.
+  is remembered per canvas, so it survives a re-init on the same canvas, and is not saved. `'score'` hides
+  only the score number, the stars and the accuracy line (and the end card); the streak, multiplier, score
+  pops, combo rings and milestone bursts, FULL COMBO, the early/late meter, the star power meter, the
+  difficulty badge and the hit effects stay. Returns `true` when applied, `false` (changing nothing) unless
+  `canvas` is an object and `hidden` a boolean or a `hudModes()` entry.
+- `isScoreHudHidden(canvas)` returns that canvas's mode: `true`, `false` or `'score'`.
+- `hudModes()` returns the partial modes `setScoreHudHidden` takes besides `true` / `false`: `['score']`.
+- `setInputOffset(ms, canvas?)` sets the input offset (a finite number of ms, clamped to ±250) and applies
+  it live (`session.setInputOffset`). Without a canvas it is the saved global offset, the same path as the
+  settings field (every session follows). With a canvas it targets that lane: a controller lane's
+  controller offset (saved, as `mountQuickSettings`), the main view's (`#highway`, split view off) global
+  offset, else that lane's session alone (not saved; it keeps it when the global offset changes). Returns
+  the offset applied, or `null` (junk, or a canvas with no drum view other than the main one).
+- `getInputOffset(canvas?)` returns the global offset, or with a canvas the offset that lane's session runs
+  with (the global one for the main view before it has a drum view); `null` for another canvas without one.
 - `getInstanceState(canvas)` returns that lane's scoring state, or `null`. It includes `proDrums`, the lane's
   effective pro cymbals (off for a controller without cymbals or a chart without cymbal markings).
 - `getDifficulty(canvas?)` returns the difficulty the player picked: the lane's pinned one with a canvas
@@ -411,9 +423,11 @@ Click "Reset Map" to return to standard GM mapping.
   that calls `onSoundMode(id)`; `soundMode` marks the current one. Changes apply at once and are saved
   like the ⚙ panel's, which shares the same controls.
 - With RockHeroSmith adopting solo plays (`rockHeroSmith.adoptsSolo()` true), the main player's drum view
-  (`#highway`) leaves the score to it: no own score HUD, end-of-song card or `drums_best_v1` best. Split
-  view panels and any other canvas keep theirs. Without RockHeroSmith, or with its adopt setting off,
-  nothing changes.
+  (`#highway`) keeps its full lane HUD (RockHeroSmith can ask for `'score'` with `setScoreHudHidden`).
+- Any canvas RockHeroSmith scores on (`rockHeroSmith.ownsLane(canvas)` true: a solo, a one-player Band
+  setup or a band, adopted or not) leaves the results to it: no end-of-song card or `drums_best_v1` best.
+  An older RockHeroSmith without `ownsLane` falls back to `adoptsSolo()` on the main view. Without
+  RockHeroSmith nothing changes.
 - **Play as → Drums** asks `rockHeroSmith.soloKindFor(song)` (`'kit'` for the MIDI kit, `'drums'` for a
   controller; the kind or a Promise of it) and passes it to `playSolo` as `kind`; `'drums'` when it has no
   answer or the lookup fails.

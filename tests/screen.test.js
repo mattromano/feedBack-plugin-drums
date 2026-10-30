@@ -1601,7 +1601,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.7.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.7.0']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.7.1', '/api/plugins/drums/assets/gamepad-source.js?v=4.7.1']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;
@@ -1920,4 +1920,126 @@ test('_engineState reports the lane\'s effective pro drums state', async () => {
     assert.equal(v._engineState().proDrums, false);
     assert.equal(v._engineState().proDrums, false, 'a copy, not the engine\'s object');
     v.destroy();
+});
+
+// ── setInputOffset / getInputOffset (public, for scorecard's Apply) ──
+test('setInputOffset / getInputOffset without a canvas: the saved global offset, live in every session', async () => {
+    const store = memStore({ drums_input_offset_ms: '-40' });
+    const { api, sessions, mod } = realPlugin({ store });
+    assert.equal(api.getInputOffset(), -40);
+    const v = await liveView();
+    assert.equal(api.setInputOffset(25), 25);
+    assert.equal(api.getInputOffset(), 25);
+    assert.equal(store.getItem('drums_input_offset_ms'), '25', 'saved like the settings field');
+    assert.equal(mod._cfg().inputOffsetMs, 25);
+    assert.equal(lastOffset(sessions[0]), 25, 'applied live');
+    assert.equal(api.setInputOffset(900), 250, 'clamped');
+    assert.equal(api.setInputOffset('10'), null, 'junk');
+    assert.equal(api.setInputOffset(NaN), null);
+    assert.equal(api.getInputOffset(), 250, 'junk changes nothing');
+    v.destroy();
+});
+
+test('setInputOffset(ms, canvas): the main lane writes the global offset; another lane only its live session', async () => {
+    const store = memStore({ drums_input_offset_ms: '-40' });
+    const { api, sessions, mod } = realPlugin({ store });
+    const main = fakeCanvas();
+    main.id = 'highway';
+    const vm = await liveView(main);
+    const lane = fakeCanvas();
+    const vl = await liveView(lane);
+    const sMain = sessions[0], sLane = sessions[1];
+    assert.equal(api.getInputOffset(lane), -40, 'a lane starts on the global offset');
+    // main lane: the global offset (saved), every session follows
+    assert.equal(api.setInputOffset(30, main), 30);
+    assert.equal(store.getItem('drums_input_offset_ms'), '30');
+    assert.equal(api.getInputOffset(main), 30);
+    assert.equal(lastOffset(sMain), 30);
+    assert.equal(lastOffset(sLane), 30);
+    // another lane: that session only, not saved
+    assert.equal(api.setInputOffset(15, lane), 15);
+    assert.equal(api.getInputOffset(lane), 15);
+    assert.equal(lastOffset(sLane), 15);
+    assert.equal(lastOffset(sMain), 30);
+    assert.equal(mod._cfg().inputOffsetMs, 30, 'global unchanged');
+    assert.equal(store.getItem('drums_input_offset_ms'), '30');
+    // the lane keeps its own offset when the global one changes
+    api.setInputOffset(5);
+    assert.equal(lastOffset(sMain), 5);
+    assert.equal(lastOffset(sLane), 15);
+    // a canvas with no drum view: nothing to set (the main view still reads the global)
+    assert.equal(api.setInputOffset(10, fakeCanvas()), null);
+    assert.equal(api.getInputOffset(fakeCanvas()), null);
+    vm.destroy(); vl.destroy();
+    const idle = fakeCanvas();
+    idle.id = 'highway';
+    assert.equal(api.getInputOffset(idle), 5, 'the main view with no drum view: the global offset');
+    assert.equal(api.setInputOffset(7, idle), 7);
+    assert.equal(api.getInputOffset(), 7);
+});
+
+test('setInputOffset(ms, canvas) on a controller lane sets that controller\'s offset, live', async () => {
+    const key = XBOX.id + '#1';
+    const store = memStore({ [GP.SETTINGS_KEY]: JSON.stringify({ offsetMs: { [key]: 20 } }), drums_input_offset_ms: '-60' });
+    const gi = fakeGi([XBOX]);
+    const { api, sessions, mod } = realPlugin({ gi, store });
+    const lane = fakeCanvas();
+    api.setController(key, lane);
+    const v = await liveView(lane);
+    await tick();
+    assert.equal(api.getInputOffset(lane), 20);
+    assert.equal(api.setInputOffset(47, lane), 47);
+    assert.equal(GP.loadSettings().offsetMs[key], 47, 'the controller\'s saved offset (as mountQuickSettings)');
+    assert.equal(mod._cfg().inputOffsetMs, -60, 'global unchanged');
+    assert.equal(lastOffset(sessions[0]), 47);
+    assert.equal(api.getInputOffset(lane), 47);
+    v.destroy();
+});
+
+// ── RockHeroSmith owns the lane: no drums end card or best (rockHeroSmith.ownsLane) ──
+test('_rhsOwnsLane: ownsLane(canvas) when RockHeroSmith has it, else the adoptsSolo fallback', () => {
+    const mod = freshPlugin();
+    const main = { id: 'highway' }, lane = {};
+    assert.equal(mod._rhsOwnsLane(lane), false, 'no RockHeroSmith');
+    window.rockHeroSmith = { version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: (c) => c === lane };
+    assert.equal(mod._rhsOwnsLane(lane), true, 'a one-player Band-setup session, or the adopt pref off');
+    assert.equal(mod._rhsOwnsLane(main), false);
+    window.rockHeroSmith.ownsLane = () => 1;
+    assert.equal(mod._rhsOwnsLane(lane), true, 'truthy');
+    window.rockHeroSmith.ownsLane = () => { throw new Error('boom'); };
+    window.rockHeroSmith.adoptsSolo = () => true;
+    assert.equal(mod._rhsOwnsLane(main), true, 'a throwing ownsLane falls back to adoptsSolo');
+    delete window.rockHeroSmith.ownsLane;
+    assert.equal(mod._rhsOwnsLane(main), true, 'older RockHeroSmith: adoptsSolo on the main view');
+    assert.equal(mod._rhsOwnsLane(lane), false);
+    window.rockHeroSmith.adoptsSolo = () => false;
+    assert.equal(mod._rhsOwnsLane(main), false);
+});
+
+test('song end: a lane RockHeroSmith owns gets no drums end card and no drums_best_v1 write', async () => {
+    const run = async (rhs) => {
+        const gi = fakeGi([XBOX]);
+        const store = memStore();
+        const { api, fire } = realPlugin({ gi, store });
+        window.feedBack.currentSong = { filename: 'song.sloppak', title: 'Song' };
+        const lane = fakeCanvas();
+        const v = await liveView(lane);
+        api.setScoreHudHidden(lane, 'score');   // no card either way: the best-only path
+        if (rhs) window.rockHeroSmith = rhs(lane);
+        v.draw(drumBundle({ currentTime: 1.9 }));
+        await tick();
+        v.draw(drumBundle({ currentTime: 1.98 }));
+        gi.button(4, 1);
+        v.draw(drumBundle({ currentTime: 2.2 }));
+        v.draw(drumBundle({ currentTime: 2.4 }));
+        assert.ok(v._engineState().notesHit >= 1, 'a scored hit');
+        fire('song:ended', {});
+        v.destroy();
+        return { best: [...store.m.keys()].filter((k) => k.startsWith('drums_best_v1')) };
+    };
+    assert.equal((await run(null)).best.length, 1, 'no RockHeroSmith: the best is recorded');
+    assert.equal((await run((lane) => ({ version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: (c) => c === lane }))).best.length, 0,
+        'RockHeroSmith scores on the lane: no drums best');
+    assert.equal((await run(() => ({ version: 1, playSolo() {}, adoptsSolo: () => false, ownsLane: () => false }))).best.length, 1,
+        'RockHeroSmith on another canvas');
 });
