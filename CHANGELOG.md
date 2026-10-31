@@ -3,6 +3,12 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.10.1
+
+### Fixed
+- In a RockHeroSmith band song the drum lane no longer draws its own streak / multiplier / star power callouts (frame `hideScore`): RockHeroSmith shows its own, so "50 NOTE STREAK!" appeared three times. Solo and plain drums plays keep them.
+- Asset version bumped.
+
 ## 4.10.0
 
 ### Added
