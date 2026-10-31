@@ -31,7 +31,8 @@
 })(typeof self !== 'undefined' ? self : this, function (S) {
     'use strict';
     if (!S) throw new Error('highway3d.js needs session.js (window.DrumsSession)');
-    const { PAD, LANE_NAMES, LANE_COLORS, COLORS, visibleRange, difficultyBadge, formatScore, hudModel, multiplierColor, timingSummary } = S;
+    const { PAD, LANE_NAMES, LANE_COLORS, COLORS, visibleRange, difficultyBadge, formatScore, hudModel, multiplierColor, timingSummary,
+        streakIntensity, calloutFor, JUDGE } = S;
 
     // Track geometry (world units). The strikeline is at z = 0 and notes approach from -z.
     const TRACK = Object.freeze({
@@ -60,7 +61,13 @@
     const HIT_FX = Object.freeze({
         behind: 0.4,            // s a judged gem keeps travelling past the strikeline while it fades
         hitTint: 0x22c55e,      // gem tint once hit
-        missTint: 0xef4444,     // gem tint once missed
+        missTint: 0x5b6070,     // gem tint once missed: greyed out, like a dead note
+        vanishMs: 110,          // a hit gem pops (grows, fades) and is gone after this
+        vanishGrow: 0.55,       // how much a hit gem grows as it pops
+        judgeMs: 560,           // judgment word (PERFECT / GREAT / GOOD / MISS) on screen
+        calloutMs: 1500,        // centre callout (streaks, multiplier, star power)
+        shakeMs: 200,           // camera shake when a streak of 10+ breaks
+        bumpMs: 140,            // streak / multiplier HUD bump on a hit / tier up
         flashMs: 300,           // lane flash decay
         flashPeak: 0.6,         // lane flash opacity at the strike
         onTime: 0x22ff88,       // lane flash / spark colour by timing
@@ -104,6 +111,27 @@
     function sparkCount(kick, combo) {
         const f = Math.min(1, Math.max(0, combo | 0) / HIT_FX.streakFull);
         return kick ? 26 + Math.round(16 * f) : 14 + Math.round(12 * f);
+    }
+
+    // Player feedback options (screen.js settings): level 'full' | 'subtle' | 'off' scales sparks and
+    // the hit-gem pop; words = judgment words; shake = camera shake on a broken streak; hudScale
+    // multiplies the HUD size.
+    const FX_DEFAULTS = Object.freeze({ level: 'full', words: true, shake: true, hudScale: 1.25 });
+    function normalizeFx(fx) {
+        const f = fx || {};
+        return {
+            level: f.level === 'off' || f.level === 'subtle' ? f.level : 'full',
+            words: f.words !== false,
+            shake: f.shake !== false,
+            hudScale: f.hudScale > 0 ? clamp(+f.hudScale, 0.75, 2) : FX_DEFAULTS.hudScale,
+        };
+    }
+
+    /** Hit gem pop at `p` (0..1 of HIT_FX.vanishMs): {alpha, grow}, or null once it is gone. */
+    function hitPop(p) {
+        if (!(p >= 0)) p = 0;
+        if (p >= 1) return null;
+        return { alpha: 1 - p * p, grow: 1 + HIT_FX.vanishGrow * Math.sqrt(p) };
     }
 
     // ── Keyboard fallback ───────────────────────────────────────────────────
@@ -636,7 +664,7 @@
         // (25 / 50 / every 100) and a red wash when a streak of 3+ breaks.
         const POP_N = 12, BURST_N = 2, BURST_P = 36;
         const pops = [];
-        for (let i = 0; i < POP_N; i++) pops.push({ born: -1e9, x: 0, text: '', sp: false });
+        for (let i = 0; i < POP_N; i++) pops.push({ born: -1e9, x: 0, text: '', sp: false, color: '' });
         let popNext = 0;
         const bursts = [];
         for (let i = 0; i < BURST_N; i++) {
@@ -666,6 +694,15 @@
         let spActiveSince = -1e9;
         let spEndedAt = -1e9;
         let toast = null; // {text, color, born}
+        // Hit feedback: hit gems pop and vanish (id -> wall of the hit), the judgment word, the centre
+        // callout, camera shake and the streak / multiplier bumps.
+        const hitAt = new Map();
+        let hitAtEngine = null;
+        let judge = null;       // {word, tag, color, born, heat}
+        let callout = null;     // {text, sub, color, rank, born}
+        let shakeBorn = -1e9, shakeAmp = 0;
+        let streakBump = -1e9, multBump = -1e9;
+        let fx = normalizeFx(null);
         let cssW = 1, cssH = 1, dpr = 1;
         let diffRect = null;    // css-px rect of the HUD difficulty badge (last frame), or null
         let timingRect = null, timingSuggest = null;   // the timing meter's Apply pill + its input offset
@@ -708,7 +745,28 @@
             }
         }
 
-        function handleEvents(events, wall) {
+        function sparksFor(n) {
+            return fx.level === 'off' ? 0 : (fx.level === 'subtle' ? Math.round(n / 2) : n);
+        }
+        function spawnPop(x, text, color, sp, w) {
+            const pop = pops[popNext];
+            popNext = (popNext + 1) % POP_N;
+            pop.born = w;
+            pop.x = x;
+            pop.sp = !!sp;
+            pop.text = text;
+            pop.color = color || '';
+        }
+        function setCallout(c, w) {
+            if (!c) return;
+            const live = callout && w - callout.born < HIT_FX.calloutMs;
+            if (live && c.rank < callout.rank) return;
+            callout = Object.assign({}, c, { born: w });
+        }
+
+        function handleEvents(events, wall, state) {
+            const spActive = !!(state && state.starPower && state.starPower.active);
+            const cctx = { maxMultiplier: state && state.maxMultiplier, spActive };
             for (const ev of events) {
                 const w = Number.isFinite(ev.wall) ? ev.wall : wall;
                 const lane = laneOf(ev.pad);
@@ -720,47 +778,54 @@
                     case 'hit': {
                         const kick = ev.pad === PAD.KICK;
                         const col = ev.sp ? COLORS.starPowerGem : padColor(ev.pad, ev.cymbal);
-                        if (ev.auto) { spawnFlash(ev.pad, col, w, false, col, sparkCount(kick, 0)); break; }
+                        if (ev.auto) { spawnFlash(ev.pad, col, w, false, col, sparksFor(sparkCount(kick, 0))); break; }
+                        if (ev.id != null && fx.level !== 'off') hitAt.set(ev.id, w);
                         // Sparks by timing (the kick keeps its own colour), more of them on a streak.
                         const th = timingHex(ev.offsetMs);
-                        spawnFlash(ev.pad, col, w, ev.bonus, kick ? COLORS.kick : th, sparkCount(kick, ev.combo));
+                        spawnFlash(ev.pad, col, w, ev.bonus, kick ? COLORS.kick : th, sparksFor(sparkCount(kick, ev.combo)));
                         const fl = flashOf(ev.pad);
                         fl.wall = w; fl.hit = true; fl.mat.color.setHex(th);
-                        const pop = pops[popNext];
-                        popNext = (popNext + 1) % POP_N;
-                        pop.born = w;
-                        pop.x = lane >= 0 ? laneX(lane) : 0;
-                        pop.sp = !!ev.sp;
-                        pop.text = '+' + formatScore(ev.points > 0 ? ev.points : 0);
+                        spawnPop(lane >= 0 ? laneX(lane) : 0, '+' + formatScore(ev.points > 0 ? ev.points : 0), '', ev.sp, w);
                         const combo = ev.combo | 0;
                         if (combo > 0 && combo % 10 === 0) { ringBorn = w; ringHot = combo >= 30; }
                         if (combo === 25 || combo === 50 || (combo > 0 && combo % 100 === 0)) {
                             bursts[burstNext].born = w;
                             burstNext = (burstNext + 1) % BURST_N;
                         }
+                        streakBump = w;
+                        if (fx.words && ev.judge) judge = { word: ev.judge.word, tag: ev.judge.tag, color: ev.judge.color, born: w, heat: streakIntensity(combo) };
+                        const c = calloutFor(ev, cctx);
+                        if (c && c.rank === 1 && /MULTIPLIER/.test(c.text)) multBump = w;
+                        setCallout(c, w);
                         break;
                     }
-                    case 'miss':
+                    case 'miss': {
+                        const fl = flashOf(ev.pad);
+                        fl.wall = w; fl.hit = false; fl.mat.color.setHex(HIT_FX.wrong);
+                        if (fx.words) judge = { word: 'MISS', tag: '', color: '#ff5a5a', born: w, heat: 0 };
+                        break;
+                    }
                     case 'overhit': {
                         const fl = flashOf(ev.pad);
                         fl.wall = w; fl.hit = false; fl.mat.color.setHex(HIT_FX.wrong);
+                        spawnPop(lane >= 0 ? laneX(lane) : 0, '✕', '#ff5a5a', false, w);
                         break;
                     }
                     case 'combo-break':
                         if ((ev.combo | 0) >= 3) breakBorn = w;
+                        if ((ev.combo | 0) >= 10 && fx.shake) { shakeBorn = w; shakeAmp = (ev.combo | 0) >= 50 ? 0.14 : 0.08; }
+                        setCallout(calloutFor(ev, cctx), w);
                         break;
                     case 'sp-activate':
                         spActiveSince = w;
-                        toast = { text: 'STAR POWER!', color: '#8fe6ff', born: w };
+                        setCallout(calloutFor(ev, cctx), w);
                         break;
                     case 'sp-end':
                         spEndedAt = w;
                         break;
                     case 'sp-phrase':
-                        toast = { text: 'PHRASE COMPLETE', color: '#dff3ff', born: w };
-                        break;
                     case 'sp-ready':
-                        toast = { text: 'STAR POWER READY', color: '#8fe6ff', born: w };
+                        setCallout(calloutFor(ev, cctx), w);
                         break;
                     case 'solo-end':
                         toast = { text: ev.text, sub: ev.sub, color: ev.perfect ? '#ffc531' : '#c9b6ff', born: w, long: true };
@@ -804,20 +869,23 @@
             rec.z[rec.n] = z;
             rec.n++;
         }
-        function drawTrailGem(g, hit, alpha, z, since, cnt) {
+        // grow > 1: a hit gem popping (HIT_FX.vanishMs), drawn bright and growing instead of trailing.
+        function drawTrailGem(g, hit, alpha, z, since, cnt, grow) {
             const set = hit ? trail.hit : trail.miss;
-            const tint = hit ? hitTint : missTint;
+            const popping = grow > 1;
+            const tint = popping ? tmpColor.copy(hitTint).lerp(white, 0.55) : (hit ? hitTint : missTint);
             const a = g.ghost ? alpha * 0.5 : alpha;
-            const p = since > 0 ? Math.min(1, since / HIT_FX.behind) : 0;
+            const p = popping ? (grow - 1) / HIT_FX.vanishGrow : (since > 0 ? Math.min(1, since / HIT_FX.behind) : 0);
+            const gr = popping ? grow : 1;
             if (g.kind === 'kick' || g.kind === 'kick2x') {
                 const sy = g.kick2x ? 1.35 : 1;
-                placeTrail(set.kick, 0, 0, z, 1, sy * (g.accent ? 1.2 : 1), g.accent ? 1.25 : 1, tint, a);
+                placeTrail(set.kick, 0, 0, z, 1, sy * (g.accent ? 1.2 : 1) * gr, (g.accent ? 1.25 : 1) * gr, tint, a);
                 if (g.kick2x) placeTrail(trail.stripe, 0, 0.02, z, 1, sy, 1, tmp2.copy(tint).lerp(white, 0.7), a);
                 if (hit && cnt.glow < MAX_GEMS) place(meshes.glow, cnt.glow++, 0, 0, z, W4 + 0.6 + p, 1, 0.9 + p, tmp2.copy(tint).multiplyScalar(0.55 * a));
                 return;
             }
             const x = laneX(g.lane);
-            const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1));
+            const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1)) * gr;
             if (g.kind === 'cymbal') {
                 placeTrail(set.dome, x, 0, z, s, s, s, tint, a);
                 placeTrail(set.cymRing, x, 0, z, s, s, s, tint, a);
@@ -934,7 +1002,7 @@
                 const y = projV.y - p * 30 * scale;
                 ctx.globalAlpha = p < 0.4 ? 1 : 1 - (p - 0.4) / 0.6;
                 ctx.strokeText(pop.text, projV.x, y);
-                ctx.fillStyle = pop.sp ? '#8fe6ff' : '#86efac';
+                ctx.fillStyle = pop.color || (pop.sp ? '#8fe6ff' : '#86efac');
                 ctx.fillText(pop.text, projV.x, y);
             }
             ctx.globalAlpha = 1;
@@ -959,8 +1027,11 @@
             const right = project(W4 / 2 + 0.15, 0, 0);
             const strikeY = clamp(left.y, Hc * 0.4, Hc - 20);
             // Rock Band layout: score column right of the track, multiplier + streak left of it.
-            const narrow = Wc - right.x < 190 || left.x < 150;
-            const scale = clamp(Math.min(Wc, Hc * 1.6) / 1100, 0.6, 1.25);
+            // fx.hudScale (setting) makes it all bigger; on a narrow panel it shrinks back to fit.
+            const baseScale = clamp(Math.min(Wc, Hc * 1.6) / 1100, 0.6, 1.25);
+            let scale = baseScale * fx.hudScale;
+            const narrow = Wc - right.x < 190 * scale || left.x < 150 * scale;
+            if (narrow) scale = Math.min(scale, Math.max(baseScale, Wc / 900));
 
             // Score column: star power meter, score, stars, accuracy.
             const lx = narrow ? 16 : right.x + 28 * scale;
@@ -1006,9 +1077,9 @@
                 // score
                 ctx.shadowColor = 'rgba(0,0,0,0.85)';
                 ctx.shadowBlur = 8;
-                ctx.font = `italic 800 ${40 * scale}px ${FONT}`;
-                ctx.fillStyle = '#ffffff';
-                ctx.fillText(m.score, lx, my + meterH + 46 * scale);
+                ctx.font = `italic 900 ${46 * scale}px ${FONT}`;
+                ctx.fillStyle = m.spActive ? '#bff0ff' : '#ffffff';
+                ctx.fillText(m.score, lx, my + meterH + 50 * scale);
                 // stars
                 const sr = 11 * scale;
                 for (let i = 0; i < 5; i++) {
@@ -1147,10 +1218,11 @@
             }
 
             // Multiplier badge + streak.
-            const rx = narrow ? Wc - 16 - 40 * scale : left.x - 28 * scale - 40 * scale;
-            const ry = narrow ? 104 * scale : strikeY - 70 * scale;
-            const br = 34 * scale;
-            ctx.shadowBlur = 14;
+            const rx = narrow ? Wc - 16 - 44 * scale : left.x - 28 * scale - 44 * scale;
+            const ry = narrow ? 112 * scale : strikeY - 74 * scale;
+            const mb = clamp(1 - (wall - multBump) / (HIT_FX.bumpMs * 2), 0, 1);
+            const br = 38 * scale * (1 + 0.3 * mb);
+            ctx.shadowBlur = 14 + 30 * mb + (m.multiplier >= 4 ? 8 : 0);
             ctx.shadowColor = m.multiplierColor;
             ctx.beginPath();
             ctx.arc(rx, ry, br, 0, Math.PI * 2);
@@ -1166,18 +1238,23 @@
             ctx.stroke();
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.font = `italic 900 ${28 * scale}px ${FONT}`;
-            ctx.fillStyle = m.multiplierColor;
+            ctx.font = `italic 900 ${32 * scale * (1 + 0.3 * mb)}px ${FONT}`;
+            ctx.fillStyle = mb > 0 ? '#ffffff' : m.multiplierColor;
             ctx.fillText(m.multiplierText, rx, ry + 1);
             ctx.textBaseline = 'alphabetic';
+            // Streak: bumps on every hit, turns flame-coloured on a hot streak.
+            const sb = clamp(1 - (wall - streakBump) / HIT_FX.bumpMs, 0, 1);
+            const hot = m.streak >= JUDGE.hotStreak;
+            ctx.shadowColor = hot ? 'rgba(255,140,40,0.9)' : 'rgba(0,0,0,0.85)';
+            ctx.shadowBlur = hot ? 18 : 8;
+            ctx.font = `italic 900 ${42 * scale * (1 + 0.16 * sb)}px ${FONT}`;
+            ctx.fillStyle = hot ? (m.streak >= 100 ? '#ffd23f' : '#ffb347') : '#ffffff';
+            ctx.fillText(m.streakText, rx, ry - br - 30 * scale);
             ctx.shadowColor = 'rgba(0,0,0,0.85)';
             ctx.shadowBlur = 8;
-            ctx.font = `800 ${30 * scale}px ${FONT}`;
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(m.streakText, rx, ry - br - 30 * scale);
-            ctx.font = `700 ${10 * scale}px ${FONT}`;
-            ctx.fillStyle = '#9aa4c4';
-            ctx.fillText('NOTE STREAK', rx, ry - br - 14 * scale);
+            ctx.font = `800 ${11 * scale}px ${FONT}`;
+            ctx.fillStyle = hot ? '#ffcf8a' : '#9aa4c4';
+            ctx.fillText('NOTE STREAK', rx, ry - br - 12 * scale);
             if (m.fullCombo && state && state.notesHit > 0) {
                 ctx.fillStyle = '#ffd23f';
                 ctx.fillText('FULL COMBO', rx, ry + br + 18 * scale);
@@ -1227,33 +1304,75 @@
             }
 
             drawScoreFx(ctx, wall, scale);
+            drawJudge(ctx, wall, scale, (left.x + right.x) / 2, strikeY);
 
-            // Centre toasts.
+            // Centre callouts (streaks, multiplier, star power) and toasts (solo, bonuses): they pop
+            // in big and settle. A plain message or the star power hint fills in when neither is up.
             let msg = null;
-            if (frame.message) msg = { text: frame.message, color: '#c8d0ee', alpha: 1 };
-            else if (toast && wall - toast.born < (toast.long ? 2800 : 1600)) {
+            if (frame.message) msg = { text: frame.message, color: '#c8d0ee', alpha: 1, size: 26, pop: 0 };
+            else if (callout && wall - callout.born < HIT_FX.calloutMs) {
+                const age = wall - callout.born;
+                msg = { text: callout.text, sub: callout.sub, color: callout.color, size: callout.rank >= 3 ? 44 : 38,
+                    alpha: clamp(1 - (age - (HIT_FX.calloutMs - 400)) / 400, 0, 1), pop: clamp(1 - age / 160, 0, 1) };
+            } else if (toast && wall - toast.born < (toast.long ? 2800 : 1600)) {
                 const life = toast.long ? 2800 : 1600;
-                msg = { text: toast.text, sub: toast.sub, color: toast.color, alpha: clamp(1 - (wall - toast.born - (life - 500)) / 500, 0, 1) };
+                msg = { text: toast.text, sub: toast.sub, color: toast.color, size: 34,
+                    alpha: clamp(1 - (wall - toast.born - (life - 500)) / 500, 0, 1), pop: clamp(1 - (wall - toast.born) / 160, 0, 1) };
             } else if (m.spReady && !m.spActive && frame.hint) {
-                msg = { text: frame.hint, color: '#9fe9ff', alpha: 0.6 + 0.4 * Math.sin(wall / 200) };
+                msg = { text: frame.hint, color: '#9fe9ff', alpha: 0.6 + 0.4 * Math.sin(wall / 200), size: 24, pop: 0 };
             }
             if (msg) {
                 ctx.globalAlpha = msg.alpha;
                 ctx.textAlign = 'center';
-                ctx.font = `italic 800 ${26 * scale}px ${FONT}`;
+                ctx.font = `italic 900 ${msg.size * scale * (1 + 0.4 * msg.pop)}px ${FONT}`;
                 ctx.shadowColor = msg.color;
-                ctx.shadowBlur = 16;
-                ctx.fillStyle = msg.color;
-                const my = narrow ? Math.max(150 * scale, Hc * 0.24) : Math.max(40 * scale, Hc * 0.12);
+                ctx.shadowBlur = 18 + 20 * msg.pop;
+                ctx.lineWidth = 5 * scale;
+                ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+                const my = narrow ? Math.max(150 * scale, Hc * 0.24) : Math.max(52 * scale, Hc * 0.14);
+                ctx.strokeText(msg.text, Wc / 2, my);
+                ctx.fillStyle = msg.pop > 0.5 ? '#ffffff' : msg.color;
                 ctx.fillText(msg.text, Wc / 2, my);
                 if (msg.sub) {
-                    ctx.font = `700 ${15 * scale}px ${FONT}`;
+                    ctx.font = `800 ${17 * scale}px ${FONT}`;
                     ctx.shadowBlur = 8;
-                    ctx.fillText(msg.sub, Wc / 2, my + 24 * scale);
+                    ctx.fillStyle = msg.color;
+                    ctx.fillText(msg.sub, Wc / 2, my + 28 * scale);
                 }
                 ctx.globalAlpha = 1;
             }
             ctx.shadowBlur = 0;
+        }
+
+        // Judgment word over the strikeline: PERFECT / GREAT / GOOD (+ EARLY / LATE) or MISS. Pops in
+        // big, settles, fades; grows a little with the streak.
+        function drawJudge(ctx, wall, scale, cx, strikeY) {
+            if (!judge || !fx.words) return;
+            const age = wall - judge.born;
+            if (!(age >= 0 && age < HIT_FX.judgeMs)) return;
+            const pop = clamp(1 - age / 90, 0, 1);
+            const alpha = age < HIT_FX.judgeMs * 0.55 ? 1 : 1 - (age - HIT_FX.judgeMs * 0.55) / (HIT_FX.judgeMs * 0.45);
+            const size = 34 * scale * (1 + 0.18 * (judge.heat || 0)) * (1 + 0.35 * pop);
+            const y = strikeY - 150 * scale - age * 0.03 * scale;
+            ctx.save();
+            ctx.globalAlpha = clamp(alpha, 0, 1);
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = `italic 900 ${size}px ${FONT}`;
+            ctx.lineWidth = 5 * scale;
+            ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+            ctx.shadowColor = judge.color;
+            ctx.shadowBlur = 16 + 18 * pop;
+            ctx.strokeText(judge.word, cx, y);
+            ctx.fillStyle = pop > 0.4 ? '#ffffff' : judge.color;
+            ctx.fillText(judge.word, cx, y);
+            if (judge.tag) {
+                ctx.shadowBlur = 6;
+                ctx.font = `800 ${14 * scale}px ${FONT}`;
+                ctx.fillStyle = judge.tag === 'EARLY' ? '#66c7ff' : '#ff9a40';
+                ctx.fillText(judge.tag, cx, y + size * 0.62);
+            }
+            ctx.restore();
         }
 
         // ── Frame ──
@@ -1271,7 +1390,12 @@
             const spActive = !!(sp && sp.active);
             const canActivate = !!(sp && sp.canActivate);
 
-            if (session) handleEvents(session.drainEvents(), wall);
+            fx = normalizeFx(frame.fx);
+            if (eng !== hitAtEngine) { hitAt.clear(); hitAtEngine = eng; }
+            if (session) handleEvents(session.drainEvents(), wall, state);
+            if (hitAt.size > 64) {
+                for (const [id, hw] of hitAt) if (wall - hw > HIT_FX.vanishMs * 4) hitAt.delete(id);
+            }
 
             // Track motion.
             trackTex.offset.y = -((t * speed) / 2) % 1;
@@ -1335,7 +1459,9 @@
                 }
             }
             for (let i = nf; i < MAX_FILLS; i++) fills[i].m.visible = fills[i].e1.visible = fills[i].e2.visible = false;
-            fillMat.opacity = 0.10 + 0.08 * spPulse;
+            // A live Rock Band fill (freestyle) glows brighter than a YARG fill.
+            const liveFill = !!(eng && typeof eng.liveFills === 'function' && eng.liveFills().length);
+            fillMat.opacity = liveFill ? 0.2 + 0.14 * spPulse : 0.10 + 0.08 * spPulse;
 
             // Gems.
             const cnt = { pad: 0, padGhost: 0, padCap: 0, padRim: 0, shadow: 0, dome: 0, domeGhost: 0, bell: 0, cymRing: 0, cymRingGhost: 0,
@@ -1349,10 +1475,18 @@
                     const g = gems[i];
                     // Auto notes are played for you: gone once they reach the strikeline.
                     if (g.auto && g.t <= t) continue;
+                    // A live Rock Band fill is a freestyle zone: its notes aren't drawn.
+                    if (liveFill && eng.isFillNote(g.id)) continue;
                     const since = t - g.t;
                     const st = eng ? eng.noteState(g.id) : null;
                     const z = trailZ(since, speed);
-                    // Judged gems carry on past the strikeline, tinted, and fade out (HIT_FX.behind).
+                    // A hit gem pops where it was hit and is gone (Rock Band style).
+                    if (st === 'hit' && hitAt.has(g.id)) {
+                        const pop = hitPop((wall - hitAt.get(g.id)) / HIT_FX.vanishMs);
+                        if (pop) drawTrailGem(g, true, pop.alpha, Math.min(z, 0), since, cnt, pop.grow);
+                        continue;
+                    }
+                    // Other judged gems carry on past the strikeline, tinted, and fade out (HIT_FX.behind).
                     if (st === 'hit' || st === 'miss') {
                         const a = trailAlpha(since);
                         if (a > 0) drawTrailGem(g, st === 'hit', a, z, since, cnt);
@@ -1492,6 +1626,15 @@
             sparkGeo.attributes.position.needsUpdate = true;
             sparkGeo.attributes.color.needsUpdate = true;
 
+            // Camera shake when a long streak breaks.
+            const shakeAge = wall - shakeBorn;
+            if (fx.shake && shakeAge >= 0 && shakeAge < HIT_FX.shakeMs) {
+                const k = shakeAmp * (1 - shakeAge / HIT_FX.shakeMs);
+                camera.position.set(CAM_POS.x + (rand() - 0.5) * 2 * k, CAM_POS.y + (rand() - 0.5) * 2 * k, CAM_POS.z);
+            } else {
+                camera.position.copy(CAM_POS);
+            }
+
             renderer.render(scene, camera);
             drawHud(frame, state, wall);
         }
@@ -1536,6 +1679,9 @@
                 pops: pops.filter(p => live(p.born, HIT_FX.popMs)).length, popPool: POP_N,
                 bursts: bursts.filter(b => live(b.born, HIT_FX.burstMs)).length,
                 ring: live(ringBorn, HIT_FX.ringMs), breakWash: live(breakBorn, HIT_FX.breakMs),
+                judge: judge && live(judge.born, HIT_FX.judgeMs) ? judge.word : null,
+                callout: callout && live(callout.born, HIT_FX.calloutMs) ? callout.text : null,
+                shake: live(shakeBorn, HIT_FX.shakeMs), popping: hitAt.size,
             };
         }
 
@@ -1551,8 +1697,8 @@
     }
 
     return {
-        TRACK, PAD_SYNTH_MIDI, HIT_FX,
-        keyToPad, synthMidiForPad, trailAlpha, trailZ, timingHex, sparkCount,
+        TRACK, PAD_SYNTH_MIDI, HIT_FX, FX_DEFAULTS,
+        keyToPad, synthMidiForPad, trailAlpha, trailZ, timingHex, sparkCount, normalizeFx, hitPop,
         createView,
     };
 });

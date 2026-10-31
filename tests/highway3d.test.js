@@ -120,7 +120,7 @@ function stub() {
     return p;
 }
 
-function sceneHarness(notes, opts) {
+function sceneHarness(notes, opts, fx) {
     const prevDoc = global.document;
     global.document = { createElement: () => stub(), addEventListener: () => {} };
     let wall = 0;
@@ -131,9 +131,9 @@ function sceneHarness(notes, opts) {
     let t = 0;
     const to = (t1) => {
         for (; t < t1 - 1e-9; t = Math.min(t1, t + 1 / 60)) {
-            wall = t * 1000; s.update(t); view.render({ time: t, session: s, wallNow: wall });
+            wall = t * 1000; s.update(t); view.render({ time: t, session: s, wallNow: wall, fx });
         }
-        wall = t1 * 1000; s.update(t1); view.render({ time: t1, session: s, wallNow: wall });
+        wall = t1 * 1000; s.update(t1); view.render({ time: t1, session: s, wallNow: wall, fx });
         t = t1;
         return view.fxSnapshot();
     };
@@ -164,8 +164,55 @@ test('trailAlpha / trailZ: judged gems keep moving past the strikeline and fade 
     assert.ok(Math.abs(v0 - speed) / speed < 0.05, 'no jump in speed at the strikeline');
 });
 
-test('3D view: a hit gem is still drawn 0.2 s later, tinted, with reduced opacity, and gone after the window', () => {
+test('hitPop: a hit gem grows and fades over HIT_FX.vanishMs, then is gone', () => {
+    const a = H.hitPop(0), b = H.hitPop(0.5), c = H.hitPop(0.95);
+    assert.equal(a.alpha, 1);
+    assert.equal(a.grow, 1);
+    assert.ok(b.alpha < 1 && c.alpha < b.alpha, 'fades');
+    assert.ok(b.grow > 1 && c.grow > b.grow, 'grows');
+    assert.equal(H.hitPop(1), null);
+    assert.equal(H.hitPop(3), null);
+});
+
+test('normalizeFx: unknown values fall back to the defaults, the HUD scale is clamped', () => {
+    assert.deepEqual(H.normalizeFx(null), { level: 'full', words: true, shake: true, hudScale: H.FX_DEFAULTS.hudScale });
+    assert.deepEqual(H.normalizeFx({ level: 'subtle', words: false, shake: false, hudScale: 9 }),
+        { level: 'subtle', words: false, shake: false, hudScale: 2 });
+    assert.equal(H.normalizeFx({ level: 'loud' }).level, 'full');
+    assert.equal(H.normalizeFx({ hudScale: 0.1 }).hudScale, 0.75);
+});
+
+test('3D view: a hit gem pops at the strikeline and is gone; a missed gem greys out and drifts past', () => {
     const h = sceneHarness([{ t: 1, s: 1, f: 14 }, { t: 2, s: 1, f: 14 }]);
+    try {
+        let snap = h.to(0.98);
+        assert.equal(snap.trail.length, 0, 'nothing judged yet');
+        assert.equal(h.hit(1.0, 1).type, 'hit');
+        snap = h.to(1.0);
+        assert.equal(snap.trail.length, 1, 'popping');
+        assert.equal(snap.trail[0].state, 'hit');
+        assert.ok(snap.sparksLive > 0, 'hit sparks');
+        assert.ok(snap.flash[0] > 0 && snap.flashHit[0], 'green lane flash on the red lane');
+        assert.equal(snap.judge, 'PERFECT', 'judgment word');
+        snap = h.to(1.05);
+        assert.equal(snap.trail.length, 1);
+        assert.ok(snap.trail[0].alpha > 0 && snap.trail[0].alpha < 1, 'fading as it pops');
+        assert.ok(snap.trail[0].z <= 0, 'stays at the strikeline');
+        assert.equal(h.to(1.2).trail.length, 0, 'gone: hit gems vanish');
+        assert.equal(h.to(1.5).flash[0], 0, 'the lane flash is over');
+        // the note at t=2 is never played: it greys out, carries on and fades
+        snap = h.to(2.25);
+        assert.equal(snap.trail.length, 1);
+        assert.equal(snap.trail[0].state, 'miss');
+        assert.ok(snap.trail[0].alpha > 0 && snap.trail[0].alpha < 1);
+        assert.ok(snap.flash[0] > 0 && !snap.flashHit[0], 'red lane flash');
+        assert.equal(snap.judge, 'MISS');
+        assert.equal(h.to(2.5).trail.length, 0);
+    } finally { h.done(); }
+});
+
+test('3D view: with effects off, a hit gem trails past the strikeline as before and no words show', () => {
+    const h = sceneHarness([{ t: 1, s: 1, f: 14 }, { t: 2, s: 1, f: 14 }], null, { level: 'off', words: false });
     try {
         let snap = h.to(0.98);
         assert.equal(snap.trail.length, 0, 'nothing judged yet');
@@ -173,8 +220,9 @@ test('3D view: a hit gem is still drawn 0.2 s later, tinted, with reduced opacit
         snap = h.to(1.0);
         assert.equal(snap.trail.length, 1);
         assert.equal(snap.trail[0].state, 'hit');
-        assert.ok(snap.sparksLive > 0, 'hit sparks');
+        assert.equal(snap.sparksLive, 0, 'no sparks with effects off');
         assert.ok(snap.flash[0] > 0 && snap.flashHit[0], 'green lane flash on the red lane');
+        assert.equal(snap.judge, null);
         snap = h.to(1.2);
         assert.equal(snap.trail.length, 1, 'still drawn past the strikeline');
         const g = snap.trail[0];
@@ -217,9 +265,24 @@ test('3D view: spark bursts grow with the streak, combo rings / milestone bursts
         assert.ok(snap.sparksBorn > first, 'a 25 streak throws a bigger burst than the first hit');
         assert.ok(snap.pops > 0 && snap.pops <= snap.popPool, 'score pops are pooled');
         assert.equal(snap.bursts, 1, 'the 25 streak milestone burst');
-        // break the streak: a red wash
+        // break the streak: a red wash, a camera shake and a STREAK LOST callout
         const br = h.to(1 + 26 * 0.25);
         assert.ok(br.breakWash, 'streak-break wash');
+        assert.ok(br.shake, 'camera shake on a 10+ streak break');
+        assert.equal(br.callout, 'STREAK LOST');
+    } finally { h.done(); }
+});
+
+test('3D view: the multiplier going up gets a callout; an overhit gets a red mark', () => {
+    const notes = [];
+    for (let i = 0; i < 12; i++) notes.push({ t: 1 + i * 0.25, s: 1, f: 14 });
+    const h = sceneHarness(notes);
+    try {
+        for (let i = 0; i < 10; i++) { h.to(1 + i * 0.25 - 0.01); h.hit(1 + i * 0.25, 1); }
+        assert.equal(h.to(1 + 9 * 0.25).callout, 'x2 MULTIPLIER');
+        const before = h.to(3.6).pops;
+        h.hit(3.6, 3);   // nothing to hit there: an overhit
+        assert.ok(h.to(3.62).pops > before, 'overhit mark');
     } finally { h.done(); }
 });
 

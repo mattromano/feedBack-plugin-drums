@@ -206,6 +206,12 @@
             // lane, or during a drum fill) or 'ignore' (a hit that hits no note is never an overhit).
             overhits: 'penalize',
             overhitFlamWindow: 0.07,   // lenient: how far (s) a flam may sit from the other lane's note
+            // Not in YARG: 'yarg' keeps a fill's notes on the chart; 'rb' (Rock Band) turns a fill that
+            // comes into view (fillLead s ahead) while star power is ready into a freestyle zone: its
+            // notes before the activation chord are skipped without penalty and any pad hit in it is
+            // ignored, then the activation chord deploys star power.
+            fillStyle: 'yarg',
+            fillLead: 2.0,
         };
     }
 
@@ -579,6 +585,7 @@
             dynamicsBonus: 0, accentsHit: 0, ghostsHit: 0,
             totalOffset: 0, offsetSamples: 0,
             stars: 0, starIndex: 0,
+            fillSkipped: 0,
         };
         this.sp = {
             amount: 0,           // measures (full bar = params.starPowerMeasures)
@@ -592,11 +599,13 @@
             totalGained: 0,
         };
         for (const c of this.chords) {
+            c.fill = false;
             for (const n of c.notes) {
-                n.hit = false; n.missed = false; n.autoHit = false;
+                n.hit = false; n.missed = false; n.autoHit = false; n.skipped = false;
                 n.hitTime = null; n.offset = null; n.hitVelocity = null; n.bonus = false;
             }
         }
+        for (const w of this.activationWindows || []) w.live = undefined;
         for (const ph of this.phrases) { ph.failed = false; ph.awarded = false; }
         this._updateStars();
     };
@@ -764,9 +773,45 @@
 
     // ── Clock ──
 
+    // Rock Band fills (params.fillStyle 'rb'): each fill is decided once, fillLead s before it starts
+    // (as it comes into view): live when star power can be activated and isn't active. A live fill's
+    // chords before its activation chord become freestyle (c.fill).
+    Engine.prototype._decideFills = function (time) {
+        if (this.params.fillStyle !== 'rb') return;
+        const lead = this.params.fillLead;
+        for (const w of this.activationWindows) {
+            if (w.live !== undefined || w.start - lead > time) continue;
+            w.live = this._canActivate() && !this.sp.active;
+            if (!w.live) continue;
+            for (const c of this.chords) {
+                if (c === w.chord || c.t >= w.chord.t) break;
+                if (c.t >= w.start - PHRASE_EPS && !chordResolved(c)) c.fill = true;
+            }
+        }
+    };
+
+    // The live Rock Band fill whose freestyle zone covers `time`, or null.
+    Engine.prototype._liveFillAt = function (time) {
+        if (this.params.fillStyle !== 'rb') return null;
+        for (const w of this.activationWindows) {
+            if (w.live && time >= w.start - PHRASE_EPS && time < w.chord.t + w.chord.front) return w;
+        }
+        return null;
+    };
+
+    // A freestyle fill chord's notes: resolved without score, combo or penalty.
+    Engine.prototype._skipFillChord = function (c, time) {
+        for (const n of c.notes) {
+            if (n.hit || n.missed) continue;
+            n.hit = true; n.autoHit = true; n.skipped = true; n.hitTime = time;
+            this.stats.fillSkipped++;
+        }
+    };
+
     // Process note misses and the star power end up to `time`, in time order.
     Engine.prototype._advance = function (time) {
         if (!(time >= this.currentTime)) return;
+        this._decideFills(time);
         for (;;) {
             const c = this.chords[this.noteIndex];
             const missAt = c ? c.t + c.back : Infinity;
@@ -791,6 +836,11 @@
 
     // YargDrumsEngine.CheckForNoteHit: the first chord was missed out the back end.
     Engine.prototype._missChord = function (c, time) {
+        if (c.fill) {
+            this._skipFillChord(c, time);
+            this._advanceIndex();
+            return;
+        }
         for (const n of c.notes) {
             if (n.hit || n.missed) continue;
             // Players may skip SP activation notes without penalty.
@@ -821,6 +871,7 @@
         for (let i = c.index - 1; i >= 0; i--) {
             const prev = this.chords[i];
             if (chordResolved(prev)) break;
+            if (prev.fill) { this._skipFillChord(prev, time); continue; }
             for (const n of prev.notes) if (!n.hit && !n.missed) this._missNote(n, time);
         }
     };
@@ -985,6 +1036,7 @@
 
         for (let i = this.noteIndex; i < this.chords.length; i++) {
             const c = this.chords[i];
+            if (c.fill) continue;   // a Rock Band fill's freestyle notes can't be hit
             if (time < c.t + c.front || time > c.t + c.back) break; // you can't skip past a note outside the window
             for (const n of c.notes) {
                 if (n.lane !== lane) continue;
@@ -1008,6 +1060,7 @@
         }
 
         const nearOffset = this._nearOffset(time, lane);
+        if (this._liveFillAt(time)) return { type: 'ignored', reason: 'fill-freestyle', nearOffset };
         const reason = this._overhit(time, lane, pad, cymbal, nearOffset);
         if (reason === null) return { type: 'overhit', nearOffset };
         // An overhit the overhit setting forgave still says where it landed (timing calibration).
@@ -1058,7 +1111,9 @@
             totalAccents: this.totalAccents,
             totalGhosts: this.totalGhosts,
             averageOffset: s.offsetSamples ? s.totalOffset / s.offsetSamples : 0,
-            fullCombo: s.notesMissed === 0 && s.overhits === 0 && s.notesHit === this.totalNotes,
+            fullCombo: s.notesMissed === 0 && s.overhits === 0 && s.notesHit + s.fillSkipped === this.totalNotes,
+            fillSkipped: s.fillSkipped,
+            fillStyle: this.params.fillStyle,
             time: this.currentTime,
             starPower: {
                 amount: sp.amount / this._fullBar(),
@@ -1081,7 +1136,19 @@
     Engine.prototype.noteState = function (id) {
         const n = this._note(id);
         if (!n) return null;
+        if (n.skipped) return 'skipped';
         return n.hit ? 'hit' : (n.missed ? 'miss' : null);
+    };
+
+    /** True for a note in a live Rock Band fill's freestyle zone (not drawn, not scored). */
+    Engine.prototype.isFillNote = function (id) {
+        const n = this._note(id);
+        return !!(n && n.chord.fill);
+    };
+
+    /** The live Rock Band fill windows ({start, end, chord}), for the views' freestyle zones. */
+    Engine.prototype.liveFills = function () {
+        return this.activationWindows.filter(w => w.live);
     };
 
     Engine.prototype.noteInfo = function (id) {
