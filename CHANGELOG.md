@@ -3,6 +3,20 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.9.0
+
+### Added
+- **Star power on old drum packs.** A tab the server derives from a legacy guitar-encoded Drums arrangement (`drum_tab.derived: 'legacy_arrangement'`, feedBack core) is played over that arrangement's notes, so its star power, fills and hand-charted Easy/Medium/Hard levels work.
+- **Hit feedback**, in the 3D and the 2D view: a hit note pops (grows white-hot, fades) and is gone; a missed note greys out and drifts past with a red lane flash; an overhit marks its lane with a red ✕ (the 2D view now draws `_wrongFlashes`). Strike-line bursts and sparks are coloured by timing (green on time, blue early, orange late) and grow with the streak. A judgment word over the strike line on every hit (PERFECT within 25 ms, GREAT within half the hit window, else GOOD, with EARLY / LATE) and MISS on a miss. Breaking a streak of 10+ shakes the highway.
+- **Callouts**: big centre messages for streak milestones (50, 100, then every 100), each multiplier step, a lost streak of 25+, star power ready / activated and a completed phrase. Session helpers `judgmentFor`, `halfWindowMs`, `streakIntensity`, `isStreakMilestone`, `calloutFor`; hit events carry `judge`.
+- **Bigger HUD**: larger score, streak and multiplier; the streak bumps on every hit and turns orange at 50 and gold at 100, the multiplier pulses when it goes up, the star power meter glows when ready. The 2D HUD is redrawn at the same scale.
+- **Rock Band fills** (Drum fills: Play the fill / Freestyle). Freestyle: a fill that comes into view while star power is ready becomes a freestyle zone; its notes before the activation chord are hidden and skipped without penalty, any pad hit in it is ignored, and the activation note deploys star power. Engine `params.fillStyle` `'yarg'` (default, unchanged) | `'rb'`, `params.fillLead`; `noteState()` answers `'skipped'`, `isFillNote(id)`, `liveFills()`, state `fillSkipped` / `fillStyle`, and skipped fill notes keep a full combo.
+- Plugins → Drums: a **Feedback & HUD** card (Hit effects Full / Subtle / Off, Judgment words, Screen shake, HUD size) and the Drum fills setting.
+
+### Changed
+- The Score switch (2D score HUD and hit / miss marks) is on unless it was turned off; Reset turns it on.
+- Asset version bumped.
+
 ## 4.8.0
 
 ### Added

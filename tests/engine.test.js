@@ -516,6 +516,68 @@ test('drum fill activation: without enough SP the activator is an ordinary note'
     assert.equal(eng2.getState().starPower.amount, 0.25);
 });
 
+// ── Rock Band fills (params.fillStyle 'rb', not in YARG) ──
+// 8 snares (two SP phrases = half a bar), a fill 8..9 with four toms, the activator crash at 9, a snare at 10.
+const RB_FILL = [...snares(8, 1, 0.25), w(8, HI_TOM), w(8.25, HI_TOM), w(8.5, LOW_TOM), w(8.75, FLOOR_TOM),
+    w(9, CRASH), w(10, SNARE)];
+const RB_OPTS = (style, sp) => ({ params: { fillStyle: style },
+    starPower: sp || [{ start: 0, end: 2 }, { start: 2, end: 3 }], activation: [{ start: 8, end: 9 }] });
+
+test('rb fills: a fill that comes into view with star power ready is freestyle and its activator deploys SP', () => {
+    const eng = engineFor(RB_FILL, RB_OPTS('rb'));
+    const log = collect(eng, ['hit', 'miss', 'overhit', 'combo-break']);
+    for (let i = 0; i < 8; i++) eng.hit(1 + i * 0.25, PAD.RED);
+    eng.update(5.9);
+    assert.equal(eng.liveFills().length, 0, 'decided only as it comes into view');
+    eng.update(6.1);
+    assert.equal(eng.liveFills().length, 1);
+    assert.deepEqual([8, 9, 10, 11].map(id => eng.isFillNote(id)), [true, true, true, true]);
+    assert.equal(eng.isFillNote(12), false, 'the activator chord is played');
+    // freestyle: any pad, including the charted ones, is ignored
+    assert.deepEqual([eng.hit(8.0, PAD.YELLOW).type, eng.hit(8.1, PAD.RED).reason], ['ignored', 'fill-freestyle']);
+    eng.hit(9, PAD.GREEN, { cymbal: true });
+    const s = eng.getState();
+    assert.equal(s.starPower.active, true);
+    assert.equal(s.combo, 9, 'the streak carries over the fill');
+    assert.equal(s.fillSkipped, 4);
+    assert.deepEqual([8, 9, 10, 11].map(id => eng.noteState(id)), ['skipped', 'skipped', 'skipped', 'skipped']);
+    eng.hit(10, PAD.RED);
+    assert.equal(eng.getState().fullCombo, true, 'skipped fill notes keep a full combo');
+    assert.equal(log.filter(x => x[0] !== 'hit').length, 0, 'no misses, overhits or broken streaks');
+});
+
+test('rb fills: skipping the activator too is no penalty (it is auto-hit, SP stays ready)', () => {
+    const eng = engineFor(RB_FILL, RB_OPTS('rb'));
+    for (let i = 0; i < 8; i++) eng.hit(1 + i * 0.25, PAD.RED);
+    eng.update(9.5);
+    const s = eng.getState();
+    assert.equal(s.notesMissed, 0);
+    assert.equal(s.starPower.active, false);
+    assert.equal(s.starPower.canActivate, true);
+    assert.equal(eng.noteInfo(12).autoHit, true);
+});
+
+test('rb fills: without star power ready the fill is ordinary notes', () => {
+    const eng = engineFor(RB_FILL, RB_OPTS('rb', [{ start: 0, end: 2 }]));
+    for (let i = 0; i < 8; i++) eng.hit(1 + i * 0.25, PAD.RED);
+    eng.update(9.5);
+    assert.equal(eng.liveFills().length, 0);
+    assert.equal(eng.isFillNote(8), false);
+    assert.equal(eng.noteState(8), 'miss');
+    assert.equal(eng.getState().fillSkipped, 0);
+});
+
+test('fill style yarg (default): the fill notes stay charted and are missed if skipped', () => {
+    for (const eng of [engineFor(RB_FILL, RB_OPTS('yarg')), engineFor(RB_FILL, { starPower: RB_OPTS().starPower, activation: [{ start: 8, end: 9 }] })]) {
+        for (let i = 0; i < 8; i++) eng.hit(1 + i * 0.25, PAD.RED);
+        eng.update(8.6);
+        assert.equal(eng.liveFills().length, 0);
+        assert.equal(eng.noteState(8), 'miss');
+        assert.equal(eng.hit(8.75, PAD.GREEN).type, 'hit', 'fill notes are played');
+        assert.equal(eng.getState().fillStyle, 'yarg');
+    }
+});
+
 test('activationType "all" requires every note of the activation chord', () => {
     const wire = [...snares(8, 1, 0.25), w(9, KICK), w(9, CRASH)];
     const eng = engineFor(wire, { params: { activationType: 'all' },

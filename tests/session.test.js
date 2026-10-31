@@ -497,6 +497,61 @@ test('multiplierColor: x1..x4 and star power', () => {
     assert.equal(H.multiplierColor(6, false), H.multiplierColor(8, true));
 });
 
+test('judgmentFor: PERFECT within 25 ms, GREAT within half the window, else GOOD; EARLY / LATE tags', () => {
+    assert.deepEqual(H.judgmentFor(0, 70), { word: 'PERFECT', color: '#5dffa8', tag: '' });
+    assert.equal(H.judgmentFor(-25, 70).word, 'PERFECT');
+    assert.deepEqual([H.judgmentFor(-30, 70).word, H.judgmentFor(-30, 70).tag], ['GREAT', 'EARLY']);
+    assert.deepEqual([H.judgmentFor(35, 70).word, H.judgmentFor(35, 70).tag], ['GREAT', 'LATE']);
+    assert.equal(H.judgmentFor(60, 70).word, 'GOOD');
+    // a relaxed ±130 ms window widens GREAT
+    assert.equal(H.judgmentFor(60, 130).word, 'GREAT');
+    assert.equal(H.judgmentFor(NaN).word, 'PERFECT', 'no offset (e.g. auto) is not judged harshly');
+});
+
+test('halfWindowMs: half the engine hit window, default ±70 ms', () => {
+    assert.equal(H.halfWindowMs(null), 70);
+    assert.equal(H.halfWindowMs({ hitWindow: { maxWindow: 0.26 } }), 130);
+    assert.equal(H.halfWindowMs({ hitWindow: {} }), 70);
+});
+
+test('streakIntensity and isStreakMilestone', () => {
+    assert.equal(H.streakIntensity(0), 0);
+    assert.equal(H.streakIntensity(8), 0.5);
+    assert.equal(H.streakIntensity(400), 1);
+    assert.deepEqual([25, 49, 50, 99, 100, 150, 200, 300].filter(H.isStreakMilestone), [50, 100, 200, 300]);
+});
+
+test('calloutFor: streak milestones, multiplier steps, lost streaks and star power', () => {
+    const ctx = { maxMultiplier: 4, spActive: false };
+    assert.equal(H.calloutFor({ type: 'hit', combo: 50 }, ctx).text, '50 NOTE STREAK!');
+    assert.equal(H.calloutFor({ type: 'hit', combo: 10 }, ctx).text, 'x2 MULTIPLIER');
+    assert.equal(H.calloutFor({ type: 'hit', combo: 30 }, ctx).text, 'x4 MULTIPLIER');
+    assert.equal(H.calloutFor({ type: 'hit', combo: 40 }, ctx), null, 'already at the cap');
+    assert.equal(H.calloutFor({ type: 'hit', combo: 20 }, { maxMultiplier: 4, spActive: true }).text, 'x6 MULTIPLIER');
+    assert.equal(H.calloutFor({ type: 'hit', combo: 7 }, ctx), null);
+    assert.equal(H.calloutFor({ type: 'hit', combo: 50, auto: true }, ctx), null, 'auto notes never call out');
+    assert.equal(H.calloutFor({ type: 'combo-break', combo: 12 }, ctx), null);
+    const lost = H.calloutFor({ type: 'combo-break', combo: 40 }, ctx);
+    assert.deepEqual([lost.text, lost.sub], ['STREAK LOST', '40 notes']);
+    const ranks = ['sp-phrase', 'sp-ready', 'sp-activate'].map(type => H.calloutFor({ type }, ctx).rank);
+    assert.ok(ranks[0] < ranks[1] && ranks[1] < ranks[2], 'activating star power outranks the rest');
+    assert.equal(H.calloutFor({ type: 'press' }, ctx), null);
+});
+
+test('session hit events carry a judgment for the views', () => {
+    let wall = 0;
+    const s = H.createSession(E, { now: () => wall });
+    s.load({ notes: [w(1, 38), w(2, 38)], chords: [], beats: [] });
+    s.update(0.95);
+    s.hit(1.0, 1);
+    s.update(1.96);
+    s.hit(1.99, 1);
+    const hits = s.drainEvents().filter(e => e.type === 'hit');
+    assert.equal(hits.length, 2);
+    assert.equal(hits[0].judge.word, 'PERFECT');
+    assert.deepEqual([hits[1].judge.word, hits[1].judge.tag], ['PERFECT', '']);
+});
+
 test('starProgress: stars earned and progress to the next threshold', () => {
     const th = [100, 200, 400, 800, 1600, 2400];
     assert.deepEqual(H.starProgress({ score: 0, starThresholds: th }), { count: 0, frac: 0, gold: false });

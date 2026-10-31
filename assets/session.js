@@ -803,6 +803,78 @@
         return 'Press Enter' + (spPadName ? ' or hit ' + spPadName : '') + ' to activate star power';
     }
 
+    // ── Pure helpers: hit feedback ──────────────────────────────────────────
+    // Visual only: the words and callouts the views flash. Scoring stays in engine.js.
+
+    const JUDGE = Object.freeze({
+        perfectMs: 25,          // |offset| within this is PERFECT (the perfect-timing bonus window)
+        greatFrac: 0.5,         // within this share of the half hit window is GREAT, the rest GOOD
+        greatMinMs: 35,
+        defaultHalfMs: 70,      // engine default window 0.14 s
+        streakFull: 16,         // streak at which feedback reaches full size
+        hotStreak: 50,          // streak at which feedback turns flame-coloured
+    });
+
+    /** Half the hit window in ms for engine params ({hitWindow: {maxWindow}}), or the default. */
+    function halfWindowMs(params) {
+        const w = params && params.hitWindow && +params.hitWindow.maxWindow;
+        return w > 0 ? w * 500 : JUDGE.defaultHalfMs;
+    }
+
+    /**
+     * The word a hit `offsetMs` from its note (+ = late) earns: {word, color, tag}. tag is '' on
+     * PERFECT, else 'EARLY' / 'LATE'.
+     */
+    function judgmentFor(offsetMs, halfMs) {
+        const a = Number.isFinite(offsetMs) ? Math.abs(offsetMs) : 0;
+        const half = halfMs > 0 ? halfMs : JUDGE.defaultHalfMs;
+        const tag = a <= JUDGE.perfectMs ? '' : (offsetMs < 0 ? 'EARLY' : 'LATE');
+        if (a <= JUDGE.perfectMs) return { word: 'PERFECT', color: '#5dffa8', tag };
+        if (a <= Math.max(JUDGE.greatMinMs, half * JUDGE.greatFrac)) return { word: 'GREAT', color: '#8fe0ff', tag };
+        return { word: 'GOOD', color: '#ffd27a', tag };
+    }
+
+    /** 0..1: how big hit feedback gets at this streak (full at JUDGE.streakFull). */
+    function streakIntensity(combo) {
+        return clamp((combo | 0) / JUDGE.streakFull, 0, 1);
+    }
+
+    /** True on the streaks that get a callout: 50, 100, then every 100. */
+    function isStreakMilestone(combo) {
+        combo = combo | 0;
+        return combo === 50 || (combo >= 100 && combo % 100 === 0);
+    }
+
+    /**
+     * The big centre callout for a session event, or null: streak milestones, a multiplier going
+     * up, a lost streak of 25+, and star power. ctx: {maxMultiplier, spActive}.
+     * Returns {text, sub?, color, rank}; a higher rank replaces a lower one still on screen.
+     */
+    function calloutFor(ev, ctx) {
+        if (!ev) return null;
+        const c = ctx || {};
+        switch (ev.type) {
+            case 'hit': {
+                if (ev.auto) return null;
+                const combo = ev.combo | 0;
+                if (isStreakMilestone(combo)) return { text: combo + ' NOTE STREAK!', color: '#ffd23f', rank: 3 };
+                const maxM = c.maxMultiplier > 0 ? c.maxMultiplier : 4;
+                const base = Math.floor(combo / 10) + 1;
+                if (combo > 0 && combo % 10 === 0 && base <= maxM) {
+                    const m = base * (c.spActive ? 2 : 1);
+                    return { text: 'x' + m + ' MULTIPLIER', color: multiplierColor(m, !!c.spActive), rank: 1 };
+                }
+                return null;
+            }
+            case 'combo-break':
+                return (ev.combo | 0) >= 25 ? { text: 'STREAK LOST', sub: (ev.combo | 0) + ' notes', color: '#ff6b6b', rank: 2 } : null;
+            case 'sp-ready': return { text: 'STAR POWER READY', color: '#8fe6ff', rank: 2 };
+            case 'sp-activate': return { text: 'STAR POWER!', color: '#8fe6ff', rank: 4 };
+            case 'sp-phrase': return { text: 'PHRASE COMPLETE', color: '#dff3ff', rank: 1 };
+            default: return null;
+        }
+    }
+
     // ── Session: the engine for one chart ───────────────────────────────────
 
     function normalizeInputOffset(ms) {
@@ -985,8 +1057,9 @@
             let scoreAtHit = 0;   // engine score after the previous hit (a hit's points for the view's pop)
             eng.on('hit', e => {
                 const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
+                const offsetMs = Math.round((e.time - nt) * 1000) || 0;
                 const ev = { type: 'hit', pad: e.pad, cymbal: e.cymbal, id: e.id, sp: eng.isStarPowerNote(e.id), bonus: !!e.bonus, time: e.time,
-                    combo: e.combo | 0, offsetMs: Math.round((e.time - nt) * 1000) || 0, points: 0 };
+                    combo: e.combo | 0, offsetMs, points: 0, judge: judgmentFor(offsetMs, halfWindowMs(s.params)) };
                 push(ev);
                 const extra = bonusHit(e);
                 // Visual only: what this hit added (engine score since the last hit + its bonuses).
@@ -1209,6 +1282,7 @@
         midiToPad, isTypingTarget, estimateTime, isSeek, createFrameClock, timingSummary, TIMING_DEAD_MS,
         padTimingSummary, PAD_TIMING_MIN, PAD_TIMING_GAP_MS,
         formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, starPowerHint,
+        JUDGE, halfWindowMs, judgmentFor, streakIntensity, isStreakMilestone, calloutFor,
         normalizeInputOffset, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX,
         createSession,
     };

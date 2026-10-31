@@ -100,6 +100,14 @@ const STORE_KEYS = {
     timing:         'drums_timing_v1',
     // Overhit rule (OVERHIT_MODES).
     overhits:       'drums_overhits_v1',
+    // Hit feedback (visual only): effects level (FX_LEVELS), judgment words,
+    // camera shake on a broken streak, and the HUD size (x0.75..x2).
+    fx:             'drums_fx_v1',
+    // Drum fills (FILL_STYLES): play them as charted, or freestyle (Rock Band).
+    fillStyle:      'drums_fill_style_v1',
+    judgeWords:     'drums_judge_words_v1',
+    shake:          'drums_shake_v1',
+    hudScale:       'drums_hud_scale_v1',
     // Extra offset for kick hits only, in ms, on top of the input offset (a kick
     // trigger that fires earlier than the hand pads, or a foot that leads).
     kickOffsetMs:   'drums_kick_offset_ms',
@@ -185,6 +193,44 @@ const OVERHIT_MODES = {
     ignore:   { name: 'Ignore (freestyle)' },
 };
 const OVERHIT_IDS = ['penalize', 'lenient', 'ignore'];
+// Hit effects (visual only): sparks, the hit-gem pop and the 2D strike bursts.
+const FX_LEVELS = {
+    full:   { name: 'Full' },
+    subtle: { name: 'Subtle' },
+    off:    { name: 'Off' },
+};
+const FX_IDS = ['full', 'subtle', 'off'];
+// Drum fills (engine params.fillStyle). YARG: the fill's notes stay charted and
+// its last note activates star power. Rock Band: with star power ready the fill
+// becomes a freestyle zone (play anything) ending on the activation note.
+const FILL_STYLES = {
+    yarg: { name: 'Play the fill' },
+    rb:   { name: 'Freestyle (Rock Band)' },
+};
+const FILL_STYLE_IDS = ['yarg', 'rb'];
+const HUD_SCALE_MIN = 0.75, HUD_SCALE_MAX = 2, HUD_SCALE_DEFAULT = 1.25;
+// 2D hit feedback timings (ms) and colours; the 3D view has its own (highway3d.js HIT_FX).
+const FX2D = Object.freeze({
+    sparks: 256,            // spark pool per panel
+    vanishMs: 110,          // hit gem pop
+    burstMs: 320,           // strike-line ring
+    judgeMs: 560,
+    calloutMs: 1500,
+    shakeMs: 200,
+    bumpMs: 140,
+    wrongMs: 400,           // overhit mark
+    onTimeMs: 25,
+    onTime: [0.13, 1, 0.53], early: [0.21, 0.84, 1], late: [1, 0.72, 0.3], wrong: [1, 0.27, 0.27],
+});
+function _newSparkPool(n) {
+    return { n, next: 0, lane: new Int16Array(n), dx: new Float32Array(n), vx: new Float32Array(n), vy: new Float32Array(n),
+        born: new Float64Array(n).fill(-1e9), life: new Float32Array(n), rgb: new Float32Array(n * 3) };
+}
+// Lane flash / spark colour for a hit offsetMs from its note (+ = late), as [r, g, b] 0..1.
+function _timingRgb(offsetMs) {
+    if (!Number.isFinite(offsetMs) || Math.abs(offsetMs) <= FX2D.onTimeMs) return FX2D.onTime;
+    return offsetMs < 0 ? FX2D.early : FX2D.late;
+}
 
 // Drum synth sound sets, all bundled in assets/sounds/ (works offline,
 // nothing loads from third-party sites; licences in NOTICE.md). type
@@ -271,7 +317,16 @@ const _cfg = {
     synthVolume:    _readNum(STORE_KEYS.synthVolume, 0.7, 0, 1),
     // -1 = all, 0..15 are the 16 MIDI channels (9 = "ch10" Drums)
     midiChannel:    Math.round(_readNum(STORE_KEYS.midiChannel, -1, -1, 15)),
-    hitDetection:   _readStore(STORE_KEYS.hitDetection) === 'true',
+    // On unless turned off: the score, hit / miss marks and HUD are the game.
+    hitDetection:   _readStore(STORE_KEYS.hitDetection) !== 'false',
+    fx:             (function () {
+        const raw = _readStore(STORE_KEYS.fx);
+        return Object.prototype.hasOwnProperty.call(FX_LEVELS, raw) ? raw : 'full';
+    })(),
+    fillStyle:      _readStore(STORE_KEYS.fillStyle) === 'rb' ? 'rb' : 'yarg',
+    judgeWords:     _readStore(STORE_KEYS.judgeWords) !== 'false',
+    shake:          _readStore(STORE_KEYS.shake) !== 'false',
+    hudScale:       _readNum(STORE_KEYS.hudScale, HUD_SCALE_DEFAULT, HUD_SCALE_MIN, HUD_SCALE_MAX),
     showLaneLabels: _readStore(STORE_KEYS.showLaneLabels) !== 'false',
     customMapping:  (function () {
         try {
@@ -378,6 +433,14 @@ function _saveCfg(key, val) {
     if (key === 'spPad') {
         const n = Math.round(Number(val));
         val = Number.isFinite(n) && n >= 0 && n <= 127 ? n : -1;
+    }
+    if (key === 'fx' && !Object.prototype.hasOwnProperty.call(FX_LEVELS, val)) {
+        val = 'full';
+    }
+    if (key === 'fillStyle' && val !== 'rb') val = 'yarg';
+    if (key === 'hudScale') {
+        const n = Number(val);
+        val = Number.isFinite(n) ? Math.max(HUD_SCALE_MIN, Math.min(HUD_SCALE_MAX, n)) : HUD_SCALE_DEFAULT;
     }
     _cfg[key] = val;
     const storeKey = STORE_KEYS[key];
@@ -558,6 +621,20 @@ function _overhitOptions(current) {
     const names = {};
     for (const id of OVERHIT_IDS) names[id] = OVERHIT_MODES[id].name;
     return _optList(OVERHIT_IDS, names, current);
+}
+function _fillStyleOptions(current) {
+    const names = {};
+    for (const id of FILL_STYLE_IDS) names[id] = FILL_STYLES[id].name;
+    return _optList(FILL_STYLE_IDS, names, current);
+}
+function _fxOptions(current) {
+    const names = {};
+    for (const id of FX_IDS) names[id] = FX_LEVELS[id].name;
+    return _optList(FX_IDS, names, current);
+}
+// What the views draw for hit feedback (highway3d.js normalizeFx shape).
+function _fxSettings() {
+    return { level: _cfg.fx, words: _cfg.judgeWords, shake: _cfg.shake, hudScale: _cfg.hudScale };
 }
 function _timingOptions(current) {
     const names = {};
@@ -874,6 +951,7 @@ function _timingParams() {
     const p = TIMING_PRESETS[_cfg.timing];
     const out = p && p.params ? JSON.parse(JSON.stringify(p.params)) : {};
     if (_cfg.overhits !== 'penalize') out.overhits = _cfg.overhits;
+    if (_cfg.fillStyle === 'rb') out.fillStyle = 'rb';
     return Object.keys(out).length ? out : null;
 }
 
@@ -1167,7 +1245,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.8.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.9.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -2576,7 +2654,10 @@ function _freePadWanted({ wanters, inputTargetPinned, controllerPins, controlsOp
 }
 // Pure: the star power hint (fills: the fill-end note; a controller: its button).
 function _spHint({ meta, controller, spPadName }) {
-    if (meta && Array.isArray(meta.activation) && meta.activation.length) return 'Hit the marked note at the end of the fill to activate';
+    if (meta && Array.isArray(meta.activation) && meta.activation.length) {
+        return _cfg.fillStyle === 'rb' ? 'Freestyle the fill, then hit the marked note to activate'
+            : 'Hit the marked note at the end of the fill to activate';
+    }
     if (controller) return controller.standardLayout ? 'Press Y to activate star power' : 'Press Star power to activate star power';
     return 'Press Enter' + (spPadName ? ' or hit ' + spPadName : '') + ' to activate star power';
 }
@@ -3098,7 +3179,21 @@ function createFactory(forceView) {
     // pads ITS focused user is hitting.
     const _heldPads = new Map();          // midi note -> {velocity, wall}
     const _wrongFlashes = [];             // [{lane, wall}]
-    const _laneFlashes = [];              // [{laneIdx, wall, color}]
+    const _laneFlashes = [];              // [{laneIdx, wall, color, rgb?, strong?}]
+
+    // 2D hit feedback (visual only, session scoring): hit gems pop and vanish,
+    // strike-line bursts and sparks by timing, the judgment word, the centre
+    // callout, camera-style shake and HUD bumps. Fixed pools, no per-frame
+    // allocation.
+    const _fx2d = {
+        pops: new Map(),                  // note key -> wall of its hit
+        bursts: [],                       // [{laneIdx, wall, rgb, heat}]
+        sparks: _newSparkPool(FX2D.sparks),
+        judge: null,                      // {word, tag, color, wall, heat}
+        callout: null,                    // {text, sub, color, rank, wall}
+        shakeWall: -1e9, shakeAmp: 0,
+        streakBump: -1e9, multBump: -1e9,
+    };
 
     // Scoring
     let _hits = 0, _misses = 0, _streak = 0, _bestStreak = 0;
@@ -3384,10 +3479,10 @@ function createFactory(forceView) {
     }
     // The star power hint, rebuilt only when the chart's metadata, the
     // controller or the star power pad changes (the draws call it every frame).
-    let _hintMeta, _hintCtl, _hintSp = NaN, _hintText = '';
+    let _hintMeta, _hintCtl, _hintSp = NaN, _hintFill = '', _hintText = '';
     function _spHintText(meta) {
-        if (meta !== _hintMeta || _padHintCtl !== _hintCtl || _cfg.spPad !== _hintSp) {
-            _hintMeta = meta; _hintCtl = _padHintCtl; _hintSp = _cfg.spPad;
+        if (meta !== _hintMeta || _padHintCtl !== _hintCtl || _cfg.spPad !== _hintSp || _cfg.fillStyle !== _hintFill) {
+            _hintMeta = meta; _hintCtl = _padHintCtl; _hintSp = _cfg.spPad; _hintFill = _cfg.fillStyle;
             _hintText = _spHint({ meta, controller: _padHintCtl, spPadName: _spPadName() });
         }
         return _hintText;
@@ -3504,7 +3599,7 @@ function createFactory(forceView) {
         }
         const hint = _spHintText(_session.meta);
         _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _offsetMs,
-            hideScore: _ownHudMode(_highwayCanvas), message: _padStatus || null });
+            hideScore: _ownHudMode(_highwayCanvas), message: _padStatus || null, fx: _fxSettings() });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -4097,12 +4192,69 @@ function createFactory(forceView) {
     // drawn notes: time + GM note).
     function _drainSessionEvents() {
         if (!_session) return;
+        const wall = performance.now();
+        const st = _session.getState();
+        const cctx = { maxMultiplier: st && st.maxMultiplier, spActive: !!(st && st.starPower && st.starPower.active) };
         for (const ev of _session.drainEvents()) {
-            if (ev.type !== 'hit' && ev.type !== 'miss') continue;
-            const info = _session.noteInfo(ev.id);
-            if (!info) continue;
-            (ev.type === 'hit' ? _hitNoteKeys : _missedNoteKeys).add(_noteKey(info.t, info.midi));
+            if (ev.type === 'hit' || ev.type === 'miss') {
+                const info = _session.noteInfo(ev.id);
+                if (info) {
+                    const key = _noteKey(info.t, info.midi);
+                    (ev.type === 'hit' ? _hitNoteKeys : _missedNoteKeys).add(key);
+                    const laneIdx = _songNoteToLaneIdx(info.midi);
+                    if (ev.type === 'hit' && !ev.auto) _fx2dHit(key, laneIdx, ev, wall);
+                    else if (ev.type === 'miss') _fx2dMiss(laneIdx, wall);
+                }
+            } else if (ev.type === 'combo-break' && (ev.combo | 0) >= 10 && _cfg.shake) {
+                _fx2d.shakeWall = wall;
+                _fx2d.shakeAmp = (ev.combo | 0) >= 50 ? 5 : 3;
+            }
+            const c = _h && _h.calloutFor ? _h.calloutFor(ev, cctx) : null;
+            if (c) {
+                const cur = _fx2d.callout;
+                if (!cur || wall - cur.wall >= FX2D.calloutMs || c.rank >= cur.rank) _fx2d.callout = Object.assign({}, c, { wall });
+                if (c.rank === 1 && /MULTIPLIER/.test(c.text)) _fx2d.multBump = wall;
+            }
         }
+        if (_fx2d.pops.size > 64) {
+            for (const [k, w] of _fx2d.pops) if (wall - w > FX2D.vanishMs * 4) _fx2d.pops.delete(k);
+        }
+    }
+
+    function _fx2dHit(key, laneIdx, ev, wall) {
+        const rgb = _timingRgb(ev.offsetMs);
+        const heat = _h && _h.streakIntensity ? _h.streakIntensity(ev.combo) : 0;
+        _fx2d.streakBump = wall;
+        if (_cfg.judgeWords && ev.judge) _fx2d.judge = { word: ev.judge.word, tag: ev.judge.tag, color: ev.judge.color, wall, heat };
+        if (laneIdx < 0) return;
+        _laneFlashes.push({ laneIdx, wall, rgb, strong: true });
+        if (_cfg.fx === 'off') return;
+        _fx2d.pops.set(key, wall);
+        _fx2d.bursts.push({ laneIdx, wall, rgb, heat });
+        if (_fx2d.bursts.length > 24) _fx2d.bursts.shift();
+        const sp = _fx2d.sparks;
+        const n = Math.round((8 + 16 * heat) * (_cfg.fx === 'subtle' ? 0.5 : 1));
+        for (let k = 0; k < n; k++) {
+            const i = sp.next;
+            sp.next = (sp.next + 1) % sp.n;
+            const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.4;
+            const v = 120 + Math.random() * 260;
+            sp.lane[i] = laneIdx;
+            sp.dx[i] = (Math.random() - 0.5) * 0.6;
+            sp.vx[i] = Math.cos(a) * v;
+            sp.vy[i] = Math.sin(a) * v;
+            sp.born[i] = wall;
+            sp.life[i] = 0.25 + Math.random() * 0.3;
+            const mix = Math.random() * 0.5;
+            sp.rgb[i * 3] = rgb[0] + (1 - rgb[0]) * mix;
+            sp.rgb[i * 3 + 1] = rgb[1] + (1 - rgb[1]) * mix;
+            sp.rgb[i * 3 + 2] = rgb[2] + (1 - rgb[2]) * mix;
+        }
+    }
+
+    function _fx2dMiss(laneIdx, wall) {
+        if (_cfg.judgeWords) _fx2d.judge = { word: 'MISS', tag: '', color: '#ff5a5a', wall, heat: 0 };
+        if (laneIdx >= 0) _laneFlashes.push({ laneIdx, wall, rgb: FX2D.wrong, strong: true });
     }
 
     // ── Listener refs (per-instance so destroy() detach matches) ──
@@ -4326,6 +4478,10 @@ function createFactory(forceView) {
         _missedNoteKeys.clear();
         _wrongFlashes.length = 0;
         _laneFlashes.length = 0;
+        _fx2d.pops.clear();
+        _fx2d.bursts.length = 0;
+        _fx2d.sparks.born.fill(-1e9);
+        _fx2d.judge = _fx2d.callout = null;
     }
 
     function _resetForNewChart() {
@@ -4691,6 +4847,15 @@ function createFactory(forceView) {
         ctx.fillStyle = '#040408';
         ctx.fillRect(0, 0, W, H);
 
+        // A broken streak shakes the highway (not the background).
+        const wallNow = performance.now();
+        const shakeAge = wallNow - _fx2d.shakeWall;
+        ctx.save();
+        if (_cfg.shake && shakeAge >= 0 && shakeAge < FX2D.shakeMs) {
+            const k = _fx2d.shakeAmp * (1 - shakeAge / FX2D.shakeMs);
+            ctx.translate((Math.random() - 0.5) * 2 * k, (Math.random() - 0.5) * 2 * k);
+        }
+
         const st = _session ? _session.getState() : null;
         const spActive = !!(st && st.starPower && st.starPower.active);
         const meta = _session ? _session.meta : null;
@@ -4712,12 +4877,30 @@ function createFactory(forceView) {
 
             for (const flash of _laneFlashes) {
                 if (flash.laneIdx === i) {
-                    const age = (performance.now() - flash.wall) / 300;
+                    const age = (wallNow - flash.wall) / 300;
                     if (age < 1) {
-                        ctx.fillStyle = _rgbStr(r, g, b, 0.25 * (1 - age));
+                        // Hits flash in their timing colour, misses red; a plain press in the lane colour.
+                        const c = flash.rgb || ll.lane.color;
+                        ctx.fillStyle = _rgbStr(c[0], c[1], c[2], (flash.strong ? 0.38 : 0.25) * (1 - age));
                         ctx.fillRect(ll.x, topY, ll.w, nowLineY + 20);
                     }
                 }
+            }
+            // Overhit: a red strip at the foot of the lane and an X on the strike line.
+            for (const wf of _wrongFlashes) {
+                if (wf.lane !== i) continue;
+                const age = (wallNow - wf.wall) / FX2D.wrongMs;
+                if (age >= 1) continue;
+                const a = 1 - age;
+                ctx.fillStyle = `rgba(255,70,70,${0.35 * a})`;
+                ctx.fillRect(ll.x, nowLineY - 40, ll.w, 60);
+                const s = Math.min(ll.w * 0.22, 14) * (1 + 0.3 * a);
+                ctx.strokeStyle = `rgba(255,90,90,${a})`;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(ll.centerX - s, nowLineY - s); ctx.lineTo(ll.centerX + s, nowLineY + s);
+                ctx.moveTo(ll.centerX + s, nowLineY - s); ctx.lineTo(ll.centerX - s, nowLineY + s);
+                ctx.stroke();
             }
         }
 
@@ -4728,17 +4911,32 @@ function createFactory(forceView) {
             ctx.fillRect(laneLayout[0].x, topY, last.x + last.w - laneLayout[0].x, nowLineY + 20);
         }
         // Fills (star power activation): a green band while star power is
-        // ready; the fill ends on the note that activates it.
+        // ready; the fill ends on the note that activates it. A live Rock Band
+        // fill (freestyle, its notes hidden) pulses brighter and says so.
         if (meta && meta.activation.length && st && st.starPower && st.starPower.canActivate && !spActive) {
             const last = laneLayout[laneLayout.length - 1];
+            const live = _session && _session.engine && typeof _session.engine.liveFills === 'function'
+                ? _session.engine.liveFills() : [];
+            const pulse = 0.5 + 0.5 * Math.sin(wallNow / 140);
             for (const f of meta.activation) {
                 if (f.end < t - 0.3 || f.start > t + VISIBLE_SECONDS) continue;
+                const free = live.some(w => Math.abs(w.start - f.start) < 0.01);
                 const y0 = _timeToY(Math.min(f.end - t, VISIBLE_SECONDS), nowLineY, topY);
                 const y1 = _timeToY(Math.max(f.start - t, -0.3), nowLineY, topY);
-                ctx.fillStyle = 'rgba(56,255,168,0.10)';
-                ctx.fillRect(laneLayout[0].x, y0, last.x + last.w - laneLayout[0].x, y1 - y0);
+                const fw = last.x + last.w - laneLayout[0].x;
+                ctx.fillStyle = free ? `rgba(56,255,168,${0.16 + 0.1 * pulse})` : 'rgba(56,255,168,0.10)';
+                ctx.fillRect(laneLayout[0].x, y0, fw, y1 - y0);
                 ctx.fillStyle = 'rgba(56,255,168,0.7)';
-                ctx.fillRect(laneLayout[0].x, y0 - 1, last.x + last.w - laneLayout[0].x, 2);
+                ctx.fillRect(laneLayout[0].x, y0 - 1, fw, 2);
+                if (free && y1 - y0 > 30) {
+                    ctx.save();
+                    ctx.font = 'italic 900 22px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillStyle = `rgba(190,255,225,${0.6 + 0.4 * pulse})`;
+                    ctx.fillText('FREESTYLE!', laneLayout[0].x + fw / 2, Math.max(y0 + 16, Math.min(y1 - 16, (y0 + y1) / 2)));
+                    ctx.restore();
+                }
             }
         }
 
@@ -4779,16 +4977,22 @@ function createFactory(forceView) {
         ctx.stroke();
 
         _drawScrollingNotes(ctx, notes, chords, t, laneLayout, nowLineY, topY, W, H);
+        if (_session && _cfg.hitDetection) _drawStrikeFx(ctx, laneLayout, nowLineY, wallNow);
 
         if (_cfg.showLaneLabels) {
             _drawLaneLabels(ctx, laneLayout, nowLineY, H);
         }
+        ctx.restore();   // shake
 
         let hudLeft = null;
         const hudMode = _ownHudMode(_highwayCanvas);
         if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: hudMode })) {
-            if (_session) hudLeft = _drawScoreHud(ctx, W, hudMode);
-            else if ((_hits + _misses) > 0 && !hudMode) _drawAccuracyHUD(ctx, W, H);
+            if (_session) {
+                hudLeft = _drawScoreHud(ctx, W, hudMode, wallNow);
+                const last = laneLayout[laneLayout.length - 1];
+                _drawJudge2D(ctx, (laneLayout[0].x + last.x + last.w) / 2, nowLineY, H, wallNow);
+                if (hudMode !== true) _drawCallout2D(ctx, W, H, wallNow);
+            } else if ((_hits + _misses) > 0 && !hudMode) _drawAccuracyHUD(ctx, W, H);
         }
 
         // MIDI indicator — show on the focused panel only; non-focused
@@ -4841,6 +5045,14 @@ function createFactory(forceView) {
             }
             return false;
         };
+        // A live Rock Band fill is a freestyle zone: notes before its activation chord aren't drawn.
+        const eng = _session && _session.engine;
+        const freeZones = eng && typeof eng.liveFills === 'function' && !(eng.getState().starPower || {}).active
+            ? eng.liveFills() : [];
+        const inFreestyle = (nt) => {
+            for (const w of freeZones) if (nt >= w.start - 0.0001 && nt < w.chord.t - 0.0001) return true;
+            return false;
+        };
 
         for (const n of allNotes) {
             const laneIdx = _songNoteToLaneIdx(n.midi);
@@ -4852,6 +5064,7 @@ function createFactory(forceView) {
             const y = _timeToY(dt, nowLineY, topY);
 
             if (y < -20 || y > nowLineY + 30) continue;
+            if (freeZones.length && inFreestyle(n.t)) continue;
 
             const isActive = Math.abs(dt) < 0.03;
 
@@ -4862,8 +5075,23 @@ function createFactory(forceView) {
                 else if (_missedNoteKeys.has(nk)) useMissColor = true;
             }
 
+            // A hit gem pops (grows white-hot, fades) and is gone, Rock Band style.
+            let popping = false;
+            if (useHitColor && _cfg.fx !== 'off' && _fx2d.pops.has(nk)) {
+                const p = (performance.now() - _fx2d.pops.get(nk)) / FX2D.vanishMs;
+                if (p >= 1) continue;
+                const g = 1 + 0.55 * Math.sqrt(Math.max(0, p));
+                popping = true;
+                ctx.save();
+                ctx.globalAlpha = 1 - p * p;
+                ctx.translate(ll.centerX, y);
+                ctx.scale(g, g);
+                ctx.translate(-ll.centerX, -y);
+            }
+
             let [cr, cg, cb] = lane.color;
-            if (useHitColor) { cr = 0; cg = 1; cb = 0.27; }
+            if (popping) { cr = 0.85; cg = 1; cb = 0.9; }
+            else if (useHitColor) { cr = 0; cg = 1; cb = 0.27; }
             else if (useMissColor) { cr = 0.33; cg = 0.33; cb = 0.4; }
             else if (inLivePhrase(n.t)) { cr = 0.86; cg = 0.95; cb = 1; }
 
@@ -4995,7 +5223,105 @@ function createFactory(forceView) {
                     ctx.fill();
                 }
             }
+            if (popping) ctx.restore();
         }
+    }
+
+    // Strike-line bursts (an expanding ring in the hit's timing colour) and
+    // the spark pool (additive; sparks rise from the lane and fall back).
+    function _drawStrikeFx(ctx, laneLayout, nowLineY, wall) {
+        const bursts = _fx2d.bursts;
+        for (let i = bursts.length - 1; i >= 0; i--) {
+            const b = bursts[i];
+            const p = (wall - b.wall) / FX2D.burstMs;
+            if (p >= 1) { bursts.splice(i, 1); continue; }
+            const ll = laneLayout[b.laneIdx];
+            if (!ll) continue;
+            const ease = 1 - (1 - p) * (1 - p);
+            const r = ll.w * (0.22 + (0.55 + 0.35 * b.heat) * ease);
+            ctx.strokeStyle = _rgbStr(b.rgb[0], b.rgb[1], b.rgb[2], 0.95 * (1 - p));
+            ctx.lineWidth = 2 + 3 * (1 - p);
+            ctx.beginPath();
+            ctx.ellipse(ll.centerX, nowLineY, r, r * 0.45, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            if (p < 0.4) {
+                ctx.fillStyle = `rgba(255,255,255,${0.55 * (1 - p / 0.4)})`;
+                ctx.beginPath();
+                ctx.ellipse(ll.centerX, nowLineY, ll.w * 0.3, ll.w * 0.12, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        const sp = _fx2d.sparks;
+        let lit = false;
+        for (let i = 0; i < sp.n; i++) {
+            const age = (wall - sp.born[i]) / 1000;
+            if (age < 0 || age > sp.life[i]) continue;
+            const ll = laneLayout[sp.lane[i]];
+            if (!ll) continue;
+            if (!lit) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; lit = true; }
+            const k = 1 - age / sp.life[i];
+            const x = ll.centerX + sp.dx[i] * ll.w + sp.vx[i] * age;
+            const y = nowLineY + sp.vy[i] * age + 600 * age * age;
+            ctx.fillStyle = _rgbStr(sp.rgb[i * 3], sp.rgb[i * 3 + 1], sp.rgb[i * 3 + 2], k);
+            ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+        }
+        if (lit) ctx.restore();
+    }
+
+    // The judgment word over the strike line: pops in big, settles, fades.
+    function _drawJudge2D(ctx, cx, nowLineY, H, wall) {
+        const j = _fx2d.judge;
+        if (!j || !_cfg.judgeWords) return;
+        const age = wall - j.wall;
+        if (!(age >= 0 && age < FX2D.judgeMs)) return;
+        const pop = Math.max(0, 1 - age / 90);
+        const alpha = age < FX2D.judgeMs * 0.55 ? 1 : 1 - (age - FX2D.judgeMs * 0.55) / (FX2D.judgeMs * 0.45);
+        const size = Math.max(22, Math.min(56, 0.055 * H)) * (1 + 0.18 * j.heat) * (1 + 0.35 * pop);
+        const y = nowLineY - Math.max(70, H * 0.16) - age * 0.03;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `italic 900 ${size}px sans-serif`;
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.strokeText(j.word, cx, y);
+        ctx.fillStyle = pop > 0.4 ? '#ffffff' : j.color;
+        ctx.fillText(j.word, cx, y);
+        if (j.tag) {
+            ctx.font = `800 ${Math.round(size * 0.38)}px sans-serif`;
+            ctx.fillStyle = j.tag === 'EARLY' ? '#66c7ff' : '#ff9a40';
+            ctx.fillText(j.tag, cx, y + size * 0.62);
+        }
+        ctx.restore();
+    }
+
+    // Centre callout (streaks, multiplier, star power): pops in big, settles, fades.
+    function _drawCallout2D(ctx, W, H, wall) {
+        const c = _fx2d.callout;
+        if (!c) return;
+        const age = wall - c.wall;
+        if (!(age >= 0 && age < FX2D.calloutMs)) return;
+        const pop = Math.max(0, 1 - age / 160);
+        const alpha = Math.max(0, Math.min(1, 1 - (age - (FX2D.calloutMs - 400)) / 400));
+        const size = Math.max(24, Math.min(64, W * 0.045)) * _cfg.hudScale * (c.rank >= 3 ? 1.15 : 1) * (1 + 0.4 * pop);
+        const y = H * 0.32;
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.font = `italic 900 ${size}px sans-serif`;
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+        ctx.strokeText(c.text, W / 2, y);
+        ctx.fillStyle = pop > 0.5 ? '#ffffff' : c.color;
+        ctx.fillText(c.text, W / 2, y);
+        if (c.sub) {
+            ctx.font = `800 ${Math.round(size * 0.4)}px sans-serif`;
+            ctx.fillStyle = c.color;
+            ctx.fillText(c.sub, W / 2, y + size * 0.75);
+        }
+        ctx.restore();
     }
 
     function _drawLaneLabels(ctx, laneLayout, nowLineY, H) {
@@ -5038,72 +5364,107 @@ function createFactory(forceView) {
 
     // Engine HUD: score, multiplier, streak, stars and the star power bar
     // (top centre), plus the live drum-solo percentage. mode 'score' leaves
-    // out the score and the stars (_hud2DBoxes).
-    function _drawScoreHud(ctx, W, mode) {
+    // out the score and the stars (_hud2DBoxes). Sized by the HUD size
+    // setting, shrunk to fit the panel; the multiplier pulses when it goes up
+    // and the streak bumps on every hit and burns orange on a hot streak.
+    function _drawScoreHud(ctx, W, mode, wall) {
         const st = _session.getState();
         if (!st || !_h) return;
         const m = _h.hudModel(st);
         const bonus = _session.getBonus ? _session.getBonus() : null;
         const score = _h.formatScore((st.score || 0) + (bonus ? bonus.total : 0));
-        ctx.save();
-        const y = 6, h = 24;
-        ctx.font = 'bold 13px sans-serif';
-        const scoreW = Math.max(70, ctx.measureText(score).width + 16);
-        const streakText = m.streakText + ' streak';
-        ctx.font = 'bold 11px sans-serif';
-        const streakW = ctx.measureText(streakText).width + 16;
-        const multW = 34, spW = 80, starW = 66, gap = 6;
+        const now = Number.isFinite(wall) ? wall : performance.now();
+        const mb = Math.max(0, 1 - (now - _fx2d.multBump) / (FX2D.bumpMs * 2));
+        const sb = Math.max(0, 1 - (now - _fx2d.streakBump) / FX2D.bumpMs);
+        const hot = m.streak >= 50;
         const boxes = _hud2DBoxes(mode);
-        const widths = { mult: multW, score: scoreW, streak: streakW, stars: starW, sp: spW };
-        const total = boxes.reduce((n, b) => n + widths[b], 0) + gap * (boxes.length - 1);
-        let x = Math.max(120, (W - total) / 2);
+        const layout = (s) => {
+            ctx.font = `italic 900 ${Math.round(20 * s)}px sans-serif`;
+            const scoreW = Math.max(96 * s, ctx.measureText(score).width + 22 * s);
+            ctx.font = `italic 900 ${Math.round(20 * s)}px sans-serif`;
+            const streakW = ctx.measureText(m.streakText).width + 70 * s;
+            const widths = { mult: 54 * s, score: scoreW, streak: streakW, stars: 98 * s, sp: 118 * s };
+            const gap = 7 * s;
+            return { widths, gap, total: boxes.reduce((n, b) => n + widths[b], 0) + gap * (boxes.length - 1) };
+        };
+        let s = _cfg.hudScale * Math.max(0.85, Math.min(1.4, W / 1100));
+        let L = layout(s);
+        const room = W - 250;
+        if (L.total > room && room > 0) { s = Math.max(0.6, s * room / L.total); L = layout(s); }
+        const { widths, gap } = L;
+        const y = 6, h = Math.round(34 * s);
+        ctx.save();
+        let x = Math.max(130, (W - L.total) / 2);
         const left = x;
-        const box = (w) => { ctx.fillStyle = 'rgba(8,8,20,0.78)'; _roundRect(ctx, x, y, w, h, 6); ctx.fill(); };
+        const box = (w, glow) => {
+            ctx.fillStyle = 'rgba(8,8,20,0.82)';
+            _roundRect(ctx, x, y, w, h, 8 * s);
+            ctx.fill();
+            if (glow) { ctx.strokeStyle = glow; ctx.lineWidth = 2; ctx.stroke(); }
+        };
         ctx.textBaseline = 'middle';
         ctx.textAlign = 'center';
-        // multiplier
-        box(multW);
-        ctx.font = 'italic bold 13px sans-serif';
-        ctx.fillStyle = m.multiplierColor;
-        ctx.fillText(m.multiplierText, x + multW / 2, y + h / 2);
-        x += multW + gap;
+        // multiplier: a ring that fills toward the next step, pulsing when it goes up
+        box(widths.mult, mb > 0 || m.multiplier >= 4 ? m.multiplierColor : null);
+        {
+            const cx = x + widths.mult / 2, cy = y + h / 2, r = h * 0.38;
+            ctx.strokeStyle = 'rgba(70,80,110,0.8)';
+            ctx.lineWidth = 3 * s;
+            ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+            ctx.strokeStyle = m.multiplierColor;
+            ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * m.multiplierProgress); ctx.stroke();
+            ctx.font = `italic 900 ${Math.round(16 * s * (1 + 0.35 * mb))}px sans-serif`;
+            ctx.fillStyle = mb > 0 ? '#ffffff' : m.multiplierColor;
+            ctx.fillText(m.multiplierText, cx, cy + 1);
+        }
+        x += widths.mult + gap;
         // score
         if (boxes.includes('score')) {
-            box(scoreW);
-            ctx.font = 'bold 13px sans-serif';
-            ctx.fillStyle = '#f1f5f9';
-            ctx.fillText(score, x + scoreW / 2, y + h / 2);
-            x += scoreW + gap;
+            box(widths.score, m.spActive ? '#7fe6ff' : null);
+            ctx.font = `italic 900 ${Math.round(20 * s)}px sans-serif`;
+            ctx.fillStyle = m.spActive ? '#bff0ff' : '#f1f5f9';
+            ctx.fillText(score, x + widths.score / 2, y + h / 2 + 1);
+            x += widths.score + gap;
         }
         // streak
-        box(streakW);
-        ctx.font = 'bold 11px sans-serif';
-        ctx.fillStyle = m.fullCombo && m.streak > 0 ? '#ffc531' : '#c8ccd8';
-        ctx.fillText(streakText, x + streakW / 2, y + h / 2);
-        x += streakW + gap;
+        box(widths.streak, hot ? '#ff9a40' : null);
+        ctx.textAlign = 'right';
+        ctx.font = `italic 900 ${Math.round(20 * s * (1 + 0.18 * sb))}px sans-serif`;
+        ctx.fillStyle = hot ? (m.streak >= 100 ? '#ffd23f' : '#ffb347') : (m.fullCombo && m.streak > 0 ? '#ffc531' : '#ffffff');
+        const numRight = x + widths.streak - 52 * s;
+        ctx.fillText(m.streakText, numRight, y + h / 2 + 1);
+        ctx.textAlign = 'left';
+        ctx.font = `800 ${Math.round(9 * s)}px sans-serif`;
+        ctx.fillStyle = hot ? '#ffcf8a' : '#9aa4c4';
+        ctx.fillText('NOTE', numRight + 6 * s, y + h / 2 - 5 * s);
+        ctx.fillText('STREAK', numRight + 6 * s, y + h / 2 + 6 * s);
+        ctx.textAlign = 'center';
+        x += widths.streak + gap;
         // stars
         if (boxes.includes('stars')) {
-            box(starW);
-            ctx.font = '12px sans-serif';
+            box(widths.stars, m.gold ? '#ffcf3a' : null);
+            ctx.font = `${Math.round(17 * s)}px sans-serif`;
             ctx.textAlign = 'left';
             for (let i = 0; i < 5; i++) {
                 ctx.fillStyle = m.gold ? '#ffcf3a' : (i < m.stars ? '#f4f6ff' : '#3a4060');
-                ctx.fillText('★', x + 5 + i * 12, y + h / 2);
+                ctx.fillText('★', x + 7 * s + i * 17.5 * s, y + h / 2);
             }
             ctx.textAlign = 'center';
-            x += starW + gap;
+            x += widths.stars + gap;
         }
-        // star power bar
-        box(spW);
+        // star power bar: glows when ready, pulses blue while active
+        const pulse = m.spReady || m.spActive ? 0.7 + 0.3 * Math.sin(now / 120) : 1;
+        box(widths.sp, m.spActive ? '#7fe6ff' : (m.spReady ? `rgba(191,243,255,${pulse})` : null));
+        const bx = x + 8 * s, bw = widths.sp - 16 * s, bh = Math.round(10 * s), by = y + h / 2 - bh / 2 + 3 * s;
+        ctx.font = `800 ${Math.round(8 * s)}px sans-serif`;
+        ctx.fillStyle = m.spActive ? '#8fe6ff' : (m.spReady ? '#bff3ff' : '#8a93b0');
+        ctx.fillText(m.spActive ? 'STAR POWER!' : (m.spReady ? 'READY' : 'STAR POWER'), x + widths.sp / 2, y + 8 * s);
         ctx.fillStyle = 'rgba(255,255,255,0.08)';
-        ctx.fillRect(x + 6, y + 9, spW - 12, 6);
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.globalAlpha = pulse;
         ctx.fillStyle = m.spActive ? '#7fe6ff' : (m.spReady ? '#bff3ff' : '#4aa8ff');
-        ctx.fillRect(x + 6, y + 9, (spW - 12) * m.spAmount, 6);
-        if (m.spReady && !m.spActive) {
-            ctx.strokeStyle = 'rgba(191,243,255,0.8)';
-            ctx.lineWidth = 1;
-            ctx.strokeRect(x + 5.5, y + 8.5, spW - 11, 7);
-        }
+        ctx.fillRect(bx, by, bw * m.spAmount, bh);
+        ctx.globalAlpha = 1;
         // Lines under the HUD: live drum solo, then the star power hint.
         let ly = y + h + 6;
         const solo = bonus && bonus.soloLive && bonus.soloLive.active ? bonus.soloLive : null;
@@ -5590,10 +5951,13 @@ function createFactory(forceView) {
 
 // The drum tab to play, or null. A sloppak's drum tab is for songs without
 // a real drum chart: when the loaded arrangement IS a Drums arrangement with
-// notes, that chart wins over the tab.
+// notes, that chart wins over the tab. Except when the server built the tab
+// FROM that arrangement (`derived`, an old guitar-encoded drums pack): the tab
+// is the same chart plus its star power, fills and hand-charted levels.
 function _drumTabFor(bundle) {
     const dt = bundle && bundle.drumTab;
     if (!dt || !Array.isArray(dt.hits)) return null;
+    if (dt.derived === 'legacy_arrangement') return dt;
     const hasChart = (Array.isArray(bundle.notes) && bundle.notes.length > 0)
         || (Array.isArray(bundle.chords) && bundle.chords.length > 0);
     if (hasChart && _isDrumsArrangement(bundle.songInfo)) return null;
@@ -6298,6 +6662,10 @@ function _pagePercent(key, val) {
     const el = _pq(key);
     if (el) el.textContent = Math.round(val * 100) + '%';
 }
+function _pageHudScaleText() {
+    const el = _pq('hudScaleText');
+    if (el) el.textContent = Math.round(_cfg.hudScale * 100) + '%';
+}
 
 // Best scores saved on this computer, newest songs first in key order.
 function _pageRenderBest() {
@@ -6406,6 +6774,12 @@ function _pageFill() {
     q('lanes').value = _cfg.lanePreset;
     q('labels').checked = _cfg.showLaneLabels;
     q('hits').checked = _cfg.hitDetection;
+    if (q('fx')) q('fx').innerHTML = _fxOptions(_cfg.fx);
+    if (q('fillStyle')) q('fillStyle').innerHTML = _fillStyleOptions(_cfg.fillStyle);
+    if (q('judgeWords')) q('judgeWords').checked = _cfg.judgeWords;
+    if (q('shake')) q('shake').checked = _cfg.shake;
+    if (q('hudScale')) q('hudScale').value = String(Math.round(_cfg.hudScale * 100));
+    _pageHudScaleText();
     const v = q('version');
     if (v) v.textContent = 'Drum Highway ' + ASSET_VERSION;
     _pageKitNote();
@@ -6489,6 +6863,16 @@ function _pageWire() {
         _saveCfg('hitDetection', this.checked);
         document.querySelectorAll('.drums-chk-hits').forEach((el) => { el.checked = _cfg.hitDetection; });
     };
+    if (q('fx')) q('fx').onchange = function () { _saveCfg('fx', this.value); };
+    if (q('fillStyle')) q('fillStyle').onchange = function () { _setAssist('fillStyle', this.value); };
+    if (q('judgeWords')) q('judgeWords').onchange = function () { _saveCfg('judgeWords', this.checked); };
+    if (q('shake')) q('shake').onchange = function () { _saveCfg('shake', this.checked); };
+    if (q('hudScale')) {
+        q('hudScale').oninput = function () {
+            _saveCfg('hudScale', parseInt(this.value, 10) / 100);
+            _pageHudScaleText();
+        };
+    }
     q('resetAll').onclick = () => {
         if (!window.confirm('Reset the drum settings to their defaults? Your MIDI input, pad mapping and best scores are kept.')) return;
         _resetDrumSettings();
@@ -6519,7 +6903,12 @@ function _resetDrumSettings() {
     _saveCfg('lanePreset', 'phase_shift_8');
     _applyLanePreset(_cfg.lanePreset);
     _saveCfg('showLaneLabels', true);
-    _saveCfg('hitDetection', false);
+    _saveCfg('hitDetection', true);
+    _saveCfg('fx', 'full');
+    _setAssist('fillStyle', 'yarg');
+    _saveCfg('judgeWords', true);
+    _saveCfg('shake', true);
+    _saveCfg('hudScale', HUD_SCALE_DEFAULT);
 }
 
 // ── The Controllers card (assets/gamepad-controls.js) ──
@@ -6635,6 +7024,7 @@ if (typeof module !== 'undefined' && module.exports) {
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
         OVERHIT_MODES, OVERHIT_IDS, _overhitSummary, _runCounts, _setKickOffset,
+        FX_LEVELS, FX_IDS, FX2D, HUD_SCALE_DEFAULT, _fxSettings, _timingRgb, _newSparkPool,
         _resolveView, _VALID_VIEWS,
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,

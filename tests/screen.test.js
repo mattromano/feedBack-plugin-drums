@@ -663,6 +663,55 @@ test('_drumTabFor: a Drums arrangement with notes wins over the sloppak drum tab
     assert.equal(mod._drumTabFor({ drumTab: { hits: 'x' } }), null);
 });
 
+test('hit feedback settings: score on unless turned off, effects / words / shake on, HUD x1.25', () => {
+    const mod = freshPlugin();
+    const cfg = mod._cfg();
+    assert.equal(cfg.hitDetection, true, 'an unset Score switch means on');
+    assert.deepEqual(mod._fxSettings(), { level: 'full', words: true, shake: true, hudScale: mod.HUD_SCALE_DEFAULT });
+    // A player who turned the score off keeps it off.
+    global.window = {};
+    global.localStorage = { getItem: (k) => ({ drums_hit_detect: 'false', drums_fx_v1: 'subtle', drums_judge_words_v1: 'false',
+        drums_shake_v1: 'false', drums_hud_scale_v1: '9' })[k] ?? null, setItem: () => {} };
+    const file = require.resolve('../screen.js');
+    delete require.cache[file];
+    const mod2 = require(file);
+    assert.equal(mod2._cfg().hitDetection, false);
+    assert.deepEqual(mod2._fxSettings(), { level: 'subtle', words: false, shake: false, hudScale: 2 });
+});
+
+test('_saveCfg validates the hit feedback settings', () => {
+    const mod = freshPlugin();
+    mod._saveCfg('fx', 'loud');
+    assert.equal(mod._cfg().fx, 'full');
+    mod._saveCfg('fx', 'off');
+    assert.equal(mod._cfg().fx, 'off');
+    mod._saveCfg('hudScale', 0.2);
+    assert.equal(mod._cfg().hudScale, 0.75);
+    mod._saveCfg('hudScale', 'x');
+    assert.equal(mod._cfg().hudScale, mod.HUD_SCALE_DEFAULT);
+    assert.deepEqual(mod.FX_IDS, ['full', 'subtle', 'off']);
+});
+
+test('_timingRgb: green on time, blue early, orange late', () => {
+    const mod = freshPlugin();
+    assert.equal(mod._timingRgb(0), mod.FX2D.onTime);
+    assert.equal(mod._timingRgb(-60), mod.FX2D.early);
+    assert.equal(mod._timingRgb(60), mod.FX2D.late);
+    assert.equal(mod._timingRgb(NaN), mod.FX2D.onTime);
+    const pool = mod._newSparkPool(8);
+    assert.equal(pool.born.length, 8);
+    assert.ok(pool.born.every(b => b < 0), 'an empty pool has nothing alive');
+});
+
+test('_drumTabFor: a tab derived from a legacy Drums arrangement is played over its notes', () => {
+    const mod = freshPlugin();
+    const dt = { hits: [{ t: 1, p: 'kick' }], derived: 'legacy_arrangement', star_power: [] };
+    const notes = [{ t: 1, s: 1, f: 12 }];
+    assert.equal(mod._drumTabFor({ drumTab: dt, songInfo: { arrangement: 'Drums' }, notes }), dt);
+    assert.equal(mod._drumTabFor({ drumTab: dt, songInfo: { arrangement: 'Lead' }, notes }), dt);
+    assert.equal(mod._drumTabFor({ drumTab: { ...dt, derived: 'other' }, songInfo: { arrangement: 'Drums' }, notes }), null);
+});
+
 // ── review fixes: velocity, script retry, input offset, star power pad ────
 
 test('_engineVelocity: MIDI 1..127 -> 0..1, so velocity 1 is the softest hit (not full strength)', () => {
@@ -1601,7 +1650,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.7.1', '/api/plugins/drums/assets/gamepad-source.js?v=4.7.1']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.9.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.9.0']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;

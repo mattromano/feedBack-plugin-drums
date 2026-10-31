@@ -102,9 +102,39 @@
             <div class="dr-ctl"><select class="drums-overhits-select" data-dr="overhits" aria-label="Overhits"></select></div>
         </div>
         <div class="dr-row">
+            <div><div class="dr-t">Drum fills</div>
+                <div class="dr-d">How star power is activated on songs with fills. Play the fill: its notes stay on the chart and its last note activates. Freestyle (Rock Band): with star power ready, the fill's notes disappear and you play whatever you like, then hit the glowing note at the end.</div></div>
+            <div class="dr-ctl"><select data-dr="fillStyle" aria-label="Drum fills"></select></div>
+        </div>
+        <div class="dr-row">
             <div><div class="dr-t">Pro cymbals</div>
                 <div class="dr-d">On: cymbals and toms of the same colour are separate notes. Off: either pad of a colour counts.</div></div>
             <div class="dr-ctl"><label class="dr-sw"><input type="checkbox" class="drums-chk-pro" data-dr="proCymbals" aria-label="Pro cymbals"><span></span></label></div>
+        </div>
+    </section>
+
+    <section class="dr-card" aria-labelledby="dr-h-feel">
+        <h3 id="dr-h-feel">Feedback &amp; HUD</h3>
+        <div class="dr-row">
+            <div><div class="dr-t">Hit effects</div>
+                <div class="dr-d">Hit notes burst and vanish with sparks coloured by your timing (green on time, blue early, orange late). Subtle uses fewer sparks; Off keeps only the lane flashes.</div></div>
+            <div class="dr-ctl"><select data-dr="fx" aria-label="Hit effects"></select></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Judgment words</div>
+                <div class="dr-d">PERFECT, GREAT or GOOD (with EARLY / LATE) over the strike line on every hit, and MISS when you miss.</div></div>
+            <div class="dr-ctl"><label class="dr-sw"><input type="checkbox" data-dr="judgeWords" aria-label="Judgment words"><span></span></label></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Screen shake</div>
+                <div class="dr-d">A short shake when you break a streak of 10 or more.</div></div>
+            <div class="dr-ctl"><label class="dr-sw"><input type="checkbox" data-dr="shake" aria-label="Screen shake"><span></span></label></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">HUD size</div>
+                <div class="dr-d">Size of the score, multiplier, streak, star power meter and callouts. It shrinks back on a narrow screen so it never covers the notes.</div></div>
+            <div class="dr-ctl"><input type="range" data-dr="hudScale" min="75" max="200" step="5" aria-label="HUD size">
+                <span data-dr="hudScaleText" style="font-size:.75rem;color:#9ca3af;width:2.5rem;text-align:right;"></span></div>
         </div>
     </section>
 
