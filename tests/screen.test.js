@@ -1650,7 +1650,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.9.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.9.0']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.9.1', '/api/plugins/drums/assets/gamepad-source.js?v=4.9.1']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;

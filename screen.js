@@ -1245,7 +1245,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.9.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.9.1';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -1915,17 +1915,17 @@ function _setAutoVolume(vol) {
 
 // Pad sound for the play layer (feedBackDrums.setPadSound / getPadSound).
 // volume is the saved pad volume (synthVolume, the settings' Vol slider);
-// muted silences the pad hits, the hat chick and the auto notes without
-// touching it. window.__drumsMutePads is an alias of muted (calibration).
+// muted silences the pad hits and the hat chick without touching it.
+// window.__drumsMutePads is an alias of muted (calibration). Auto kick /
+// auto cymbals keep sounding: the game plays those notes for the player, so
+// muted pads (RockHeroSmith's Rock Band sound, whose drum stem drops out on a
+// miss) would leave them dead. Their own volume (Auto note volume) sets them.
 let _padMuted = false;
 function _getPadSound() { return { muted: _padMuted, volume: _cfg.synthVolume }; }
 function _setPadSound(o) {
     o = o && typeof o === 'object' ? o : {};
     if (typeof o.volume === 'number' && Number.isFinite(o.volume)) _synthSetVolume(o.volume);
-    if (typeof o.muted === 'boolean' && o.muted !== _padMuted) {
-        _padMuted = o.muted;
-        if (_padMuted) _autoCancel();   // auto notes already queued
-    }
+    if (typeof o.muted === 'boolean' && o.muted !== _padMuted) _padMuted = o.muted;
     return _getPadSound();
 }
 
@@ -2048,7 +2048,7 @@ function _autoSchedule(notes, chords, auto, owner) {
     S.ownerWall = wall;
     let a = null;
     try { a = document.getElementById('audio'); } catch (_) { /* no DOM */ }
-    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0 && !_padMuted;
+    const on = !!auto && (auto.kick || auto.cymbals) && !!_audioCtx && !!_autoGain && _cfg.autoVolume > 0;
     if (!on || !a || a.paused) {
         if (S.pending.length || Number.isFinite(S.to)) _autoCancel();
         S.last = NaN;
