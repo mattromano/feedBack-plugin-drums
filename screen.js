@@ -105,6 +105,8 @@ const STORE_KEYS = {
     fx:             'drums_fx_v1',
     // Drum fills (FILL_STYLES): play them as charted, or freestyle (Rock Band).
     fillStyle:      'drums_fill_style_v1',
+    // What the hi-hat pedal (GM 44) does (PEDAL_ROLES).
+    pedalRole:      'drums_hh_pedal_role_v1',
     judgeWords:     'drums_judge_words_v1',
     shake:          'drums_shake_v1',
     hudScale:       'drums_hud_scale_v1',
@@ -208,6 +210,18 @@ const FILL_STYLES = {
     rb:   { name: 'Freestyle (Rock Band)' },
 };
 const FILL_STYLE_IDS = ['yarg', 'rb'];
+// The hi-hat pedal (GM 44). Rock Band has no pedal note, so by default a
+// pedal press neither scores nor counts as an overhit. 'notes' scores the
+// chart's pedal notes (drawn as small pale hi-hat notes; the pedal or the
+// hi-hat hits them); 'kick' makes the pedal a second kick (left-foot double
+// bass). A Learn / kit mapping for note 44 wins over both.
+const PEDAL_ROLES = {
+    ignore: { name: 'Ignore (Rock Band)' },
+    notes:  { name: 'Play pedal notes' },
+    kick:   { name: 'Second kick' },
+};
+const PEDAL_ROLE_IDS = ['ignore', 'notes', 'kick'];
+const HAT_PEDAL_MIDI = 44;
 const HUD_SCALE_MIN = 0.75, HUD_SCALE_MAX = 2, HUD_SCALE_DEFAULT = 1.25;
 // 2D hit feedback timings (ms) and colours; the 3D view has its own (highway3d.js HIT_FX).
 const FX2D = Object.freeze({
@@ -324,6 +338,10 @@ const _cfg = {
         return Object.prototype.hasOwnProperty.call(FX_LEVELS, raw) ? raw : 'full';
     })(),
     fillStyle:      _readStore(STORE_KEYS.fillStyle) === 'rb' ? 'rb' : 'yarg',
+    pedalRole:      (function () {
+        const raw = _readStore(STORE_KEYS.pedalRole);
+        return Object.prototype.hasOwnProperty.call(PEDAL_ROLES, raw) ? raw : 'ignore';
+    })(),
     judgeWords:     _readStore(STORE_KEYS.judgeWords) !== 'false',
     shake:          _readStore(STORE_KEYS.shake) !== 'false',
     hudScale:       _readNum(STORE_KEYS.hudScale, HUD_SCALE_DEFAULT, HUD_SCALE_MIN, HUD_SCALE_MAX),
@@ -438,6 +456,7 @@ function _saveCfg(key, val) {
         val = 'full';
     }
     if (key === 'fillStyle' && val !== 'rb') val = 'yarg';
+    if (key === 'pedalRole' && !Object.prototype.hasOwnProperty.call(PEDAL_ROLES, val)) val = 'ignore';
     if (key === 'hudScale') {
         const n = Number(val);
         val = Number.isFinite(n) ? Math.max(HUD_SCALE_MIN, Math.min(HUD_SCALE_MAX, n)) : HUD_SCALE_DEFAULT;
@@ -621,6 +640,28 @@ function _overhitOptions(current) {
     const names = {};
     for (const id of OVERHIT_IDS) names[id] = OVERHIT_MODES[id].name;
     return _optList(OVERHIT_IDS, names, current);
+}
+function _pedalRoleOptions(current) {
+    const names = {};
+    for (const id of PEDAL_ROLE_IDS) names[id] = PEDAL_ROLES[id].name;
+    return _optList(PEDAL_ROLE_IDS, names, current);
+}
+// The hi-hat pedal plays as a second kick (the setting, and no Learn / kit
+// mapping of its own).
+function _pedalAsKick(midi) {
+    if (midi !== HAT_PEDAL_MIDI || _cfg.pedalRole !== 'kick') return false;
+    const map = _baseMapping();
+    return !(map && Object.prototype.hasOwnProperty.call(map, HAT_PEDAL_MIDI));
+}
+// GM note -> {pad, cymbal} for a live hit (engine.padFromMidi), with the
+// hi-hat pedal per its role: nothing, a hi-hat pedal note, or the kick.
+function _padFromMidiFor(E) {
+    return (midi) => {
+        if (midi !== HAT_PEDAL_MIDI) return E.padFromMidi(midi);
+        if (_cfg.pedalRole === 'kick') return { pad: 0, cymbal: false };
+        if (_cfg.pedalRole === 'notes') return E.padFromMidi(midi, { includeHatPedal: true });
+        return null;
+    };
 }
 function _fillStyleOptions(current) {
     const names = {};
@@ -1245,7 +1286,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.9.1';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.10.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -3621,7 +3662,8 @@ function createFactory(forceView) {
                 _refreshPadCtl();
                 _offsetMs = _offsetNow();
                 _session = H.createSession(E, { proDrums: _effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }),
-                    auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs, kickOffsetMs: _cfg.kickOffsetMs });
+                    auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs, kickOffsetMs: _cfg.kickOffsetMs,
+                    hatPedalNotes: _cfg.pedalRole === 'notes' });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
@@ -3756,7 +3798,10 @@ function createFactory(forceView) {
 
     function _assistsChanged() {
         _syncAuto();
-        if (_session) _session.setParams(_timingParams());
+        if (_session) {
+            _session.setParams(_timingParams());
+            if (typeof _session.setHatPedalNotes === 'function') _session.setHatPedalNotes(_cfg.pedalRole === 'notes');
+        }
     }
 
     function _kickOffsetChanged() {
@@ -4315,7 +4360,8 @@ function createFactory(forceView) {
         if (_belowKitThreshold(midiNote, velocity)) return;
 
         _heldPads.set(midiNote, { velocity, wall: performance.now() });
-        _synthDrumHit(midiNote, velocity);
+        // The hi-hat pedal set to Second kick sounds like the kick it scores as.
+        _synthDrumHit(_pedalAsKick(midiNote) ? 36 : midiNote, velocity);
         _synthEnsureCtx();
 
         const laneIdx = _midiToLaneIdx(midiNote);
@@ -4338,7 +4384,7 @@ function createFactory(forceView) {
             // The engine scores: a Learn/custom mapping entry wins, else GM.
             // (The 3D view always uses the 4-lane pro layout; the 2D lane
             // presets only change how notes are drawn.)
-            const m = _h.midiToPad(midiNote, _baseMapping(), _E.padFromMidi);
+            const m = _h.midiToPad(midiNote, _baseMapping(), _padFromMidiFor(_E));
             if (m) {
                 const ht = _inputTime(ts);
                 const r = _session.hit(ht, m.pad, { cymbal: m.cymbal, velocity: _engineVelocity(velocity) });
@@ -5065,6 +5111,8 @@ function createFactory(forceView) {
 
             if (y < -20 || y > nowLineY + 30) continue;
             if (freeZones.length && inFreestyle(n.t)) continue;
+            // Hi-hat pedal notes are only played (and drawn) with "Play pedal notes".
+            if (_session && n.midi === HAT_PEDAL_MIDI && _cfg.pedalRole !== 'notes') continue;
 
             const isActive = Math.abs(dt) < 0.03;
 
@@ -6776,6 +6824,7 @@ function _pageFill() {
     q('hits').checked = _cfg.hitDetection;
     if (q('fx')) q('fx').innerHTML = _fxOptions(_cfg.fx);
     if (q('fillStyle')) q('fillStyle').innerHTML = _fillStyleOptions(_cfg.fillStyle);
+    if (q('pedalRole')) q('pedalRole').innerHTML = _pedalRoleOptions(_cfg.pedalRole);
     if (q('judgeWords')) q('judgeWords').checked = _cfg.judgeWords;
     if (q('shake')) q('shake').checked = _cfg.shake;
     if (q('hudScale')) q('hudScale').value = String(Math.round(_cfg.hudScale * 100));
@@ -6865,6 +6914,7 @@ function _pageWire() {
     };
     if (q('fx')) q('fx').onchange = function () { _saveCfg('fx', this.value); };
     if (q('fillStyle')) q('fillStyle').onchange = function () { _setAssist('fillStyle', this.value); };
+    if (q('pedalRole')) q('pedalRole').onchange = function () { _setAssist('pedalRole', this.value); };
     if (q('judgeWords')) q('judgeWords').onchange = function () { _saveCfg('judgeWords', this.checked); };
     if (q('shake')) q('shake').onchange = function () { _saveCfg('shake', this.checked); };
     if (q('hudScale')) {
@@ -6906,6 +6956,7 @@ function _resetDrumSettings() {
     _saveCfg('hitDetection', true);
     _saveCfg('fx', 'full');
     _setAssist('fillStyle', 'yarg');
+    _setAssist('pedalRole', 'ignore');
     _saveCfg('judgeWords', true);
     _saveCfg('shake', true);
     _saveCfg('hudScale', HUD_SCALE_DEFAULT);
@@ -7024,7 +7075,7 @@ if (typeof module !== 'undefined' && module.exports) {
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
         OVERHIT_MODES, OVERHIT_IDS, _overhitSummary, _runCounts, _setKickOffset,
-        FX_LEVELS, FX_IDS, FX2D, HUD_SCALE_DEFAULT, _fxSettings, _timingRgb, _newSparkPool,
+        FX_LEVELS, FX_IDS, FX2D, PEDAL_ROLES, PEDAL_ROLE_IDS, _pedalAsKick, _padFromMidiFor, HUD_SCALE_DEFAULT, _fxSettings, _timingRgb, _newSparkPool,
         _resolveView, _VALID_VIEWS,
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,

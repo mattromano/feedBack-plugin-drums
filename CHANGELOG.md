@@ -3,6 +3,16 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.10.0
+
+### Added
+- **Hi-hat pedal hits** setting (Plugins → Drums): what pressing the hi-hat pedal (GM 44) counts as. **Ignore (Rock Band)**, the default, as before: never a hit or an overhit. **Play pedal notes**: the chart's hi-hat pedal notes are scored as hi-hat notes, drawn as small pale hi-hat gems, and the pedal (or the hi-hat) hits them. **Second kick**: the pedal scores and sounds as the kick, for left-foot double bass. A Learn / kit mapping for note 44 wins over both. Session `setHatPedalNotes(on)` / `createSession({hatPedalNotes})`; gems carry `pedal`.
+
+### Changed
+- The 2D view draws hi-hat pedal notes only with Play pedal notes (they can't be hit otherwise).
+- The kit card's CC4 switch is renamed "Hi-hat pedal sound".
+- Asset version bumped.
+
 ## 4.9.1
 
 ### Fixed

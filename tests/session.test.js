@@ -1186,3 +1186,22 @@ test('padTiming counts kicks that landed outside the window, and stays quiet whe
     assert.equal(q.padTiming().kickVsHands, -10);
     assert.equal(q.padTiming().suggestKick, null, 'under 15 ms apart: nothing to fix');
 });
+
+test('hi-hat pedal notes: left out by default; setHatPedalNotes scores them as small hi-hat gems', () => {
+    const s = H.createSession(E, { now: () => 0 });
+    s.load({ notes: [w(1, 36), w(1.5, 44), w(2, 38)], chords: [], beats: [] });
+    assert.equal(s.gems.length, 2, 'the pedal note is not charted');
+    assert.equal(s.gems.some(g => g.pedal), false);
+    s.setHatPedalNotes(true);
+    assert.equal(s.hatPedalNotes, true);
+    const pedal = s.gems.find(g => g.pedal);
+    assert.ok(pedal, 'now it is');
+    assert.deepEqual([pedal.t, pedal.kind, pedal.lane], [1.5, 'cymbal', 1]);
+    s.update(1.45);
+    assert.equal(s.hit(1.5, 2, { cymbal: true }).type, 'hit', 'the pedal (as a yellow cymbal) hits it');
+    s.setHatPedalNotes(false);
+    assert.equal(s.gems.length, 2);
+    const s2 = H.createSession(E, { now: () => 0, hatPedalNotes: true });
+    s2.load({ notes: [w(1.5, 44)], chords: [], beats: [] });
+    assert.equal(s2.gems.length, 1, 'set at creation');
+});

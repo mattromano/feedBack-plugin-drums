@@ -1498,7 +1498,9 @@
                     const col = gemColor.copy(base);
                     if (g.accent) col.lerp(white, 0.1);
                     if (g.auto) col.multiplyScalar(0.38);
-                    const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1));
+                    // A hi-hat pedal note: a small, pale hi-hat gem, so it reads as the foot.
+                    if (g.pedal) col.lerp(white, 0.45);
+                    const s = TRACK.gemScale * (g.ghost ? 0.74 : (g.accent ? 1.16 : 1)) * (g.pedal ? 0.66 : 1);
                     if (g.kind === 'kick' || g.kind === 'kick2x') {
                         if (cnt.kick < 128) {
                             const sy = g.kick2x ? 1.35 : 1;

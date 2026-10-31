@@ -1650,7 +1650,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.9.1', '/api/plugins/drums/assets/gamepad-source.js?v=4.9.1']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.10.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.10.0']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;
@@ -2158,4 +2158,26 @@ test('a run with overhits off does not record a best score', () => {
     assert.equal(mod._recordRunBest(session('ignore'), { text: 'HARD' }), null);
     assert.equal(store['drums_best_v1:song.sloppak|HARD'], undefined);
     assert.deepEqual(mod._recordRunBest(session('lenient'), { text: 'HARD' }), { prev: null, isBest: true });
+});
+
+test('hi-hat pedal: Ignore by default; Play pedal notes and Second kick map note 44', () => {
+    const mod = freshPlugin();
+    const E = require('../assets/engine.js');
+    assert.equal(mod._cfg().pedalRole, 'ignore');
+    const pad = mod._padFromMidiFor(E);
+    assert.equal(pad(44), null, 'ignored: neither a hit nor an overhit');
+    assert.deepEqual({ ...pad(38) }, { pad: 1, cymbal: false }, 'other notes as GM');
+    assert.equal(mod._pedalAsKick(44), false);
+    mod._saveCfg('pedalRole', 'notes');
+    assert.deepEqual({ ...pad(44) }, { pad: 2, cymbal: true }, 'a hi-hat pedal note (yellow cymbal)');
+    assert.equal(mod._pedalAsKick(44), false);
+    mod._saveCfg('pedalRole', 'kick');
+    assert.deepEqual({ ...pad(44) }, { pad: 0, cymbal: false }, 'the kick');
+    assert.equal(mod._pedalAsKick(44), true, 'and it sounds as the kick');
+    assert.equal(mod._pedalAsKick(36), false);
+    mod._saveCfg('customMapping', { 44: 'snare' });
+    assert.equal(mod._pedalAsKick(44), false, 'a Learn mapping for 44 wins');
+    mod._saveCfg('pedalRole', 'stomp');
+    assert.equal(mod._cfg().pedalRole, 'ignore', 'unknown roles fall back to Ignore');
+    assert.deepEqual(mod.PEDAL_ROLE_IDS, ['ignore', 'notes', 'kick']);
 });
