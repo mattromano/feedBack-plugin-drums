@@ -3,6 +3,16 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.11.0
+
+### Added
+- **Play style: Freestyle (no score).** A new setting (drums settings, top of Difficulty & assists, and the gear panel) that turns judging off completely: no score, streak, multiplier, star power, MISS, overhit marks, callouts, end card or best score. The notes still scroll to play along to, and your kit still plays its sounds (auto kick / cymbals too).
+- Freestyle rates each hit only by how close it lands to the song's beat (the nearest 8th note, or any chart note on any pad), not by which note you hit. In-time hits burst in the timing colour; loose ones get a small dim flash, never red.
+- A groove meter: the strike line, rails and kick line glow and pulse on the beat while you stay in time, with LOCKED IN, IN THE POCKET, or DRIFTING / RUSHING / DRAGGING when that changes (Judgment words setting). With no input it stays quiet, so playing along to the screen with nothing connected shows just the chart.
+- Freestyle sends no drums judgment events, so core's miss sound never clunks or drops the drum stem. RockHeroSmith (Solo screen or a band) always plays scored.
+- **Freestyle timing feedback** (on by default): turn it off for no timing at all in Freestyle, just the notes and your pads lighting up (no groove glow, words or timing colours).
+- `feedBackDrums.isFreestyle()`: true with the Freestyle play style, so RockHeroSmith leaves a plain drums play alone (no stars bar, results or saved run).
+
 ## 4.10.2
 
 ### Fixed

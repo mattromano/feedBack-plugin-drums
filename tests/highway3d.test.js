@@ -175,9 +175,9 @@ test('hitPop: a hit gem grows and fades over HIT_FX.vanishMs, then is gone', () 
 });
 
 test('normalizeFx: unknown values fall back to the defaults, the HUD scale is clamped', () => {
-    assert.deepEqual(H.normalizeFx(null), { level: 'full', words: true, shake: true, hudScale: H.FX_DEFAULTS.hudScale });
+    assert.deepEqual(H.normalizeFx(null), { level: 'full', words: true, shake: true, groove: true, hudScale: H.FX_DEFAULTS.hudScale });
     assert.deepEqual(H.normalizeFx({ level: 'subtle', words: false, shake: false, hudScale: 9 }),
-        { level: 'subtle', words: false, shake: false, hudScale: 2 });
+        { level: 'subtle', words: false, shake: false, groove: true, hudScale: 2 });
     assert.equal(H.normalizeFx({ level: 'loud' }).level, 'full');
     assert.equal(H.normalizeFx({ hudScale: 0.1 }).hudScale, 0.75);
 });

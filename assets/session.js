@@ -879,6 +879,104 @@
         }
     }
 
+    // ── Freestyle: in time with the song, not note by note ──────────────────
+
+    // Grades (ms from the nearest target), how much each moves the groove level, when the meter
+    // goes idle without hits (s) and how long a new state must hold before it shows (s).
+    const GROOVE = Object.freeze({ lockedMs: 20, inMs: 45, idleSec: 4, holdSec: 0.6, leanMs: 25 });
+
+    // Index of the first entry with time >= t in a sorted list (get(i) -> seconds).
+    function _lowerBound(n, get, t) {
+        let lo = 0, hi = n;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (get(mid) < t) lo = mid + 1; else hi = mid;
+        }
+        return lo;
+    }
+
+    /**
+     * How close a hit at `t` (s) lands to the song's pulse, whatever pad it was: the nearest of
+     * the 8th-note grid from `beats` ([{t}], sorted) and any chart note time (`noteTimes`, sorted
+     * seconds). Returns {offsetMs (+ = late), grade: 'locked'|'in'|'off'}, or null with no targets.
+     */
+    function grooveTap(t, beats, noteTimes, o) {
+        o = o || GROOVE;
+        if (!Number.isFinite(t)) return null;
+        let best = null;
+        const take = (target) => {
+            if (Number.isFinite(target) && (best === null || Math.abs(t - target) < Math.abs(t - best))) best = target;
+        };
+        if (beats && beats.length) {
+            const i = _lowerBound(beats.length, k => beats[k].t, t);
+            for (let k = Math.max(0, i - 1); k <= Math.min(beats.length - 1, i); k++) {
+                take(beats[k].t);
+                if (k + 1 < beats.length) take((beats[k].t + beats[k + 1].t) / 2);
+            }
+        }
+        if (noteTimes && noteTimes.length) {
+            const i = _lowerBound(noteTimes.length, k => noteTimes[k], t);
+            if (i > 0) take(noteTimes[i - 1]);
+            if (i < noteTimes.length) take(noteTimes[i]);
+        }
+        if (best === null) return null;
+        const offsetMs = Math.round((t - best) * 1000) || 0;
+        const a = Math.abs(offsetMs);
+        return { offsetMs, grade: a <= o.lockedMs ? 'locked' : (a <= o.inMs ? 'in' : 'off') };
+    }
+
+    function newGroove() {
+        return { level: 0, lean: 0, offRate: 0, lastTap: -Infinity, at: null, state: 'idle', changedAt: 0, pending: null, pendingAt: 0 };
+    }
+
+    /**
+     * The freestyle groove meter. m: the previous state (or null), tap: a grooveTap result just
+     * played (or null), now: seconds. Returns m updated: level 0..1 (rises while in time, up to
+     * 0.7 on loose hits and on to 1 on tight ones; falls while off; fades out after GROOVE.idleSec without hits), lean (ms, + = late) and state
+     * 'idle' | 'warming' | 'drifting' | 'grooving' | 'locked', which only changes after the new
+     * state held for GROOVE.holdSec (changedAt: when it last did).
+     */
+    function grooveMeter(m, tap, now, o) {
+        o = o || GROOVE;
+        m = m || newGroove();
+        const dt = m.at == null ? 0 : clamp(now - m.at, 0, 1);
+        m.at = now;
+        const idle = now - m.lastTap > o.idleSec;
+        m.level = clamp(m.level - dt * (idle ? 0.5 : 0.04), 0, 1);
+        if (tap) {
+            const off = tap.grade === 'off';
+            // Loose hits ('in') keep you in the pocket but never lock you in: that takes tight ones.
+            if (tap.grade === 'locked') m.level = clamp(m.level + 0.09, 0, 1);
+            else if (off) m.level = clamp(m.level - 0.08, 0, 1);
+            else m.level = Math.max(m.level, Math.min(m.level + 0.05, 0.7));
+            m.offRate = m.offRate * 0.85 + (off ? 0.15 : 0);
+            m.lean = m.lean * 0.8 + (tap.grade === 'locked' ? 0 : tap.offsetMs * 0.2);
+            m.lastTap = now;
+        }
+        const target = now - m.lastTap > o.idleSec ? 'idle'
+            : m.offRate > 0.5 ? 'drifting'
+            : m.level >= 0.75 ? 'locked'
+            : m.level >= 0.4 ? 'grooving' : 'warming';
+        if (target === m.state) m.pending = null;
+        else if (target === 'idle') { m.state = 'idle'; m.pending = null; m.changedAt = now; }
+        else if (m.pending !== target) { m.pending = target; m.pendingAt = now; }
+        else if (now - m.pendingAt >= o.holdSec) { m.state = target; m.pending = null; m.changedAt = now; }
+        return m;
+    }
+
+    /** The word a groove state shows, or null: LOCKED IN, IN THE POCKET, RUSHING / DRAGGING / DRIFTING. */
+    function grooveWord(state, leanMs, o) {
+        o = o || GROOVE;
+        if (state === 'locked') return { word: 'LOCKED IN', color: '#5dffa8' };
+        if (state === 'grooving') return { word: 'IN THE POCKET', color: '#8fe0ff' };
+        if (state === 'drifting') {
+            if (leanMs >= o.leanMs) return { word: 'DRAGGING', color: '#ffb46b' };
+            if (leanMs <= -o.leanMs) return { word: 'RUSHING', color: '#8fb8ff' };
+            return { word: 'DRIFTING', color: '#ffd27a' };
+        }
+        return null;
+    }
+
     // ── Session: the engine for one chart ───────────────────────────────────
 
     function normalizeInputOffset(ms) {
@@ -913,6 +1011,9 @@
             padSamples: { kick: [], hands: [] },  // recent strike offsets (ms, + = late), kick vs the rest
             hatPedalNotes: opts.hatPedalNotes === true,   // score the chart's hi-hat pedal notes
             wire: null,                           // the loaded chart's wire notes (re-decoded on a pedal change)
+            freestyle: opts.freestyle === true,   // Freestyle: no judging, only "in time with the song?"
+            noteTimes: [],                        // sorted chart note times (freestyle targets)
+            groove: null,                         // grooveMeter state (freestyle)
         };
         // Highway time -> player time (the input offset applied).
         const playerTime = (t) => +t - s.offset;
@@ -1002,7 +1103,11 @@
         }
 
         function gemsFor() {
-            return buildGems(s.decoded, { pro: effectivePro(), auto: s.auto });
+            const gems = buildGems(s.decoded, { pro: effectivePro(), auto: s.auto });
+            const times = [];
+            for (const g of gems) if (!times.length || g.t - times[times.length - 1] > 0.0005) times.push(g.t);
+            s.noteTimes = times;
+            return gems;
         }
 
         // Pro drums only when the player wants it and the chart has cymbal markings.
@@ -1042,6 +1147,18 @@
             } catch (_) { /* listener only */ }
         }
 
+        // Advance the groove meter on the wall clock; a state change is queued for the views.
+        function grooveTick(tap) {
+            const prev = s.groove ? s.groove.state : 'idle';
+            s.groove = grooveMeter(s.groove, tap, now() / 1000);
+            const g = s.groove;
+            if (g.state !== prev) {
+                const w = grooveWord(g.state, g.lean);
+                push({ type: 'groove', state: g.state, word: w ? w.word : null, color: w ? w.color : null });
+            }
+            return g;
+        }
+
         function build(fromTime) {
             if (!s.decoded) { s.engine = null; return; }
             let chart = s.decoded;
@@ -1054,12 +1171,15 @@
             const m = s.meta;
             const eopts = { beats: s.rawBeats || [], proDrums: effectivePro() };
             if (s.params) eopts.params = s.params;
-            if (m) {
+            // Freestyle: an engine with no star power or fills that is never fed hits or time, so
+            // the views see plain gems, nothing judged and an empty score.
+            if (m && !s.freestyle) {
                 eopts.starPower = m.starPower;
                 eopts.activation = m.activation;
             }
             const eng = Engine.create(chart, eopts);
             s.bonus = newBonus();   // a new engine starts its score over, and so do the bonuses
+            if (s.freestyle) { s.engine = eng; s.builds++; return; }
             let scoreAtHit = 0;   // engine score after the previous hit (a hit's points for the view's pop)
             eng.on('hit', e => {
                 const nt = Number.isFinite(e.noteTime) ? e.noteTime : e.time;
@@ -1107,6 +1227,7 @@
                 s.events.length = 0;
                 s.bonus = null;   // a new chart: the early/late meter starts over too
                 s.padSamples = { kick: [], hands: [] };
+                s.groove = null;
                 build(undefined);
                 return api;
             },
@@ -1143,6 +1264,15 @@
                 return api;
             },
             get hatPedalNotes() { return s.hatPedalNotes; },
+            /** Freestyle on/off: no judging, only the groove meter. Mid-song changes start over from the current time. */
+            setFreestyle(on) {
+                on = on === true;
+                if (on === s.freestyle) return api;
+                s.freestyle = on;
+                s.groove = null;
+                if (s.decoded) rebuildHere();
+                return api;
+            },
             /** Engine params override (e.g. {hitWindow: {...}}), or null for the defaults. */
             setParams(params) {
                 params = params || null;
@@ -1186,8 +1316,11 @@
                 // than its own time forward to it (YARG QueueInput). Advanced to the frame time,
                 // every hit delivered just after a frame was late by up to a frame (measured
                 // +9 ms median). Misses become final INPUT_GRACE later.
-                s.engine.update(time - INPUT_GRACE);
-                bonusTick(time);
+                if (s.freestyle) grooveTick(null);
+                else {
+                    s.engine.update(time - INPUT_GRACE);
+                    bonusTick(time);
+                }
                 s.lastTime = time;
                 s.lastFrame = frameTime;
             },
@@ -1201,6 +1334,13 @@
                 const kick = (pad | 0) === 0;
                 const t = playerTime(time) - (kick ? s.kickOffset : 0);
                 if (s.lastTime != null && isSeek(s.lastTime, t)) return { type: 'ignored', reason: 'seek' };
+                if (s.freestyle) {
+                    const tap = grooveTap(t, s.beats, s.noteTimes);
+                    if (!tap) return { type: 'ignored', reason: 'no-beats' };
+                    push({ type: 'tap', pad: pad | 0, cymbal: !!o.cymbal, time: t, offsetMs: tap.offsetMs, grade: tap.grade });
+                    grooveTick(tap);
+                    return { type: 'tap', offsetMs: tap.offsetMs, grade: tap.grade };
+                }
                 const r = s.engine.hit(t, pad, { cymbal: !!o.cymbal, velocity: o.velocity });
                 // Per-pad timing: hits, and strikes that missed the window next to a note on their lane.
                 const off = r.type === 'hit' ? r.offset : r.nearOffset;
@@ -1216,6 +1356,7 @@
              * works on charts without fills (with fills, the fill-end note activates it).
              */
             activate(time) {
+                if (s.freestyle) return false;
                 if (!s.engine || !Number.isFinite(+time)) return false;
                 return s.engine.activateStarPower(playerTime(time));
             },
@@ -1270,7 +1411,7 @@
             /** Bonus score on top of the engine's: totals, recent feed, the live solo. */
             getBonus() {
                 const b = s.bonus;
-                if (!b) return null;
+                if (!b || s.freestyle) return null;
                 const t = s.lastTime;
                 const live = t == null ? null : b.solos.find(x => t >= x.start - 0.5 && t < x.end + 0.3);
                 return { total: b.total, timing: b.timing, rolls: b.rolls, solo: b.solo, perfect: b.perfect, dynamics: b.dynamics,
@@ -1278,6 +1419,13 @@
                     offsets: b.offsets.slice(),
                     soloLive: live ? { h: live.h, n: live.n, active: t >= live.start && t < live.end } : null };
             },
+            /** Freestyle groove: {level, lean, state, changedAt (wall s), word}, or null when scored. */
+            groove() {
+                if (!s.freestyle) return null;
+                const g = grooveTick(null);
+                return { level: g.level, lean: g.lean, state: g.state, changedAt: g.changedAt, word: grooveWord(g.state, g.lean) };
+            },
+            get freestyle() { return s.freestyle; },
             get engine() { return s.engine; },
             get gems() { return s.gems; },
             get beats() { return s.beats; },
@@ -1303,6 +1451,7 @@
         padTimingSummary, PAD_TIMING_MIN, PAD_TIMING_GAP_MS,
         formatScore, formatAccuracy, multiplierColor, starProgress, hudModel, starPowerHint,
         JUDGE, halfWindowMs, judgmentFor, streakIntensity, isStreakMilestone, calloutFor,
+        GROOVE, grooveTap, grooveMeter, grooveWord,
         normalizeInputOffset, INPUT_OFFSET_MIN, INPUT_OFFSET_MAX,
         createSession,
     };

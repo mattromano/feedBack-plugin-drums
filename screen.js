@@ -108,6 +108,10 @@ const STORE_KEYS = {
     // What the hi-hat pedal (GM 44) does (PEDAL_ROLES).
     pedalRole:      'drums_hh_pedal_role_v1',
     judgeWords:     'drums_judge_words_v1',
+    // Scored (the game) or Freestyle (no judging, only "in time with the song?"): PLAY_STYLES.
+    playStyle:      'drums_play_style_v1',
+    // Freestyle's timing feedback (groove glow, words, timing-coloured hits); off = notes and lane flashes only.
+    freestyleTiming: 'drums_freestyle_timing_v1',
     shake:          'drums_shake_v1',
     hudScale:       'drums_hud_scale_v1',
     // Extra offset for kick hits only, in ms, on top of the input offset (a kick
@@ -221,6 +225,15 @@ const PEDAL_ROLES = {
     kick:   { name: 'Second kick' },
 };
 const PEDAL_ROLE_IDS = ['ignore', 'notes', 'kick'];
+// Play style. Freestyle judges nothing (no score, misses, star power or end
+// card): the notes scroll to play along to, and hits are only rated by how
+// close they land to the song's beat (session.js grooveTap / grooveMeter).
+// A band lane (RockHeroSmith) always plays scored.
+const PLAY_STYLES = {
+    scored:    { name: 'Scored' },
+    freestyle: { name: 'Freestyle (no score)' },
+};
+const PLAY_STYLE_IDS = ['scored', 'freestyle'];
 const HAT_PEDAL_MIDI = 44;
 const HUD_SCALE_MIN = 0.75, HUD_SCALE_MAX = 2, HUD_SCALE_DEFAULT = 1.25;
 // 2D hit feedback timings (ms) and colours; the 3D view has its own (highway3d.js HIT_FX).
@@ -229,6 +242,7 @@ const FX2D = Object.freeze({
     vanishMs: 110,          // hit gem pop
     burstMs: 320,           // strike-line ring
     judgeMs: 560,
+    grooveMs: 1400,         // Freestyle groove word
     calloutMs: 1500,
     shakeMs: 200,
     bumpMs: 140,
@@ -343,6 +357,8 @@ const _cfg = {
         return Object.prototype.hasOwnProperty.call(PEDAL_ROLES, raw) ? raw : 'ignore';
     })(),
     judgeWords:     _readStore(STORE_KEYS.judgeWords) !== 'false',
+    playStyle:      _readStore(STORE_KEYS.playStyle) === 'freestyle' ? 'freestyle' : 'scored',
+    freestyleTiming: _readStore(STORE_KEYS.freestyleTiming) !== 'false',
     shake:          _readStore(STORE_KEYS.shake) !== 'false',
     hudScale:       _readNum(STORE_KEYS.hudScale, HUD_SCALE_DEFAULT, HUD_SCALE_MIN, HUD_SCALE_MAX),
     showLaneLabels: _readStore(STORE_KEYS.showLaneLabels) !== 'false',
@@ -457,6 +473,7 @@ function _saveCfg(key, val) {
     }
     if (key === 'fillStyle' && val !== 'rb') val = 'yarg';
     if (key === 'pedalRole' && !Object.prototype.hasOwnProperty.call(PEDAL_ROLES, val)) val = 'ignore';
+    if (key === 'playStyle' && val !== 'freestyle') val = 'scored';
     if (key === 'hudScale') {
         const n = Number(val);
         val = Number.isFinite(n) ? Math.max(HUD_SCALE_MIN, Math.min(HUD_SCALE_MAX, n)) : HUD_SCALE_DEFAULT;
@@ -555,7 +572,7 @@ function _setProCymbals(on) {
 function _setAssist(key, val) {
     _saveCfg(key, val);
     const cls = { autoKick: '.drums-auto-kick', autoCymbals: '.drums-auto-cym', timing: '.drums-timing-select',
-        overhits: '.drums-overhits-select' }[key];
+        overhits: '.drums-overhits-select', playStyle: '.drums-play-style' }[key];
     try {
         if (cls) document.querySelectorAll(cls).forEach((sel) => { sel.value = _cfg[key]; });
     } catch (_) { /* no DOM */ }
@@ -641,6 +658,11 @@ function _overhitOptions(current) {
     for (const id of OVERHIT_IDS) names[id] = OVERHIT_MODES[id].name;
     return _optList(OVERHIT_IDS, names, current);
 }
+function _playStyleOptions(current) {
+    const names = {};
+    for (const id of PLAY_STYLE_IDS) names[id] = PLAY_STYLES[id].name;
+    return _optList(PLAY_STYLE_IDS, names, current);
+}
 function _pedalRoleOptions(current) {
     const names = {};
     for (const id of PEDAL_ROLE_IDS) names[id] = PEDAL_ROLES[id].name;
@@ -675,7 +697,7 @@ function _fxOptions(current) {
 }
 // What the views draw for hit feedback (highway3d.js normalizeFx shape).
 function _fxSettings() {
-    return { level: _cfg.fx, words: _cfg.judgeWords, shake: _cfg.shake, hudScale: _cfg.hudScale };
+    return { level: _cfg.fx, words: _cfg.judgeWords, shake: _cfg.shake, hudScale: _cfg.hudScale, groove: _cfg.freestyleTiming };
 }
 function _timingOptions(current) {
     const names = {};
@@ -724,6 +746,11 @@ function _settingControlHtml(id, st) {
                     title="How early or late a hit can be and still count.">
                     Timing
                     <select class="drums-timing-select" aria-label="Hit timing window" style="${_SEL_CSS}width:150px;">${_timingOptions(st.timing)}</select>
+                </label>`;
+    case 'playStyle': return `<label style="${_LBL_CSS}"
+                    title="Scored: the game (score, streak, misses, star power). Freestyle: no score and no misses; the notes scroll to play along, and the highway glows while you're in time with the beat. A band stage always plays scored.">
+                    Play style
+                    <select class="drums-play-style" aria-label="Play style" style="${_SEL_CSS}width:150px;">${_playStyleOptions(st.playStyle)}</select>
                 </label>`;
     case 'overhits': return `<label style="${_LBL_CSS}"
                     title="A pad hit that hits no note. Penalize: it breaks your streak. Lenient: not when it is a flam with a note on another pad (kick + cymbal) or inside a drum fill. Ignore: never (freestyle; the run doesn't set a best score).">
@@ -778,6 +805,7 @@ function _wireSettingControls(root, ctx) {
     on('.drums-chk-pro', 'onchange', (el) => _setProCymbals(el.checked));
     on('.drums-timing-select', 'onchange', (el) => _setAssist('timing', el.value));
     on('.drums-overhits-select', 'onchange', (el) => _setAssist('overhits', el.value));
+    on('.drums-play-style', 'onchange', (el) => _setAssist('playStyle', el.value));
     on('.drums-kick-offset-input', 'onchange', (el) => _setKickOffset(el.value));
     on('.drums-auto-kick', 'onchange', (el) => _setAssist('autoKick', el.value));
     on('.drums-auto-cym', 'onchange', (el) => _setAssist('autoCymbals', el.value));
@@ -1286,7 +1314,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.10.2';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.11.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -2627,7 +2655,28 @@ function _scoreHudModeFor(canvas) {
 function _scoreHudHiddenFor(canvas) { return _scoreHudModeFor(canvas) === true; }
 // Pure: draw the score HUD only with hit detection on and the lane not fully
 // hidden (hidden: a mode; 'score' still draws it, without the score).
-function _shouldDrawScoreHud({ hitDetection, hidden }) { return !!(hitDetection && hidden !== true); }
+function _shouldDrawScoreHud({ hitDetection, hidden, freestyle }) { return !!(hitDetection && hidden !== true && !freestyle); }
+// Pure: Freestyle for a lane: the setting, unless a band or RockHeroSmith
+// scores the lane (any band hide mode, or rockHeroSmith.ownsLane), which
+// always plays scored. RockHeroSmith doesn't adopt a plain play in Freestyle
+// (feedBackDrums.isFreestyle), so a plain play stays Freestyle.
+function _freestyleFor({ playStyle, mode, rhsOwns }) { return playStyle === 'freestyle' && !mode && !rhsOwns; }
+// Pure: the GM note a 2D lane is looked up by for an engine pad (Freestyle hit marks).
+const _PAD_GM = [[36, 36], [38, 38], [48, 42], [45, 51], [41, 49]];
+function _padGm(pad, cymbal) {
+    const r = _PAD_GM[pad | 0];
+    return r ? r[cymbal ? 1 : 0] : -1;
+}
+// Pure: 0..1 pulse peaking on each beat ([{t}], sorted) at song time t (as highway3d.js beatPulse).
+function _beatPulse(beats, t) {
+    if (!beats || beats.length < 2 || !Number.isFinite(t)) return 0;
+    let lo = 0, hi = beats.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (beats[mid].t <= t) lo = mid + 1; else hi = mid; }
+    const i = lo - 1;
+    if (i < 0 || i + 1 >= beats.length) return 0;
+    const len = beats[i + 1].t - beats[i].t;
+    return len > 0 ? Math.exp(-5 * (t - beats[i].t) / len) : 0;
+}
 // Pure: the 2D HUD's boxes, left to right, for a mode.
 function _hud2DBoxes(mode) {
     return mode === 'score' ? ['mult', 'streak', 'sp'] : ['mult', 'score', 'streak', 'stars', 'sp'];
@@ -3649,7 +3698,7 @@ function createFactory(forceView) {
         }
         const hint = _spHintText(_session.meta);
         _view3d.render({ time: t, session: _session, wallNow: wall, hint, difficulty: _badge, inputOffsetMs: _offsetMs,
-            hideScore: _ownHudMode(_highwayCanvas), message: _padStatus || null, fx: _fxSettings() });
+            hideScore: _session.freestyle ? true : _ownHudMode(_highwayCanvas), message: _padStatus || null, fx: _fxSettings() });
         _placeBadge(_view3d.difficultyRect);
         _placeTimingBtn(_view3d.timingRect, _view3d.timingSuggest);
         const hctx = _view3d.hudContext;
@@ -3672,7 +3721,7 @@ function createFactory(forceView) {
                 _offsetMs = _offsetNow();
                 _session = H.createSession(E, { proDrums: _effectivePro({ proCymbals: _cfg.proCymbals, controller: _padCtl }),
                     auto: _auto, params: _timingParams(), inputOffsetMs: _offsetMs, kickOffsetMs: _cfg.kickOffsetMs,
-                    hatPedalNotes: _cfg.pedalRole === 'notes' });
+                    hatPedalNotes: _cfg.pedalRole === 'notes', freestyle: _wantFreestyle() });
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
@@ -3805,8 +3854,21 @@ function createFactory(forceView) {
         if (_session) _session.setInputOffset(_offsetMs);
     }
 
+    // This lane plays Freestyle (the setting, and no band owns it).
+    function _wantFreestyle() {
+        return _freestyleFor({ playStyle: _cfg.playStyle, mode: _ownHudMode(_highwayCanvas), rhsOwns: _rhsOwnsLane(_highwayCanvas) });
+    }
+    function _syncFreestyle() {
+        const want = _wantFreestyle();
+        if (_session && typeof _session.setFreestyle === 'function' && _session.freestyle !== want) {
+            _session.setFreestyle(want);
+            _resetScoring();
+        }
+    }
+
     function _assistsChanged() {
         _syncAuto();
+        _syncFreestyle();
         if (_session) {
             _session.setParams(_timingParams());
             if (typeof _session.setHatPedalNotes === 'function') _session.setHatPedalNotes(_cfg.pedalRole === 'notes');
@@ -4239,8 +4301,11 @@ function createFactory(forceView) {
         _clock.prevWall = _clock.wall;
         _clock.time = t;
         _clock.wall = _now();
+        // A band can take the lane over mid-song (it always plays scored).
+        if (++_freestyleTick % 30 === 0) _syncFreestyle();
         _session.update(t);
     }
+    let _freestyleTick = 0;
 
     // Engine verdicts -> the lane view's hit / miss marks (keyed like the
     // drawn notes: time + GM note).
@@ -4259,6 +4324,10 @@ function createFactory(forceView) {
                     if (ev.type === 'hit' && !ev.auto) _fx2dHit(key, laneIdx, ev, wall);
                     else if (ev.type === 'miss') _fx2dMiss(laneIdx, wall);
                 }
+            } else if (ev.type === 'tap') {
+                _fx2dTap(_songNoteToLaneIdx(_padGm(ev.pad, ev.cymbal)), ev, wall);
+            } else if (ev.type === 'groove') {
+                if (_cfg.judgeWords && _cfg.freestyleTiming && ev.word) _fx2d.judge = { word: ev.word, tag: '', color: ev.color || '#8fe0ff', wall, heat: ev.state === 'locked' ? 1 : 0.4, life: FX2D.grooveMs };
             } else if (ev.type === 'combo-break' && (ev.combo | 0) >= 10 && _cfg.shake) {
                 _fx2d.shakeWall = wall;
                 _fx2d.shakeAmp = (ev.combo | 0) >= 50 ? 5 : 3;
@@ -4284,10 +4353,28 @@ function createFactory(forceView) {
         _laneFlashes.push({ laneIdx, wall, rgb, strong: true });
         if (_cfg.fx === 'off') return;
         _fx2d.pops.set(key, wall);
+        _fx2dBurst(laneIdx, rgb, heat, Math.round((8 + 16 * heat) * (_cfg.fx === 'subtle' ? 0.5 : 1)), wall);
+    }
+
+    // Freestyle: a hit rated only by how close it lands to the beat. Timing
+    // colour when in time (a bigger burst when locked), a dim flash when not.
+    // Never red, no word (the groove word comes from 'groove' events).
+    function _fx2dTap(laneIdx, ev, wall) {
+        if (laneIdx < 0) return;
+        // Timing feedback off: just the lane lighting up, the same for every hit.
+        if (!_cfg.freestyleTiming) { _laneFlashes.push({ laneIdx, wall, rgb: [0.85, 0.9, 1], strong: false }); return; }
+        const off = ev.grade === 'off', tight = ev.grade === 'locked';
+        const rgb = off ? [0.55, 0.58, 0.7] : _timingRgb(ev.offsetMs);
+        _laneFlashes.push({ laneIdx, wall, rgb, strong: !off });
+        if (_cfg.fx === 'off' || off) return;
+        _fx2dBurst(laneIdx, rgb, tight ? 1 : 0.4, Math.round((tight ? 20 : 10) * (_cfg.fx === 'subtle' ? 0.5 : 1)), wall);
+    }
+
+    // Strike-line ring plus n sparks in a lane.
+    function _fx2dBurst(laneIdx, rgb, heat, n, wall) {
         _fx2d.bursts.push({ laneIdx, wall, rgb, heat });
         if (_fx2d.bursts.length > 24) _fx2d.bursts.shift();
         const sp = _fx2d.sparks;
-        const n = Math.round((8 + 16 * heat) * (_cfg.fx === 'subtle' ? 0.5 : 1));
         for (let k = 0; k < n; k++) {
             const i = sp.next;
             sp.next = (sp.next + 1) % sp.n;
@@ -4640,7 +4727,7 @@ function createFactory(forceView) {
             ).join('');
 
         // The settings the quick settings share (same markup and handlers).
-        const sst = { pro: _cfg.proCymbals, timing: _cfg.timing, offset: _cfg.inputOffsetMs,
+        const sst = { playStyle: _cfg.playStyle, pro: _cfg.proCymbals, timing: _cfg.timing, offset: _cfg.inputOffsetMs,
             overhits: _cfg.overhits, kickOffset: _cfg.kickOffsetMs,
             autoKick: _cfg.autoKick, autoCymbals: _cfg.autoCymbals, volume: _cfg.synthVolume };
         // All form controls use classes (not ids) so N panels don't
@@ -4716,6 +4803,7 @@ function createFactory(forceView) {
                         ${_optionsHtml()}
                     </select>
                 </label>
+                ${_settingControlHtml('playStyle', sst)}
                 ${_settingControlHtml('proCymbals', sst)}
                 ${_settingControlHtml('timing', sst)}
                 ${_settingControlHtml('overhits', sst)}
@@ -5032,7 +5120,9 @@ function createFactory(forceView) {
         ctx.stroke();
 
         _drawScrollingNotes(ctx, notes, chords, t, laneLayout, nowLineY, topY, W, H);
-        if (_session && _cfg.hitDetection) _drawStrikeFx(ctx, laneLayout, nowLineY, wallNow);
+        const freestyle = !!(_session && _session.freestyle);
+        if (freestyle) _drawGroove2D(ctx, laneLayout, nowLineY, t, wallNow);
+        if (_session && (_cfg.hitDetection || freestyle)) _drawStrikeFx(ctx, laneLayout, nowLineY, wallNow);
 
         if (_cfg.showLaneLabels) {
             _drawLaneLabels(ctx, laneLayout, nowLineY, H);
@@ -5041,7 +5131,11 @@ function createFactory(forceView) {
 
         let hudLeft = null;
         const hudMode = _ownHudMode(_highwayCanvas);
-        if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: hudMode })) {
+        if (freestyle) {
+            // Freestyle: no score HUD, only the groove word.
+            const last = laneLayout[laneLayout.length - 1];
+            _drawJudge2D(ctx, (laneLayout[0].x + last.x + last.w) / 2, nowLineY, H, wallNow);
+        } else if (_shouldDrawScoreHud({ hitDetection: _cfg.hitDetection, hidden: hudMode })) {
             if (_session) {
                 hudLeft = _drawScoreHud(ctx, W, hudMode, wallNow);
                 const last = laneLayout[laneLayout.length - 1];
@@ -5287,6 +5381,36 @@ function createFactory(forceView) {
 
     // Strike-line bursts (an expanding ring in the hit's timing colour) and
     // the spark pool (additive; sparks rise from the lane and fall back).
+    // Freestyle groove: the strike line glows and the highway edges warm up
+    // while you're in time with the beat, pulsing on each beat.
+    function _drawGroove2D(ctx, laneLayout, nowLineY, t, wall) {
+        if (_cfg.fx === 'off' || !_cfg.freestyleTiming || typeof _session.groove !== 'function') return;
+        const g = _session.groove();
+        if (!g || g.level <= 0.01) return;
+        const lv = g.level * (_cfg.fx === 'subtle' ? 0.6 : 1);
+        const pulse = g.state === 'locked' || g.state === 'grooving' ? _beatPulse(_session.beats, t) : 0;
+        const rgb = g.state === 'locked' ? [0.36, 1, 0.66] : [0.37, 0.85, 1];
+        const x0 = laneLayout[0].x, last = laneLayout[laneLayout.length - 1], x1 = last.x + last.w;
+        const a = lv * (0.45 + 0.4 * pulse);
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const grad = ctx.createLinearGradient(0, nowLineY - 60, 0, nowLineY + 14);
+        grad.addColorStop(0, _rgbStr(rgb[0], rgb[1], rgb[2], 0));
+        grad.addColorStop(1, _rgbStr(rgb[0], rgb[1], rgb[2], 0.35 * a));
+        ctx.fillStyle = grad;
+        ctx.fillRect(x0, nowLineY - 60, x1 - x0, 74);
+        ctx.strokeStyle = _rgbStr(rgb[0], rgb[1], rgb[2], 0.5 + 0.5 * a);
+        ctx.lineWidth = 2 + 4 * a;
+        ctx.beginPath();
+        ctx.moveTo(x0, nowLineY);
+        ctx.lineTo(x1, nowLineY);
+        ctx.stroke();
+        ctx.fillStyle = _rgbStr(rgb[0], rgb[1], rgb[2], 0.5 * a);
+        ctx.fillRect(x0 - 4, 0, 3, nowLineY);
+        ctx.fillRect(x1 + 1, 0, 3, nowLineY);
+        ctx.restore();
+    }
+
     function _drawStrikeFx(ctx, laneLayout, nowLineY, wall) {
         const bursts = _fx2d.bursts;
         for (let i = bursts.length - 1; i >= 0; i--) {
@@ -5331,9 +5455,10 @@ function createFactory(forceView) {
         const j = _fx2d.judge;
         if (!j || !_cfg.judgeWords) return;
         const age = wall - j.wall;
-        if (!(age >= 0 && age < FX2D.judgeMs)) return;
+        const life = j.life || FX2D.judgeMs;
+        if (!(age >= 0 && age < life)) return;
         const pop = Math.max(0, 1 - age / 90);
-        const alpha = age < FX2D.judgeMs * 0.55 ? 1 : 1 - (age - FX2D.judgeMs * 0.55) / (FX2D.judgeMs * 0.45);
+        const alpha = age < life * 0.55 ? 1 : 1 - (age - life * 0.55) / (life * 0.45);
         const size = Math.max(22, Math.min(56, 0.055 * H)) * (1 + 0.18 * j.heat) * (1 + 0.35 * pop);
         const y = nowLineY - Math.max(70, H * 0.16) - age * 0.03;
         ctx.save();
@@ -5756,6 +5881,8 @@ function createFactory(forceView) {
             // Split view has no single end card: a results card for every
             // panel can use window.__drumsPanelResults.
             _onSongEnded = () => {
+                // Freestyle: nothing was scored, so no card and no best score.
+                if (_session && _session.freestyle) return;
                 const adopted = _rhsOwnsLane(_highwayCanvas);
                 const when = { hasSession: !!_session, ssActive: _ssActive(), hidden: _endCardHidden({ mode: _scoreHudModeFor(_highwayCanvas), adopted }),
                     controllerPinned: _controllerPinned(), adopted };
@@ -5970,6 +6097,7 @@ function createFactory(forceView) {
         },
         _results() {
             if (!_session) return null;
+            if (_session.freestyle) return { canvas: _highwayCanvas, freestyle: true };
             const st = _session.getState();
             if (!st) return null;
             const b = _session.getBonus ? _session.getBonus() : null;
@@ -6287,6 +6415,9 @@ if (typeof window !== 'undefined') {
         },
         // The lane's mode: true, false or 'score'.
         isScoreHudHidden: (canvas) => _scoreHudModeFor(canvas),
+        // True when the Play style is Freestyle (no score): RockHeroSmith then
+        // leaves a plain drums play alone instead of adopting it.
+        isFreestyle: () => _cfg.playStyle === 'freestyle',
         // The partial modes setScoreHudHidden takes besides true / false.
         hudModes: () => _HUD_MODES.slice(),
         // The input offset (ms, a finite number, clamped to +-250). No canvas:
@@ -6835,6 +6966,8 @@ function _pageFill() {
     if (q('fx')) q('fx').innerHTML = _fxOptions(_cfg.fx);
     if (q('fillStyle')) q('fillStyle').innerHTML = _fillStyleOptions(_cfg.fillStyle);
     if (q('pedalRole')) q('pedalRole').innerHTML = _pedalRoleOptions(_cfg.pedalRole);
+    if (q('playStyle')) q('playStyle').innerHTML = _playStyleOptions(_cfg.playStyle);
+    if (q('freestyleTiming')) q('freestyleTiming').checked = _cfg.freestyleTiming;
     if (q('judgeWords')) q('judgeWords').checked = _cfg.judgeWords;
     if (q('shake')) q('shake').checked = _cfg.shake;
     if (q('hudScale')) q('hudScale').value = String(Math.round(_cfg.hudScale * 100));
@@ -6925,6 +7058,8 @@ function _pageWire() {
     if (q('fx')) q('fx').onchange = function () { _saveCfg('fx', this.value); };
     if (q('fillStyle')) q('fillStyle').onchange = function () { _setAssist('fillStyle', this.value); };
     if (q('pedalRole')) q('pedalRole').onchange = function () { _setAssist('pedalRole', this.value); };
+    if (q('playStyle')) q('playStyle').onchange = function () { _setAssist('playStyle', this.value); };
+    if (q('freestyleTiming')) q('freestyleTiming').onchange = function () { _saveCfg('freestyleTiming', this.checked); };
     if (q('judgeWords')) q('judgeWords').onchange = function () { _saveCfg('judgeWords', this.checked); };
     if (q('shake')) q('shake').onchange = function () { _saveCfg('shake', this.checked); };
     if (q('hudScale')) {
@@ -6967,6 +7102,8 @@ function _resetDrumSettings() {
     _saveCfg('fx', 'full');
     _setAssist('fillStyle', 'yarg');
     _setAssist('pedalRole', 'ignore');
+    _setAssist('playStyle', 'scored');
+    _saveCfg('freestyleTiming', true);
     _saveCfg('judgeWords', true);
     _saveCfg('shake', true);
     _saveCfg('hudScale', HUD_SCALE_DEFAULT);
@@ -7085,7 +7222,7 @@ if (typeof module !== 'undefined' && module.exports) {
         matchesArrangement: createFactory.matchesArrangement,
         DIFFICULTY_IDS, STORE_KEYS, AUTO_LEVEL_IDS, TIMING_PRESETS, TIMING_IDS,
         OVERHIT_MODES, OVERHIT_IDS, _overhitSummary, _runCounts, _setKickOffset,
-        FX_LEVELS, FX_IDS, FX2D, PEDAL_ROLES, PEDAL_ROLE_IDS, _pedalAsKick, _padFromMidiFor, HUD_SCALE_DEFAULT, _fxSettings, _timingRgb, _newSparkPool,
+        FX_LEVELS, FX_IDS, FX2D, PEDAL_ROLES, PEDAL_ROLE_IDS, PLAY_STYLES, PLAY_STYLE_IDS, _freestyleFor, _padGm, _beatPulse, _pedalAsKick, _padFromMidiFor, HUD_SCALE_DEFAULT, _fxSettings, _timingRgb, _newSparkPool,
         _resolveView, _VALID_VIEWS,
         _bestKey, _recordBest, BEST_PREFIX, _midiOnMessage, _midiDiag, _learnConsume,
         DRUM_KITS, KIT_IDS, DEFAULT_KIT, DRUM_MIDI_NOTES, _drumWafVar, _drumWafUrl, _kitSf, _kitIsSampled, _kitBaseUrl,
