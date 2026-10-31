@@ -64,6 +64,9 @@
     });
 
     // Seeks: a jump larger than this (seconds) rebuilds the engine from the new position.
+    // GM pedal hi-hat. Rock Band has no pedal note, so the engine leaves it out unless
+    // asked (the "Play pedal notes" hi-hat pedal setting).
+    const HAT_PEDAL_MIDI = 44;
     const SEEK_BACK = 0.25;
     const SEEK_FORWARD = 1.5;
     // The engine runs this far (s) behind the frame clock, so a pad hit stamped with its MIDI
@@ -148,6 +151,7 @@
             c.t = n.t;
             c.pad = n.pad | 0;
             c.chartCymbal = !!n.cymbal;   // the chart's cymbal marking, even when non-pro draws it as a pad
+            c.pedal = n.midi === HAT_PEDAL_MIDI;   // a hi-hat pedal note (only decoded when pedal notes are played)
             c.auto = isAutoNote(c.pad, c.chartCymbal, opts && opts.auto);
             gems.push(c);
         }
@@ -907,6 +911,8 @@
             offset: normalizeInputOffset(opts.inputOffsetMs) / 1000,   // input offset (s)
             kickOffset: normalizeInputOffset(opts.kickOffsetMs) / 1000,  // extra offset for kick hits (s)
             padSamples: { kick: [], hands: [] },  // recent strike offsets (ms, + = late), kick vs the rest
+            hatPedalNotes: opts.hatPedalNotes === true,   // score the chart's hi-hat pedal notes
+            wire: null,                           // the loaded chart's wire notes (re-decoded on a pedal change)
         };
         // Highway time -> player time (the input offset applied).
         const playerTime = (t) => +t - s.offset;
@@ -1092,7 +1098,8 @@
             load(chart) {
                 chart = chart || {};
                 const wire = collectWireNotes(chart.notes, chart.chords);
-                s.decoded = Engine.decodeNotes(wire, { kick2x: true });
+                s.wire = wire;
+                s.decoded = Engine.decodeNotes(wire, { kick2x: true, includeHatPedal: s.hatPedalNotes });
                 s.gems = gemsFor();
                 s.rawBeats = Array.isArray(chart.beats) ? chart.beats : [];
                 s.beats = normalizeBeats(s.rawBeats);
@@ -1123,6 +1130,19 @@
                 }
                 return api;
             },
+            /** Score the chart's hi-hat pedal notes (as hi-hat notes); mid-song changes score from the current time. */
+            setHatPedalNotes(on) {
+                on = on === true;
+                if (on === s.hatPedalNotes) return api;
+                s.hatPedalNotes = on;
+                if (s.decoded && s.wire) {
+                    s.decoded = Engine.decodeNotes(s.wire, { kick2x: true, includeHatPedal: on });
+                    s.gems = gemsFor();
+                    rebuildHere();
+                }
+                return api;
+            },
+            get hatPedalNotes() { return s.hatPedalNotes; },
             /** Engine params override (e.g. {hitWindow: {...}}), or null for the defaults. */
             setParams(params) {
                 params = params || null;
@@ -1271,7 +1291,7 @@
     }
 
     return {
-        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, SEEK_BACK, SEEK_FORWARD, INPUT_GRACE,
+        PAD, LANE_NAMES, LANE_COLORS, COLORS, LANE_ID_TO_PAD, HAT_PEDAL_MIDI, SEEK_BACK, SEEK_FORWARD, INPUT_GRACE,
         collectWireNotes, classifyNote, buildGems, visibleRange, normalizeBeats,
         AUTO_LEVELS, normalizeAutoLevel, autoAppliesAt, autoFor, isAutoNote,
         parseDrumTabMeta,
