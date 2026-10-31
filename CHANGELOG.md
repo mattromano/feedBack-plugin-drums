@@ -3,6 +3,17 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.12.0
+
+### Added
+- **Calibrate support** (the main menu's Calibrate, core's Sync Lab):
+  - `drums:judgment` events carry `controllerKey` (the drum controller playing the view; null for the MIDI kit), `input` (`'controller'` or `'kit'`) and `kickOffsetMs` (on kick hits), so the raw timing is `errMs + inputOffsetMs + kickOffsetMs` and each controller is measured on its own.
+  - `feedBackDrums.getControllerOffsets()` / `setControllerOffset(key, ms)` (saved per controller, applied to every live view) and `getKickOffset()` / `setKickOffset(ms)`.
+
+### Changed
+- While Calibrate measures (`window.__drumsCalibrationWindow` set), lanes always judge, even with Play style set to Freestyle.
+- Asset version bumped.
+
 ## 4.11.0
 
 ### Added
