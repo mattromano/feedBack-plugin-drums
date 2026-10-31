@@ -1650,7 +1650,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.10.1', '/api/plugins/drums/assets/gamepad-source.js?v=4.10.1']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.10.2', '/api/plugins/drums/assets/gamepad-source.js?v=4.10.2']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;
@@ -2180,4 +2180,21 @@ test('hi-hat pedal: Ignore by default; Play pedal notes and Second kick map note
     mod._saveCfg('pedalRole', 'stomp');
     assert.equal(mod._cfg().pedalRole, 'ignore', 'unknown roles fall back to Ignore');
     assert.deepEqual(mod.PEDAL_ROLE_IDS, ['ignore', 'notes', 'kick']);
+});
+
+test('_directMidiList: callers asking at the same time share one request', async () => {
+    const mod = freshPlugin();
+    let calls = 0;
+    let release;
+    global.fetch = () => { calls++; return new Promise((r) => { release = () => r({ ok: true, json: async () => ({ available: true, inputs: [{ id: 0, name: 'Kit' }] }) }); }); };
+    const a = mod._directMidiList(), b = mod._directMidiList(), c = mod._directMidiList();
+    assert.equal(calls, 1, 'one request for three callers');
+    release();
+    const [ra, rb, rc] = await Promise.all([a, b, c]);
+    assert.deepEqual([ra.length, rb.length, rc.length], [1, 1, 1]);
+    const later = mod._directMidiList();
+    assert.equal(calls, 2, 'a later call asks again');
+    release();
+    await later;
+    delete global.fetch;
 });

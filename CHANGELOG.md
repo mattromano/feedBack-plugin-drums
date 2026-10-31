@@ -3,6 +3,12 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.10.2
+
+### Fixed
+- Direct (Windows) MIDI: drum views starting up at the same time share one request for the input list instead of one each.
+- Asset version bumped.
+
 ## 4.10.1
 
 ### Fixed

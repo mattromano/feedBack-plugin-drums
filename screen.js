@@ -1286,7 +1286,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.10.1';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.10.2';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -2174,7 +2174,16 @@ function _directMidiInit() {
     return _directPromise;
 }
 // [{id, name}] from routes.py, or null when direct input isn't available here.
-async function _directMidiList() {
+// Callers that ask while a request is out share it: every drum view starting up
+// runs a midi-input discover, which used to fetch the list once per view.
+let _directListInFlight = null;
+function _directMidiList() {
+    if (_directListInFlight) return _directListInFlight;
+    _directListInFlight = _directMidiFetchList();
+    _directListInFlight.then(() => { _directListInFlight = null; }, () => { _directListInFlight = null; });
+    return _directListInFlight;
+}
+async function _directMidiFetchList() {
     try {
         const r = await fetch('/api/plugins/drums/native-midi', { cache: 'no-store' });
         if (!r.ok) return null;
@@ -7098,7 +7107,7 @@ if (typeof module !== 'undefined' && module.exports) {
             _sampleKit = o.kit || null; _kitPlayer = o.player || null;
         },
         _hh, _hhReset, _hhArticulation, _hhLearn, _hhPedalMove, HH_SEMI_NOTE,
-        _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, DIRECT_PROVIDER,
+        _midiMon, _midiMonStart, _midiMonSummary, _directMidiProvider, _directMidiInit, _directMidiList, DIRECT_PROVIDER,
         _autoAt, _laneIsAuto, _timingParams, _autoNotesBetween, _isAutoMidi,
         _engineVelocity, _loadScoring, _setInputOffset, _setSpPad, _spPadName, SP_PAD_CHOICES,
         _loadGamepad, _effectivePro, _effectiveOffset, _freePadWanted, _spHint, _setPadControlsOpen,
