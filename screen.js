@@ -1314,7 +1314,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.11.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.12.0';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -3725,11 +3725,15 @@ function createFactory(forceView) {
                 _chartRefs = null;
                 // Every judged hit as a 'drums:judgment' window event (song
                 // seconds, errMs + = late), for calibration / sync tools.
+                // The offsets in use make it raw: errMs + inputOffsetMs + kickOffsetMs.
+                // controllerKey: the drum controller playing this view (null = the MIDI kit).
                 _session.setOnHit((hit) => {
                     try {
+                        const ctlKey = (_padCtl && _padCtl.controllerKey) || _padKey || null;
                         window.dispatchEvent(new CustomEvent('drums:judgment', { detail: {
                             noteTime: hit.noteTime, time: hit.time, pad: hit.pad, errMs: (hit.time - hit.noteTime) * 1000,
-                            inputOffsetMs: _offsetMs || 0, canvas: _highwayCanvas,
+                            inputOffsetMs: _offsetMs || 0, kickOffsetMs: hit.pad === 0 ? (_cfg.kickOffsetMs || 0) : 0,
+                            controllerKey: ctlKey, input: ctlKey ? 'controller' : 'kit', canvas: _highwayCanvas,
                         } }));
                     } catch (_) { /* listeners only */ }
                 });
@@ -3854,8 +3858,10 @@ function createFactory(forceView) {
         if (_session) _session.setInputOffset(_offsetMs);
     }
 
-    // This lane plays Freestyle (the setting, and no band owns it).
+    // This lane plays Freestyle (the setting, and no band owns it). Never
+    // while Calibrate measures (window.__drumsCalibrationWindow): it needs judgments.
     function _wantFreestyle() {
+        if (+window.__drumsCalibrationWindow > 0) return false;
         return _freestyleFor({ playStyle: _cfg.playStyle, mode: _ownHudMode(_highwayCanvas), rhsOwns: _rhsOwnsLane(_highwayCanvas) });
     }
     function _syncFreestyle() {
@@ -6426,6 +6432,19 @@ if (typeof window !== 'undefined') {
         // offset (saved, as mountQuickSettings), the main view's global offset,
         // else that lane alone (not saved). Returns the offset applied, or null
         // (junk, or a canvas with no drum view other than the main one).
+        // Calibrate (core's Sync Lab): every drum controller's saved offset,
+        // and setting one (applied to every live view). Promises (the gamepad
+        // module loads on demand); setControllerOffset resolves to the saved
+        // value, or null on a bad key or value.
+        getControllerOffsets: () => _loadGamepad().then(({ G }) => Object.assign({}, G.loadSettings().offsetMs))
+            .catch(() => ({})),
+        setControllerOffset: (controllerKey, ms) => {
+            if (typeof controllerKey !== 'string' || !controllerKey || typeof ms !== 'number' || !Number.isFinite(ms)) return Promise.resolve(null);
+            return _loadGamepad().then(() => _applyOffset(ms, controllerKey)).catch(() => null);
+        },
+        // The kick pedal's extra offset (ms, every session).
+        getKickOffset: () => _cfg.kickOffsetMs,
+        setKickOffset: (ms) => (typeof ms === 'number' && Number.isFinite(ms) ? _setKickOffset(ms) : null),
         setInputOffset: (ms, canvas) => {
             if (typeof ms !== 'number' || !Number.isFinite(ms)) return null;
             if (canvas == null) return _setInputOffset(ms);

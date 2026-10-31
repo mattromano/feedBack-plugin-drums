@@ -1518,6 +1518,9 @@ test('pinned lane: the session, drums:judgment and the timing suggestion use the
     assert.ok(judgments.length >= 1, 'a judged hit');
     assert.equal(judgments[0].inputOffsetMs, 20);
     assert.equal(judgments[0].canvas, lane);
+    assert.equal(judgments[0].controllerKey, key, 'Calibrate tells controllers apart');
+    assert.equal(judgments[0].input, 'controller');
+    assert.equal(judgments[0].kickOffsetMs, 0, 'a snare hit');
     // The global offset changing leaves the lane on its controller's offset.
     mod._setInputOffset(10);
     assert.equal(sessions[0].offset[sessions[0].offset.length - 1], 20);
@@ -1538,6 +1541,47 @@ test('pinned lane: the session, drums:judgment and the timing suggestion use the
     free._applyTimingSuggestion(-15);
     assert.equal(mod._cfg().inputOffsetMs, -15);
     free.destroy();
+    v.destroy();
+});
+
+test('Calibrate: with Freestyle on, the calibration window still judges (drums:judgment)', async () => {
+    const key = XBOX.id + '#1';
+    // (Without the window this lane plays Freestyle and judges nothing.)
+    const store = memStore({ drums_play_style_v1: 'freestyle', [GP.SETTINGS_KEY]: JSON.stringify({ offsetMs: { [key]: 20 } }) });
+    const gi = fakeGi([XBOX]);
+    const { api, judgments } = realPlugin({ gi, store });
+    window.__drumsCalibrationWindow = 0.5;
+    const lane = fakeCanvas();
+    api.setController(key, lane);
+    const v = await liveView(lane);
+    await tick();
+    v.draw(drumBundle({ currentTime: 2.02 }));
+    gi.button(4, 1);   // LB = red pad (snare)
+    v.draw(drumBundle({ currentTime: 2.1 }));
+    v.draw(drumBundle({ currentTime: 2.2 }));
+    assert.ok(judgments.length >= 1, 'a judged hit, not a Freestyle tap');
+    assert.equal(judgments[0].controllerKey, key);
+    delete window.__drumsCalibrationWindow;
+    v.destroy();
+});
+
+test('Calibrate API: controller and kick offsets round-trip and reach live views', async () => {
+    const key = XBOX.id + '#1';
+    const gi = fakeGi([XBOX]);
+    const { api, sessions, mod } = realPlugin({ gi, store: memStore() });
+    const lane = fakeCanvas();
+    api.setController(key, lane);
+    const v = await liveView(lane);
+    await tick();
+    assert.equal(await api.setControllerOffset(key, 33), 33);
+    assert.deepEqual(await api.getControllerOffsets(), { [key]: 33 });
+    assert.equal(sessions[0].offset[sessions[0].offset.length - 1], 33, 'the live lane uses it');
+    assert.equal(await api.setControllerOffset('', 5), null);
+    assert.equal(await api.setControllerOffset(key, NaN), null);
+    assert.equal(api.setKickOffset(-12), -12);
+    assert.equal(api.getKickOffset(), -12);
+    assert.equal(mod._cfg().kickOffsetMs, -12);
+    assert.equal(api.setKickOffset('x'), null);
     v.destroy();
 });
 
@@ -1650,7 +1694,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.11.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.11.0']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.12.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.12.0']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;
