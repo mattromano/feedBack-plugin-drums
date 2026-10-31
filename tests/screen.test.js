@@ -667,7 +667,7 @@ test('hit feedback settings: score on unless turned off, effects / words / shake
     const mod = freshPlugin();
     const cfg = mod._cfg();
     assert.equal(cfg.hitDetection, true, 'an unset Score switch means on');
-    assert.deepEqual(mod._fxSettings(), { level: 'full', words: true, shake: true, hudScale: mod.HUD_SCALE_DEFAULT });
+    assert.deepEqual(mod._fxSettings(), { level: 'full', words: true, shake: true, hudScale: mod.HUD_SCALE_DEFAULT, groove: true });
     // A player who turned the score off keeps it off.
     global.window = {};
     global.localStorage = { getItem: (k) => ({ drums_hit_detect: 'false', drums_fx_v1: 'subtle', drums_judge_words_v1: 'false',
@@ -676,7 +676,7 @@ test('hit feedback settings: score on unless turned off, effects / words / shake
     delete require.cache[file];
     const mod2 = require(file);
     assert.equal(mod2._cfg().hitDetection, false);
-    assert.deepEqual(mod2._fxSettings(), { level: 'subtle', words: false, shake: false, hudScale: 2 });
+    assert.deepEqual(mod2._fxSettings(), { level: 'subtle', words: false, shake: false, hudScale: 2, groove: true });
 });
 
 test('_saveCfg validates the hit feedback settings', () => {
@@ -1650,7 +1650,7 @@ test('_loadGamepad loads gamepad.js and gamepad-source.js with the asset version
     delete require.cache[require.resolve(file)];
     const mod = require(file);
     const p = mod._loadGamepad();
-    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.10.2', '/api/plugins/drums/assets/gamepad-source.js?v=4.10.2']);
+    assert.deepEqual(head.map((s) => s.src), ['/api/plugins/drums/assets/gamepad.js?v=4.11.0', '/api/plugins/drums/assets/gamepad-source.js?v=4.11.0']);
     window.DrumsGamepad = GP; window.DrumsGamepadSource = GPS;
     head[0].onload(); head[1].onload();
     const r = await p;

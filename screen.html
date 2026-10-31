@@ -71,6 +71,16 @@
     <section class="dr-card" aria-labelledby="dr-h-play">
         <h3 id="dr-h-play">Difficulty &amp; assists</h3>
         <div class="dr-row">
+            <div><div class="dr-t">Play style</div>
+                <div class="dr-d">Scored is the game: score, streak, misses and star power. Freestyle (no score) judges nothing: no score, no MISS, no end card. The notes still scroll to play along to, and the highway glows and says LOCKED IN or IN THE POCKET while you're in time with the beat, whichever pads you hit. A band stage always plays scored.</div></div>
+            <div class="dr-ctl"><select class="drums-play-style" data-dr="playStyle" aria-label="Play style"></select></div>
+        </div>
+        <div class="dr-row">
+            <div><div class="dr-t">Freestyle timing feedback</div>
+                <div class="dr-d">In Freestyle: the groove glow, LOCKED IN / IN THE POCKET / DRIFTING, and hits coloured by timing. Off: no timing at all, just the notes and your pads lighting up.</div></div>
+            <div class="dr-ctl"><label class="dr-sw"><input type="checkbox" data-dr="freestyleTiming" aria-label="Freestyle timing feedback"><span></span></label></div>
+        </div>
+        <div class="dr-row">
             <div><div class="dr-t">Default difficulty</div>
                 <div class="dr-d">Songs open at this difficulty. Songs without it play Expert. While playing: click the badge, or press D / Shift+D.</div></div>
             <div class="dr-ctl"><select class="drums-difficulty-select" data-dr="difficulty" aria-label="Default drum difficulty"></select></div>

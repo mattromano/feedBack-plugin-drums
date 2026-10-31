@@ -65,6 +65,7 @@
         vanishMs: 110,          // a hit gem pops (grows, fades) and is gone after this
         vanishGrow: 0.55,       // how much a hit gem grows as it pops
         judgeMs: 560,           // judgment word (PERFECT / GREAT / GOOD / MISS) on screen
+        grooveMs: 1400,         // Freestyle groove word (LOCKED IN / IN THE POCKET / DRIFTING ...) on screen
         calloutMs: 1500,        // centre callout (streaks, multiplier, star power)
         shakeMs: 200,           // camera shake when a streak of 10+ breaks
         bumpMs: 140,            // streak / multiplier HUD bump on a hit / tier up
@@ -113,6 +114,21 @@
         return kick ? 26 + Math.round(16 * f) : 14 + Math.round(12 * f);
     }
 
+    // Freestyle groove glow colours (rails / kick line), by groove state.
+    const GROOVE_COLORS = Object.freeze({ grooving: 0x5fd8ff, locked: 0x5dffa8 });
+
+    /** 0..1 pulse that peaks on each beat of `beats` ([{t}], sorted) at song time t and decays within it. */
+    function beatPulse(beats, t) {
+        if (!beats || beats.length < 2 || !Number.isFinite(t)) return 0;
+        let lo = 0, hi = beats.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (beats[mid].t <= t) lo = mid + 1; else hi = mid; }
+        const i = lo - 1;
+        if (i < 0 || i + 1 >= beats.length) return 0;
+        const len = beats[i + 1].t - beats[i].t;
+        if (!(len > 0)) return 0;
+        return Math.exp(-5 * (t - beats[i].t) / len);
+    }
+
     // Player feedback options (screen.js settings): level 'full' | 'subtle' | 'off' scales sparks and
     // the hit-gem pop; words = judgment words; shake = camera shake on a broken streak; hudScale
     // multiplies the HUD size.
@@ -123,6 +139,7 @@
             level: f.level === 'off' || f.level === 'subtle' ? f.level : 'full',
             words: f.words !== false,
             shake: f.shake !== false,
+            groove: f.groove !== false,   // Freestyle timing feedback
             hudScale: f.hudScale > 0 ? clamp(+f.hudScale, 0.75, 2) : FX_DEFAULTS.hudScale,
         };
     }
@@ -799,6 +816,26 @@
                         setCallout(c, w);
                         break;
                     }
+                    case 'tap': {
+                        // Freestyle: a hit graded only by how close it lands to the beat. Never red.
+                        const kick = ev.pad === PAD.KICK;
+                        if (!fx.groove) {   // timing feedback off: the pad lights up, the same for every hit
+                            const pc = padColor(ev.pad, ev.cymbal);
+                            spawnFlash(ev.pad, pc, w, false, pc, sparksFor(kick ? 8 : 4));
+                            break;
+                        }
+                        const th = timingHex(ev.offsetMs);
+                        const tight = ev.grade === 'locked', off = ev.grade === 'off';
+                        const col = padColor(ev.pad, ev.cymbal);
+                        spawnFlash(ev.pad, col, w, tight, kick ? COLORS.kick : th,
+                            sparksFor(off ? 2 : sparkCount(kick, tight ? 30 : 10)));
+                        const fl = flashOf(ev.pad);
+                        fl.wall = off ? w - HIT_FX.flashMs * 0.6 : w; fl.hit = true; fl.mat.color.setHex(off ? 0x8a93b0 : th);
+                        break;
+                    }
+                    case 'groove':
+                        if (fx.words && fx.groove && ev.word) judge = { word: ev.word, tag: '', color: ev.color || '#8fe0ff', born: w, heat: ev.state === 'locked' ? 1 : 0.4, life: HIT_FX.grooveMs };
+                        break;
                     case 'miss': {
                         const fl = flashOf(ev.pad);
                         fl.wall = w; fl.hit = false; fl.mat.color.setHex(HIT_FX.wrong);
@@ -1146,6 +1183,8 @@
                 // The timing meter, multiplier, feeds, solo meter, score pops and toasts belong to the score display.
                 timingRect = null; timingSuggest = null;
                 ctx.shadowBlur = 0;
+                // Freestyle: no score at all, only the groove word (LOCKED IN / IN THE POCKET / DRIFTING ...).
+                if (frame.session && frame.session.freestyle) drawJudge(ctx, wall, scale, (left.x + right.x) / 2, strikeY);
                 return;
             }
 
@@ -1351,9 +1390,10 @@
         function drawJudge(ctx, wall, scale, cx, strikeY) {
             if (!judge || !fx.words) return;
             const age = wall - judge.born;
-            if (!(age >= 0 && age < HIT_FX.judgeMs)) return;
+            const life = judge.life || HIT_FX.judgeMs;
+            if (!(age >= 0 && age < life)) return;
             const pop = clamp(1 - age / 90, 0, 1);
-            const alpha = age < HIT_FX.judgeMs * 0.55 ? 1 : 1 - (age - HIT_FX.judgeMs * 0.55) / (HIT_FX.judgeMs * 0.45);
+            const alpha = age < life * 0.55 ? 1 : 1 - (age - life * 0.55) / (life * 0.45);
             const size = 34 * scale * (1 + 0.18 * (judge.heat || 0)) * (1 + 0.35 * pop);
             const y = strikeY - 150 * scale - age * 0.03 * scale;
             ctx.save();
@@ -1409,6 +1449,18 @@
             railGlowMat.opacity = spIn * (0.55 + 0.35 * spPulse) + (canActivate && !spActive ? 0.18 + 0.12 * spPulse : 0);
             railMat.color.setHex(COLORS.rail).lerp(tmpColor.setHex(COLORS.starPowerEdge), Math.max(spIn, canActivate ? 0.35 : 0));
             dividerMat.color.setHex(0x2a3456).lerp(tmpColor.setHex(COLORS.starPowerEdge), spIn * 0.6);
+            railGlowMat.color.setHex(COLORS.starPowerEdge);
+            // Freestyle groove: the rails and kick line warm up while you're in time, pulsing on the beat.
+            const groove = session && session.freestyle && typeof session.groove === 'function' ? session.groove() : null;
+            if (groove && fx.groove && fx.level !== 'off') {
+                const lv = groove.level * (fx.level === 'subtle' ? 0.6 : 1);
+                const pulse = groove.state === 'locked' || groove.state === 'grooving' ? beatPulse(session.beats, t) : 0;
+                const gc = groove.state === 'locked' ? GROOVE_COLORS.locked : GROOVE_COLORS.grooving;
+                railGlowMat.color.setHex(gc);
+                railGlowMat.opacity = lv * (0.35 + 0.35 * pulse);
+                railMat.color.lerp(tmpColor.setHex(gc), lv * 0.7);
+                dividerMat.color.lerp(tmpColor.setHex(gc), lv * 0.35);
+            }
             // Drum solo: violet wash + rails.
             {
                 const bl = session && session.getBonus ? session.getBonus() : null;
@@ -1495,6 +1547,8 @@
                         continue;
                     }
                     if (since >= HIT_FX.behind) continue;
+                    // Freestyle: nothing is judged, so a note just slips past the line and is gone.
+                    if (session.freestyle && since > 0.12) continue;
                     const isSp = !!(eng && eng.isStarPowerNote(g.id));
                     const base = isSp ? spColor : tmpColor.setHex(g.color);
                     const col = gemColor.copy(base);
@@ -1574,7 +1628,7 @@
             }
             const kk = clamp(1 - (wall - kickTarget.press) / 160, 0, 1);
             kickLineMat.color.setHex(COLORS.kick).lerp(white, 0.45 * kk);
-            kickGlowMat.opacity = 0.22 + 0.5 * kk;
+            kickGlowMat.opacity = 0.22 + 0.5 * kk + (groove && fx.groove && fx.level !== 'off' ? 0.3 * groove.level : 0);
             // Lane flashes (green by timing on a hit, red on a miss / overhit).
             for (let i = 0; i < laneFlashes.length; i++) {
                 const fl = laneFlashes[i];
@@ -1702,7 +1756,7 @@
 
     return {
         TRACK, PAD_SYNTH_MIDI, HIT_FX, FX_DEFAULTS,
-        keyToPad, synthMidiForPad, trailAlpha, trailZ, timingHex, sparkCount, normalizeFx, hitPop,
+        keyToPad, synthMidiForPad, trailAlpha, trailZ, timingHex, sparkCount, normalizeFx, hitPop, beatPulse, GROOVE_COLORS,
         createView,
     };
 });
