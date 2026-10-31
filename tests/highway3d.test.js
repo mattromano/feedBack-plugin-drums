@@ -286,6 +286,30 @@ test('3D view: the multiplier going up gets a callout; an overhit gets a red mar
     } finally { h.done(); }
 });
 
+test('a band lane (hideScore) leaves streak / multiplier callouts to RockHeroSmith', () => {
+    const notes = [];
+    for (let i = 0; i < 12; i++) notes.push({ t: 1 + i * 0.25, s: 1, f: 14 });
+    const texts = [];
+    const ctx = stub();
+    ctx.fillText = (t) => texts.push(String(t));
+    ctx.strokeText = () => {};
+    ctx.measureText = (t) => ({ width: String(t).length * 7 });
+    const hudCanvas = stub();
+    hudCanvas.getContext = () => ctx;
+    const h = sceneHarness(notes, { hudCanvas });
+    try {
+        for (let i = 0; i < 10; i++) { h.to(1 + i * 0.25 - 0.01); h.hit(1 + i * 0.25, 1); }
+        h.to(1 + 9 * 0.25);
+        const wall = (1 + 9 * 0.25) * 1000 + 50;
+        texts.length = 0;
+        h.view.render({ time: 1 + 9 * 0.25, session: h.s, wallNow: wall, hideScore: 'score' });
+        assert.ok(!texts.includes('x2 MULTIPLIER'), 'no callout on a band lane');
+        texts.length = 0;
+        h.view.render({ time: 1 + 9 * 0.25, session: h.s, wallNow: wall });
+        assert.ok(texts.includes('x2 MULTIPLIER'), 'the callout on a lane of its own');
+    } finally { h.done(); }
+});
+
 test('drawHud with frame.hideScore draws only the difficulty badge and keeps its click target', () => {
     const texts = [];
     const ctx = stub();

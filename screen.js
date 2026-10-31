@@ -1286,7 +1286,7 @@ function _dropScript(url) {
 // use. One shared promise, so N instances never race on the same tags.
 
 const PLUGIN_ID = 'drums';
-const ASSET_VERSION = '4.10.0';   // cache-buster for the lazily loaded files
+const ASSET_VERSION = '4.10.1';   // cache-buster for the lazily loaded files
 const THREE_URL = '/static/vendor/three/three.module.min.js';
 const PLUGIN_ASSETS = '/api/plugins/' + PLUGIN_ID + '/assets/';
 
@@ -5037,7 +5037,8 @@ function createFactory(forceView) {
                 hudLeft = _drawScoreHud(ctx, W, hudMode, wallNow);
                 const last = laneLayout[laneLayout.length - 1];
                 _drawJudge2D(ctx, (laneLayout[0].x + last.x + last.w) / 2, nowLineY, H, wallNow);
-                if (hudMode !== true) _drawCallout2D(ctx, W, H, wallNow);
+                // A band lane (RockHeroSmith's own callouts) skips ours.
+                if (!hudMode) _drawCallout2D(ctx, W, H, wallNow);
             } else if ((_hits + _misses) > 0 && !hudMode) _drawAccuracyHUD(ctx, W, H);
         }
 

@@ -1308,9 +1308,11 @@
 
             // Centre callouts (streaks, multiplier, star power) and toasts (solo, bonuses): they pop
             // in big and settle. A plain message or the star power hint fills in when neither is up.
+            // A band lane (hideScore: RockHeroSmith shows the score and its own streak / star power
+            // callouts) skips these callouts, so they don't stack on the band's.
             let msg = null;
             if (frame.message) msg = { text: frame.message, color: '#c8d0ee', alpha: 1, size: 26, pop: 0 };
-            else if (callout && wall - callout.born < HIT_FX.calloutMs) {
+            else if (callout && !frame.hideScore && wall - callout.born < HIT_FX.calloutMs) {
                 const age = wall - callout.born;
                 msg = { text: callout.text, sub: callout.sub, color: callout.color, size: callout.rank >= 3 ? 44 : 38,
                     alpha: clamp(1 - (age - (HIT_FX.calloutMs - 400)) / 400, 0, 1), pop: clamp(1 - age / 160, 0, 1) };
