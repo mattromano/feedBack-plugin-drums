@@ -3,6 +3,12 @@
 All notable changes to the Drum Highway plugin. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow `plugin.json`.
 
+## 4.9.1
+
+### Fixed
+- Auto kick and auto cymbals always play their drum sound. Muted pads (`setPadSound({ muted: true })`, RockHeroSmith's Rock Band sound, `window.__drumsMutePads`) silenced them too, so in Rock Band sound, where the drum stem drops out on a miss, the kick and cymbals the game plays for you went dead. Pads you hit stay muted; the Auto note volume slider sets the auto notes.
+- Asset version bumped.
+
 ## 4.9.0
 
 ### Added

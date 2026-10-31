@@ -98,7 +98,7 @@ test('window.__drumsMutePads stays an alias of the pad mute', () => {
     assert.equal(window.__drumsMutePads, true);
 });
 
-test('muted pads: no pad hit sound and no auto notes', () => {
+test('muted pads: no pad hit sound, but auto notes still play', () => {
     const { api, mod } = freshPlugin();
     const played = [];
     const ctx = { currentTime: 10, state: 'running' };
@@ -113,10 +113,10 @@ test('muted pads: no pad hit sound and no auto notes', () => {
     window.highway = { getTime: () => 0.98 };
     const w = (t, midi) => ({ t, s: (midi / 24) | 0, f: midi % 24 });
     mod._autoSchedule([w(1.0, 36)], [], { kick: true, cymbals: false }, 1);
-    assert.equal(played.length, 0, 'auto kick silent');
+    assert.deepEqual(played.map(s => s.midi), [36], 'the auto kick plays (the game plays it for you)');
     api.setPadSound({ muted: false });
     mod._synthDrumHit(38, 100);
-    assert.equal(played.length, 1, 'unmuted: the pad sounds');
+    assert.deepEqual(played.map(s => s.midi), [36, 38], 'unmuted: the pad sounds');
 });
 
 // ── drums:bonus ──
